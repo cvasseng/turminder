@@ -1,0 +1,8 @@
+dist/
+node_modules/
+*.md
+
+# The desktop shell (§28.3): Rust, a lockfile, generated icons, and a page
+# with its own house style. The service's formatter does not reach in.
+app/
+.playwright-mcp/

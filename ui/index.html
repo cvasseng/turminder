@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Turminder</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <!-- Until this browser has a device token it gets this and nothing else.
+         Two shapes (§24.3): a scan is the way in wherever some device already
+         holds a token, and the box you type one into belongs to the single
+         install where none does — there, and only there, is the terminal the
+         only door. `linked` from /healthz (App. E) picks between them. -->
+    <div id="gate">
+      <form id="gate-form">
+        <h1>Turminder</h1>
+        <p class="gate-lede">
+          This device needs a device token before it can talk to your assistant.
+        </p>
+        <div id="gate-error" role="alert"></div>
+        <div id="gate-pair">
+          <button type="button" id="gate-pair-start">Connect this device</button>
+          <p class="gate-hint" id="gate-pair-hint">
+            A prompt appears on a device that is already linked. Approve it there and this one
+            is in &mdash; nothing to type here, nothing to scan.
+          </p>
+          <!-- The waiting half: the code, big enough to check against the
+               prompt from across a desk. -->
+          <div id="gate-code-box" hidden>
+            <p class="gate-label">Approve this on your other device</p>
+            <p id="gate-said"><strong id="gate-code">&hellip;</strong></p>
+            <p class="gate-hint" id="gate-wait">Waiting for approval&hellip;</p>
+            <p class="gate-hint">
+              No prompt? Say &ldquo;connect this device, the code is&hellip;&rdquo; to your
+              assistant instead.
+            </p>
+            <button type="button" id="gate-pair-cancel">Cancel</button>
+          </div>
+          <button type="button" id="gate-manual">Enter a token by hand</button>
+        </div>
+        <div id="gate-entry" hidden>
+          <label class="gate-field">
+            <span class="gate-label">Device token</span>
+            <span class="gate-input">
+              <input
+                id="gate-token"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="paste it here"
+              />
+              <button
+                type="button"
+                id="gate-reveal"
+                class="icon"
+                data-icon="eye"
+                title="Show the token"
+                aria-label="Show the token"
+              ></button>
+            </span>
+          </label>
+          <p class="gate-hint" id="gate-cli-hint" hidden>
+            Nothing is linked yet, so there is nobody to ask: mint a token in the terminal with
+            <code>turminder token create ui</code> — or copy the one printed on first run.
+          </p>
+          <button type="submit" id="gate-submit">Connect</button>
+        </div>
+      </form>
+    </div>
+    <!-- Every yes/no the page asks. Native confirm() is unstyleable, blocks the
+         event loop, and is suppressed outright in some contexts. -->
+    <dialog id="ask">
+      <form method="dialog" id="ask-form">
+        <div id="ask-title"></div>
+        <div id="ask-body"></div>
+        <div id="ask-actions">
+          <button type="submit" value="cancel" id="ask-cancel" class="secondary">Cancel</button>
+          <button type="submit" value="ok" id="ask-ok">OK</button>
+        </div>
+      </form>
+    </dialog>
+    <!-- Devices and access tokens (§24). Values are never listed here: the
+         server has only hashes, so there is nothing to show but metadata —
+         except in the one moment a new token is revealed. -->
+    <dialog id="devices">
+      <div id="devices-head">
+        <h2>Devices</h2>
+        <button
+          type="button"
+          id="devices-close"
+          class="icon"
+          data-icon="x"
+          title="Close"
+          aria-label="Close"
+        ></button>
+      </div>
+      <div id="device-list"></div>
+      <form id="device-add">
+        <h3>Connect a device</h3>
+        <div class="device-fields">
+          <input
+            id="device-name"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="phone"
+            aria-label="Device name"
+          />
+          <input
+            id="device-label"
+            type="text"
+            autocomplete="off"
+            placeholder="label (optional)"
+            aria-label="Device label"
+          />
+          <button type="submit" id="device-create">Create</button>
+        </div>
+        <p class="device-hint">
+          The token is shown once, here. Nothing on the server can show it again — if it is
+          lost, revoke the device and make a new one.
+        </p>
+        <div id="device-error" role="alert"></div>
+      </form>
+      <div id="device-reveal" hidden>
+        <h3 id="reveal-title">New token</h3>
+        <div id="reveal-qr"></div>
+        <div id="reveal-row">
+          <code id="reveal-token"></code>
+          <button type="button" id="reveal-copy" class="secondary">Copy</button>
+        </div>
+        <p id="reveal-hint" class="device-hint"></p>
+      </div>
+    </dialog>
+    <!-- Below the sheet threshold (App. A) the side panes overlay the
+         transcript; this is what you tap to dismiss them. Inert and invisible
+         at wider widths, where the panes are columns again. -->
+    <button id="scrim" type="button" tabindex="-1" aria-hidden="true"></button>
+    <aside id="sidebar">
+      <header>
+        <h1>Turminder</h1>
+        <button
+          id="collapse"
+          class="icon"
+          data-icon="panel-close"
+          title="Collapse the sidebar"
+          aria-label="Collapse the sidebar"
+        ></button>
+        <div id="whoami">
+          <div id="instance">…</div>
+          <button
+            id="forget-token"
+            class="icon"
+            data-icon="logout"
+            title="Sign out — this browser will need the device token again"
+            aria-label="Sign out"
+          ></button>
+        </div>
+      </header>
+      <div id="conversations"></div>
+      <footer>
+        <button
+          id="new"
+          class="icon"
+          data-icon="plus"
+          title="New conversation"
+          aria-label="New conversation"
+        ></button>
+        <button
+          id="show-archived"
+          class="icon"
+          data-icon="eye-off"
+          title="Show archived conversations"
+          aria-label="Show archived conversations"
+          aria-pressed="false"
+        ></button>
+        <span class="spacer"></span>
+        <button
+          id="embeds-toggle"
+          class="icon"
+          data-icon="layout"
+          title="No views yet"
+          aria-label="Show the views in this conversation"
+          aria-pressed="false"
+          disabled
+        ></button>
+        <button
+          id="files-toggle"
+          class="icon"
+          data-icon="folder"
+          title="Show the shared workspace"
+          aria-label="Show the shared workspace"
+          aria-pressed="false"
+        ></button>
+        <button
+          id="devices-toggle"
+          class="icon"
+          data-icon="key"
+          title="Devices and access tokens"
+          aria-label="Devices and access tokens"
+        ></button>
+      </footer>
+    </aside>
+    <section id="files">
+      <header>
+        <h2>Files</h2>
+        <button
+          id="files-refresh"
+          class="icon"
+          data-icon="refresh"
+          title="Reload the file list"
+          aria-label="Reload the file list"
+        ></button>
+        <button
+          id="files-close"
+          class="icon"
+          data-icon="x"
+          title="Hide the file panel"
+          aria-label="Hide the file panel"
+        ></button>
+      </header>
+      <div id="file-list"></div>
+      <div id="file-view">
+        <div id="file-bar">
+          <button
+            id="file-back"
+            class="icon"
+            data-icon="arrow-left"
+            title="Back to the file list"
+            aria-label="Back to the file list"
+          ></button>
+          <span id="file-name"></span>
+          <span id="file-status"></span>
+          <span id="file-actions">
+            <button
+              id="file-edit"
+              class="icon"
+              data-icon="pencil"
+              title="Edit this file"
+              aria-label="Edit this file"
+            ></button>
+            <button
+              id="file-save"
+              class="icon"
+              data-icon="check"
+              title="Save changes"
+              aria-label="Save changes"
+            ></button>
+            <button
+              id="file-cancel"
+              class="icon"
+              data-icon="x"
+              title="Discard changes"
+              aria-label="Discard changes"
+            ></button>
+          </span>
+        </div>
+        <div id="file-body"></div>
+        <textarea id="file-editor" spellcheck="false"></textarea>
+      </div>
+    </section>
+    <main>
+      <div id="status">
+        <button
+          id="expand"
+          class="icon"
+          data-icon="panel-open"
+          title="Show the sidebar"
+          aria-label="Show the sidebar"
+        ></button>
+        <span class="badge" id="badge"></span>
+        <span class="spacer"></span>
+        <!-- The model selector (§10.6): only rendered with a choice to make. -->
+        <span id="model-selector" hidden></span>
+        <span id="status-text"></span>
+        <span class="dot" id="status-dot"></span>
+      </div>
+      <div id="messages"></div>
+      <!-- Zero-height on purpose: the button inside it floats over the bottom of
+           the transcript without the layout depending on how tall the composer
+           happens to be. -->
+      <div id="jump-anchor">
+        <button id="jump" type="button" hidden></button>
+      </div>
+      <!-- Pending attachments (§26.2): thumbnails of what the next message
+           will carry, removable until it is sent. -->
+      <div id="attachments" hidden></div>
+      <form id="composer">
+        <input id="attach-input" type="file" accept="image/*" multiple hidden />
+        <button
+          type="button"
+          id="attach"
+          class="icon"
+          data-icon="paperclip"
+          title="Attach an image"
+          aria-label="Attach an image"
+        ></button>
+        <textarea
+          id="input"
+          placeholder="Say something. Enter sends, shift+enter for a newline."
+          autofocus
+        ></textarea>
+        <button
+          type="submit"
+          id="send"
+          class="icon send"
+          data-icon="send"
+          title="Send (Enter)"
+          aria-label="Send"
+        ></button>
+      </form>
+      <div id="usage" title="Context use and cost of the last turn"></div>
+    </main>
+    <section id="embeds">
+      <header>
+        <h2>Views</h2>
+        <button
+          id="embeds-refresh"
+          class="icon"
+          data-icon="refresh"
+          title="Reload the list"
+          aria-label="Reload the list"
+        ></button>
+        <button
+          id="embeds-close"
+          class="icon"
+          data-icon="x"
+          title="Hide the views panel"
+          aria-label="Hide the views panel"
+        ></button>
+      </header>
+      <div id="embed-list"></div>
+    </section>
+    <script src="/vendor/marked.umd.js"></script>
+    <script src="/connect.js"></script>
+    <script src="/greeting.js"></script>
+    <script src="/preview.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

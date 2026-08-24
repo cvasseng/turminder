@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Turminder — connect</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="options">
+    <div class="head"><strong>Connect this browser</strong></div>
+
+    <p class="dim">
+      Say where the assistant lives, then connect: a prompt appears on a device that is already
+      linked, and approving it there lets this browser in.
+    </p>
+
+    <label class="note-label" for="gateway">Gateway URL</label>
+    <input id="gateway" class="note" spellcheck="false" placeholder="http://localhost:7787" />
+
+    <div class="row">
+      <button id="pair-btn">Connect this browser</button>
+      <button id="forget" class="ghost">Forget</button>
+    </div>
+
+    <div id="status" class="status" hidden></div>
+
+    <!-- The waiting half: the code to check against the prompt. -->
+    <div id="pair-code" class="code-box" hidden>
+      <label class="note-label">Approve this on your other device</label>
+      <div id="pair-value" class="pair-code">…</div>
+      <button type="button" id="pair-cancel" class="ghost">Cancel</button>
+    </div>
+
+    <!-- The paths that do not need another screen: a link the assistant
+         answered with, or the two values by hand. -->
+    <details id="manual">
+      <summary class="dim">Other ways in</summary>
+
+      <label class="note-label" for="connect">Connect link</label>
+      <input
+        id="connect"
+        class="note"
+        spellcheck="false"
+        placeholder="http://host:7787/#connect=…&amp;device=browser"
+      />
+
+      <label class="note-label" for="token">Device token</label>
+      <input id="token" class="note" type="password" autocomplete="off" spellcheck="false" />
+
+      <div class="row">
+        <button id="connect-btn">Use this token</button>
+      </div>
+    </details>
+
+    <script src="options.js"></script>
+  </body>
+</html>

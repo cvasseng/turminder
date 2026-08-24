@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Turminder</title>
+    <style>
+      /* The shell's only screen: pick a mode, then either boot the bundled
+         service or point at a remote one. Everything after this is the
+         service's own UI, served from whichever box answers (§28.3). */
+      :root {
+        --bg: #101214;
+        --panel: #171a1d;
+        --panel-hi: #1d2226;
+        --line: #262b30;
+        --text: #dfe3e7;
+        --dim: #8b949e;
+        --accent: #7fb2f0;
+        --bad: #e06c75;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: var(--bg);
+        color: var(--text);
+        font:
+          15px/1.55 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+      }
+      main {
+        width: min(520px, calc(100% - 48px));
+        padding: 32px 0;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 8px;
+      }
+      p {
+        color: var(--dim);
+        font-size: 13px;
+        line-height: 1.6;
+        margin: 0 0 18px;
+      }
+      /* Scoped to the text field on purpose: an unscoped `input` rule also
+         stretches the autostart checkbox to the full column and shoves its
+         label off the edge. */
+      input[type='text'] {
+        width: 100%;
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 9px 10px;
+        font: inherit;
+        font-size: 13px;
+      }
+      button {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 8px 14px;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) {
+        border-color: var(--accent);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      /* The two mode cards. Each says what it does and who it is for, because
+         "bundled" and "connect" mean nothing to the person this tier is for. */
+      .choice {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 14px 16px;
+        margin-bottom: 10px;
+        background: var(--panel);
+      }
+      .choice:hover:not(:disabled) {
+        background: var(--panel-hi);
+      }
+      .choice b {
+        display: block;
+        font-weight: normal;
+        color: var(--text);
+        margin-bottom: 4px;
+      }
+      .choice span {
+        display: block;
+        color: var(--dim);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 10px;
+      }
+      code {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        padding: 1px 5px;
+        color: var(--text);
+        user-select: all;
+      }
+      .hint {
+        font-size: 11px;
+        margin-top: 20px;
+      }
+      #error {
+        color: var(--bad);
+        font-size: 12px;
+        margin-top: 10px;
+        min-height: 16px;
+      }
+      label.check {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        font-size: 12px;
+        color: var(--dim);
+        margin-top: 20px;
+      }
+      .pane[hidden] {
+        display: none;
+      }
+      .back {
+        margin-top: 18px;
+        background: none;
+        border: none;
+        color: var(--dim);
+        font-size: 12px;
+        padding: 0;
+        text-decoration: underline;
+      }
+      #bootstate {
+        color: var(--text);
+        font-size: 13px;
+        min-height: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <!-- First run: what is this install going to be? -->
+      <section class="pane" id="pane-choose" hidden>
+        <h1>Set up Turminder</h1>
+        <p>
+          Turminder has two halves: the assistant itself, which runs quietly and holds all
+          your data, and this window, which talks to it. Where should the assistant run?
+        </p>
+        <button class="choice" id="pick-bundled">
+          <b>On this computer</b>
+          <span
+            >Turminder runs itself, here, in the background. Nothing else to install and
+            nothing leaves this machine. Pick this if you are not sure.</span
+          >
+        </button>
+        <button class="choice" id="pick-connect">
+          <b>On another computer I already run it on</b>
+          <span
+            >This window becomes a second screen onto a Turminder already running on a
+            server, a NAS, or another desktop.</span
+          >
+        </button>
+        <div id="error-choose" class="pane"></div>
+      </section>
+
+      <!-- Bundled mode, coming up. -->
+      <section class="pane" id="pane-boot" hidden>
+        <h1>Starting Turminder</h1>
+        <p id="bootstate">preparing&hellip;</p>
+        <div id="error-boot"></div>
+        <button class="back" id="boot-back" hidden>Start over</button>
+      </section>
+
+      <!-- Connect mode: point at a service elsewhere. -->
+      <section class="pane" id="pane-connect" hidden>
+        <h1>Point this app at your Turminder</h1>
+        <p>
+          Ask your assistant to connect this computer and paste the link it answers with
+          below &mdash; the line under the QR square. (On a server you have not onboarded
+          yet, <code>turminder token create desktop --qr</code> in the terminal mints the
+          same link.) The key inside it stays on this machine.
+        </p>
+        <input
+          id="url"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="http://192.168.0.5:7787/#connect=&hellip;&amp;device=desktop"
+        />
+        <div class="row">
+          <button id="connect">Connect</button>
+          <span id="state" style="font-size: 12px; color: var(--dim)"></span>
+        </div>
+        <div id="error"></div>
+        <label class="check">
+          <input id="autostart" type="checkbox" />
+          <span>Start Turminder when I log in</span>
+        </label>
+        <p class="hint">
+          Closing this window leaves Turminder in the tray, so reminders still reach you.
+          Use Quit in the tray menu to stop it.
+        </p>
+        <button class="back" id="connect-back">Back</button>
+      </section>
+    </main>
+    <script>
+      // `window.__TAURI__` exists only because tauri.conf.json sets
+      // app.withGlobalTauri (it defaults to off). It went missing once, and the
+      // symptom was buttons that did nothing at all — the throw happened before
+      // any handler was bound, so there was no UI left to report it and no
+      // console anybody was watching. Hence: check first, say so on the screen,
+      // and never let this screen fail mute again.
+      const bridge = window.__TAURI__;
+      const $ = (id) => document.getElementById(id);
+      const PANES = ['choose', 'boot', 'connect'];
+      const show = (name) => {
+        for (const pane of PANES) $(`pane-${pane}`).hidden = pane !== name;
+      };
+      const say = (id, e) => {
+        $(id).textContent = String(e && e.message ? e.message : e);
+      };
+
+      if (!bridge) {
+        show('choose');
+        say(
+          'error-choose',
+          'This build cannot reach the app shell (withGlobalTauri is off), so none of ' +
+            'these buttons will work. That is a packaging bug, not something you can ' +
+            'fix from here.',
+        );
+        for (const b of document.querySelectorAll('button')) b.disabled = true;
+      } else {
+        const invoke = bridge.core.invoke;
+
+        /* ── bundled mode ─────────────────────────────────────────────────── */
+
+        // Boot progress arrives as events because booting a service takes long
+        // enough that a spinner with no words is indistinguishable from a hang.
+        const renderBoot = (state) => {
+          if (!state) return;
+          if (state.phase === 'failed') {
+            $('bootstate').textContent = 'Turminder could not start.';
+            say('error-boot', state.message);
+            $('boot-back').hidden = false;
+            return;
+          }
+          $('bootstate').textContent = state.message;
+          $('error-boot').textContent = '';
+        };
+        bridge.event.listen('sidecar://state', ({ payload }) => renderBoot(payload));
+
+        $('pick-bundled').onclick = async () => {
+          show('boot');
+          // The window navigates to the service once it is up, so there is
+          // deliberately nothing to do after this resolves.
+          try {
+            await invoke('choose_bundled');
+          } catch (e) {
+            say('error-boot', e);
+            $('boot-back').hidden = false;
+          }
+        };
+
+        /* ── connect mode ─────────────────────────────────────────────────── */
+
+        $('pick-connect').onclick = async () => {
+          try {
+            await invoke('choose_connect');
+            show('connect');
+            $('url').focus();
+          } catch (e) {
+            say('error-choose', e);
+          }
+        };
+
+        const connect = async () => {
+          const url = $('url').value.trim();
+          if (!url) {
+            say('error', 'Paste the connect link first.');
+            return;
+          }
+          $('connect').disabled = true;
+          $('error').textContent = '';
+          $('state').textContent = 'checking…';
+          try {
+            const device = await invoke('connect_to', { url });
+            $('state').textContent = `connected as ${device}`;
+          } catch (e) {
+            say('error', e);
+            $('state').textContent = '';
+          } finally {
+            $('connect').disabled = false;
+          }
+        };
+
+        $('connect').onclick = connect;
+        $('url').addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') connect();
+        });
+        $('autostart').onchange = () =>
+          invoke('set_autostart', { enabled: $('autostart').checked }).catch((e) =>
+            say('error', e),
+          );
+
+        /* ── starting over ────────────────────────────────────────────────── */
+
+        const startOver = () => {
+          invoke('forget')
+            .then(() => {
+              show('choose');
+              $('boot-back').hidden = true;
+              $('error-boot').textContent = '';
+            })
+            .catch((e) => say('error-boot', e));
+        };
+        $('boot-back').onclick = startOver;
+        $('connect-back').onclick = startOver;
+
+        /* ── which screen is this? ────────────────────────────────────────── */
+
+        invoke('status')
+          .then((s) => {
+            // mode set + no window navigation means the shell is mid-boot
+            // (bundled) or has nothing stored yet (connect).
+            show(s.mode === 'bundled' ? 'boot' : s.mode === 'connect' ? 'connect' : 'choose');
+            // The boot starts before this page exists, so its early events —
+            // including a failure — are emitted with nobody subscribed. Ask for
+            // the state as well as listening for it, or a build that dies early
+            // leaves this screen saying "preparing…" for good.
+            return invoke('boot_state');
+          })
+          .then((state) => {
+            renderBoot(state);
+            return invoke('autostart_enabled');
+          })
+          .then((on) => {
+            $('autostart').checked = on;
+          })
+          .catch((e) => {
+            show('choose');
+            say('error-choose', e);
+          });
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,194 @@
+/* The chat UI's palette (ui/style.css), because this is the same assistant
+   wearing a different window. Nothing here is shared at runtime — a popup
+   cannot reach the service's stylesheet, and one 90-line file is a better
+   trade than a fetch that fails when the gateway is down. */
+:root {
+  --bg: #101214;
+  --panel: #171a1d;
+  --line: #262b30;
+  --text: #dfe3e7;
+  --dim: #8b949e;
+  --accent: #7fb2f0;
+  --warn: #e0a458;
+  --bad: #e06c75;
+  --ok: #86c06c;
+  color-scheme: dark;
+}
+* {
+  box-sizing: border-box;
+}
+/* An author `display` (.row's flex, .note-label's block) silently outranks the
+   UA's [hidden] rule — the pairing gate hides those exact elements. */
+[hidden] {
+  display: none !important;
+}
+body {
+  width: 420px;
+  margin: 0;
+  padding: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font:
+    13px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+}
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.badge {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+  color: var(--dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.badge.fulltext {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.meta {
+  color: var(--dim);
+  font-size: 11px;
+  word-break: break-all;
+  margin-bottom: 6px;
+}
+.meta .title {
+  color: var(--text);
+  font-size: 12px;
+  word-break: break-word;
+}
+.fields {
+  margin-bottom: 6px;
+}
+.fields div {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+}
+.fields .key {
+  color: var(--dim);
+  flex: 0 0 auto;
+}
+.fields .val {
+  word-break: break-word;
+}
+/* Scrollable and pre-wrap: the person scrolls the bytes rather than being shown
+   a tidied summary of them. */
+.preview {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0 0 8px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  color: var(--text);
+}
+.notice {
+  color: var(--warn);
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+.note-label {
+  display: block;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+.dim {
+  color: var(--dim);
+}
+.note {
+  width: 100%;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 6px;
+  font: inherit;
+  resize: vertical;
+}
+.note:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+/* The pairing code (§24.4): read across a desk against the prompt on another
+   device, so it is the one thing on this page that is not 11px. */
+.code-box {
+  margin-top: 12px;
+}
+.pair-code {
+  font-size: 20px;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  margin: 4px 0 8px;
+  user-select: all;
+}
+/* The ways in that are not the button, folded away rather than gone. */
+#manual {
+  margin-top: 18px;
+}
+#manual summary {
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+.status {
+  margin: 8px 0 0;
+  font-size: 11px;
+}
+.status.bad {
+  color: var(--bad);
+}
+.status.ok {
+  color: var(--ok);
+}
+.row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+button {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 6px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button.ghost {
+  color: var(--dim);
+}
+a {
+  color: var(--accent);
+}
+/* The options page is the same stylesheet in a tab rather than a popup, where
+   the popup's fixed width would look like a mistake. */
+body.options {
+  width: auto;
+  max-width: 560px;
+  padding: 20px;
+}
+body.options .note {
+  margin-bottom: 4px;
+}
+code {
+  color: var(--accent);
+}

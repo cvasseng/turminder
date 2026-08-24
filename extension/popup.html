@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Turminder — capture</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="head">
+      <strong>Send to Turminder</strong>
+      <span id="badge" class="badge">reading…</span>
+    </div>
+
+    <div id="meta" class="meta"></div>
+    <div id="fields" class="fields"></div>
+
+    <!-- The preview is the payload, never the page (§29.1). Filled with
+         textContent so that whatever the page hid renders here as plain text. -->
+    <pre id="preview" class="preview">Reading the page…</pre>
+    <div id="truncated" class="notice" hidden></div>
+
+    <label class="note-label" for="note">
+      What do you want done with it?
+      <span class="dim">— left blank, it gets summarised.</span>
+    </label>
+    <textarea
+      id="note"
+      class="note"
+      rows="3"
+      maxlength="2000"
+      spellcheck="false"
+      placeholder="file this under receipts and remind me Friday"
+    ></textarea>
+
+    <div id="status" class="status" hidden></div>
+
+    <!-- Shown instead of all of the above when no token is stored (§29.5):
+         a capture that can go nowhere is not worth reading the page for. -->
+    <div id="pair" hidden>
+      <p>
+        Not linked to your assistant yet. Ask it to connect this browser, then paste the link it
+        answers with into the settings.
+      </p>
+      <div class="row">
+        <button id="open-options">Open settings</button>
+      </div>
+    </div>
+
+    <div id="capture-actions" class="row">
+      <button id="send" disabled>Send</button>
+      <button id="cancel" class="ghost">Cancel</button>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
