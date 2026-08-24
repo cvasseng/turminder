@@ -411,14 +411,22 @@ mod tests {
         let e = layout(&dir).unwrap_err();
         assert!(e.contains("the Node runtime"), "{e}");
 
-        std::fs::write(dir.join("bin").join("node"), "").unwrap();
+        // The runtime is `node.exe` on Windows, and `layout` looks for exactly
+        // the name the bundle ships (§28.4). Writing a literal `node` here made
+        // the test pass on the two platforms it had ever run on and describe a
+        // bundle Windows would call incomplete — found by the first Windows CI
+        // run, which is the whole point of having one.
+        std::fs::write(dir.join("bin").join(crate::platform::NODE_BINARY), "").unwrap();
         let e = layout(&dir).unwrap_err();
         assert!(e.contains("the service"), "{e}");
 
         std::fs::create_dir_all(dir.join("dist").join("src")).unwrap();
         std::fs::write(dir.join("dist").join("src").join("index.js"), "").unwrap();
         let resolved = layout(&dir).unwrap();
-        assert_eq!(resolved.node, dir.join("bin").join("node"));
+        assert_eq!(
+            resolved.node,
+            dir.join("bin").join(crate::platform::NODE_BINARY)
+        );
         assert_eq!(
             resolved.entry,
             dir.join("dist").join("src").join("index.js")
