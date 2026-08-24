@@ -1,7 +1,9 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { appDir } from '../src/core/appdir.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
+import { readUiFile, VENDOR_FILES } from '../src/net/static.js';
 import { BASE_PROMPTS } from '../src/prompts/base.js';
 import { SHIPPED_ASSETS } from '../src/prompts/shipped.js';
 
@@ -191,6 +193,68 @@ describe('migrations — the numbered path is the only path', () => {
       expect(Number(declared), `${file} declares version ${declared}`).toBe(
         Number(file.slice(0, 3)),
       );
+    }
+  });
+});
+
+/**
+ * §28.4 — the built service serves the same assets the dev path does.
+ *
+ * `ui/` and the vendored browser libraries live outside the tsc output, and
+ * `dist/src/...` is one level deeper than `src/...`, so a module resolving
+ * them by counting `..` is right in dev and wrong once built: `npm start`
+ * answered `/` with `missing ui asset: index.html` for exactly that reason,
+ * and no test noticed because the suite only ever runs the source tree. These
+ * assert both layouts, which needs no build — `appDir` searches upward, so a
+ * `dist/` that isn't there yet resolves the same as one that is.
+ */
+describe('§28.4 — non-compiled assets resolve from both layouts', () => {
+  const layouts = {
+    dev: join(root, 'src', 'net'),
+    built: join(root, 'dist', 'src', 'net'),
+  };
+
+  it('finds ui/ beside the code, not inside dist/', () => {
+    for (const [layout, from] of Object.entries(layouts)) {
+      expect(appDir('ui', from), `${layout} layout`).toBe(join(root, 'ui'));
+    }
+  });
+
+  it('finds node_modules/ for the vendored browser libraries', () => {
+    for (const [layout, from] of Object.entries(layouts)) {
+      expect(appDir('node_modules', from), `${layout} layout`).toBe(join(root, 'node_modules'));
+    }
+  });
+
+  it('serves every ui page the server can ask for, and the vendored allowlist', () => {
+    for (const page of ['index.html', 'setup.html', 'app.js', 'style.css']) {
+      expect(readUiFile(page), page).not.toBeNull();
+    }
+    for (const name of Object.keys(VENDOR_FILES)) {
+      expect(readUiFile(name), name).not.toBeNull();
+    }
+  });
+
+  it('a tree missing the directory yields an unresolvable path, not a throw', () => {
+    expect(appDir('no-such-sibling', layouts.dev)).toBe(join(layouts.dev, 'no-such-sibling'));
+  });
+
+  /**
+   * The two asset-serving modules must keep going through `appDir`. A unit
+   * test of `appDir` cannot see them regress: an ancestor count reintroduced
+   * here resolves correctly in the source tree, which is the only tree the
+   * suite ever runs in, and only the built server would notice.
+   */
+  it('the asset servers do not count ancestors of their own module', () => {
+    for (const file of [join('src', 'net', 'static.ts'), join('src', 'embeds', 'vendor.ts')]) {
+      const source = readFileSync(join(root, file), 'utf8');
+      expect(source, `${file} must resolve assets through core/appdir`).toContain(
+        "appDir } from '",
+      );
+      expect(
+        /path\.(resolve|join)\([^)]*'\.\.'/s.test(source),
+        `${file} counts \`..\` to reach an asset directory (§28.4)`,
+      ).toBe(false);
     }
   });
 });

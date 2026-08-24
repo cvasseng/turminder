@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { appDir } from '../core/appdir.js';
 
 /**
  * The vendored client-lib registry (§23.3): pinned browser libraries served to
@@ -21,12 +21,7 @@ export const EMBED_VENDOR_FILES: Record<string, string> = {
   'reveal.js/reset.css': 'reveal.js/dist/reset.css',
 };
 
-const NODE_MODULES = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '..',
-  'node_modules',
-);
+const NODE_MODULES = appDir('node_modules', import.meta.dirname);
 
 const TYPES: Record<string, string> = {
   '.js': 'text/javascript; charset=utf-8',

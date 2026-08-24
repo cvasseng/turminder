@@ -1,14 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { appDir } from '../core/appdir.js';
 
-/** ui/ sits next to src/ and dist/, so this resolves the same either way. */
-export const UI_DIR = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '..',
-  'ui',
-);
+/** Beside the code, never inside the build output — see `appDir` (§28.4). */
+export const UI_DIR = appDir('ui', import.meta.dirname);
 
 /**
  * Third-party browser assets served straight from node_modules — one source of
@@ -33,12 +28,7 @@ export interface StaticFile {
   contentType: string;
 }
 
-const NODE_MODULES = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '..',
-  'node_modules',
-);
+const NODE_MODULES = appDir('node_modules', import.meta.dirname);
 
 /** Reads a UI asset by name, refusing anything outside ui/ (or the allowlist). */
 export function readUiFile(name: string): StaticFile | null {
