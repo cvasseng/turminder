@@ -1,0 +1,11 @@
+{
+  "name": "turminder-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop shell for a Turminder service (spec §28). Packaging tier: consumes built service artifacts, never service source.",
+  "scripts": {
+    "dev": "cargo tauri dev",
+    "build": "cargo tauri build",
+    "test": "cd src-tauri && cargo test"
+  }
+}

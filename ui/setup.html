@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Turminder — setup</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="setup">
+      <h1>Turminder needs a model</h1>
+      <p>
+        Point this at any OpenAI-compatible endpoint: a hosted provider, or a llama.cpp server
+        on this machine. Nothing is written until the probes have run.
+      </p>
+
+      <!-- Picking a provider only fills the box below; the probe still decides
+           whether anything gets written. `data-embeddings="no"` marks a provider
+           with no embeddings API at all, so the checkbox further down does not
+           quietly ask for something that cannot work. -->
+      <div class="row">
+        <select id="provider">
+          <option value="">Custom</option>
+          <option data-url="https://api.anthropic.com/v1" data-embeddings="no">
+            Anthropic
+          </option>
+          <option data-url="https://api.openai.com/v1">OpenAI</option>
+          <option data-url="https://generativelanguage.googleapis.com/v1beta/openai">
+            Google Gemini
+          </option>
+          <option data-url="https://api.groq.com/openai/v1" data-embeddings="no">Groq</option>
+          <option data-url="https://api.mistral.ai/v1">Mistral</option>
+          <option data-url="https://api.deepseek.com/v1" data-embeddings="no">DeepSeek</option>
+          <option data-url="https://api.x.ai/v1" data-embeddings="no">xAI (Grok)</option>
+          <option data-url="https://openrouter.ai/api/v1" data-embeddings="no">
+            OpenRouter
+          </option>
+          <option data-url="https://api.together.xyz/v1">Together</option>
+          <option data-url="http://localhost:11434/v1">Ollama — on this machine</option>
+          <option data-url="http://localhost:8080">llama.cpp — on this machine</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <input id="url" value="http://localhost:8080" spellcheck="false" />
+        <button id="probe">Probe</button>
+      </div>
+      <div class="row">
+        <input
+          id="apikey"
+          type="password"
+          placeholder="API key (required by hosted providers)"
+          spellcheck="false"
+          autocomplete="off"
+        />
+      </div>
+      <p class="hint">
+        The key goes straight into the secret store — the config file only ever holds a
+        reference to it.
+      </p>
+
+      <div class="row">
+        <label class="check-row">
+          <input id="embeddings" type="checkbox" checked />
+          <span>Use this endpoint for embeddings too</span>
+        </label>
+      </div>
+      <p class="hint">
+        Embeddings power search over your memories, files and past conversations. Without them
+        search falls back to keyword matching — it still works, it is just blunter. Hosted
+        providers usually bill for them.
+      </p>
+      <p class="hint" id="embeddings-note"></p>
+
+      <div id="result"></div>
+    </div>
+    <script src="/connect.js"></script>
+    <script src="/setup.js"></script>
+  </body>
+</html>

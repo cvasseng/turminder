@@ -1,0 +1,35 @@
+# Turminder as a systemd user service — runs as you, no root, data in
+# ~/.turminder like any other run.
+#
+# Install, from your clone:
+#   npm install && npm run build
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/systemd/turminder.service ~/.config/systemd/user/
+#   systemctl --user edit turminder    # override WorkingDirectory to your clone
+#   systemctl --user enable --now turminder
+#   loginctl enable-linger $USER       # start at boot rather than first login
+#
+# Two things to know before lingering on a headless box: the OS-keychain
+# secret backend unlocks at desktop login, so a boot with no session wants
+# the gpg or plain backend (`turminder secrets status`); and the first-run
+# connect QR goes to the journal (`journalctl --user -u turminder`).
+
+[Unit]
+Description=Turminder personal assistant
+
+[Service]
+Type=simple
+# The clone you built in — override to match (systemctl --user edit turminder).
+WorkingDirectory=%h/turminder
+ExecStart=/usr/bin/env node dist/src/index.js serve
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+# Data home; defaults to ~/.turminder when unset.
+#Environment=TURMINDER_DATA_DIR=%h/.turminder
+# Listen address. Outranks config/turminder.yaml (spec §28.1, G.1) — the
+# unit can place the service without writing to a file it does not own.
+#Environment=TURMINDER_BIND=127.0.0.1:7787
+
+[Install]
+WantedBy=default.target

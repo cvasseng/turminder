@@ -1,0 +1,36 @@
+node_modules/
+dist/
+# ...but app/dist is the shell's connect screen, which is source, not build
+# output — `dist/` above would swallow the one page the app ships (§28.3).
+!app/dist/
+
+# The desktop shell's build output (§28.3). The app's source is in git; a
+# gigabyte of compiled Rust is not.
+app/src-tauri/target/
+app/src-tauri/gen/
+# The staged sidecar (§28.4): a pinned Node runtime plus a production
+# node_modules, ~300MB of other people's artifacts assembled by
+# app/stage-service.sh. Rebuilt from the lockfile, never committed.
+app/src-tauri/service/
+*.log
+.env
+coverage/
+ws-drive.mjs
+ws-activity.mjs
+
+# Playwright MCP scratch (snapshots, console logs) when driving the UI by hand.
+.playwright-mcp/
+
+# Bundled OAuth client (the ldflags equivalent) — never in git.
+google-client.json
+
+# Internal working ledgers and agent bootstraps — the delivery plan, the
+# out-of-spec decision log, the shipped-rough-edges list, and the upstream
+# to-dos. They are the author's working notes, not part of the release.
+plan.md
+plan-v1.md
+JUDGMENT.md
+LIMITS.md
+DEP_TODO.md
+architect_agent.md
+implementor_agent.md

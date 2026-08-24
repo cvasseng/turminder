@@ -1,0 +1,59 @@
+[package]
+name = "turminder-app"
+version = "0.1.0"
+edition = "2021"
+description = "Turminder desktop shell"
+authors = ["Christer Vasseng"]
+license = "MIT"
+# The shell is a packaging tier (spec §28.3): it consumes the service over the
+# App. D protocol and never imports service source. Nothing in `src/` may know
+# this crate exists.
+rust-version = "1.77"
+
+[lib]
+name = "turminder_app"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+url = "2"
+
+# The OS vault (§28.2), named per platform because "the OS vault" resolves to a
+# different store on each and the crate's features are not interchangeable. The
+# Linux pin is load-bearing: the crate's default combo silently returns Ok from
+# a keyutils cache that the next process cannot read, which is a device token
+# lost at reboot (JUDGMENT.md, 2026-08-22).
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+# Job objects: Windows' answer to PR_SET_PDEATHSIG, and a stronger one — a
+# kill-on-close job takes the sidecar with it even if this process is
+# terminated outright (§28.1).
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+# SIGTERM for the sidecar, and PR_SET_PDEATHSIG on Linux (§28.1). `Child::kill`
+# is SIGKILL only, and a service killed outright leaves a hot SQLite journal.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[features]
+default = []

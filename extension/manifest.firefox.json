@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Turminder capture",
+  "version": "0.1.0",
+  "description": "Send the page you are looking at to your Turminder assistant, with a note saying what to do with it.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "scripts": ["background.js"] },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Send to Turminder"
+  },
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "capture@turminder",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": { "required": ["none"] }
+    }
+  }
+}
