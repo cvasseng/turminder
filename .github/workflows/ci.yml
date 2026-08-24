@@ -47,18 +47,49 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
 
-      # The three §23.4 print tests drive a real headless Chrome — the runner
-      # has `google-chrome`, which the systool registry's candidate list finds
-      # — and Ubuntu 24.04 restricts the unprivileged user namespaces Chrome's
-      # sandbox needs. It dies by signal, which surfaces as `print_failed:
-      # chromium print failed: exit null`. Lifting the restriction keeps the
-      # sandbox ON, which passing --no-sandbox would not, and leaves the print
-      # pipeline itself untouched. `|| true`: a kernel without the knob has
-      # nothing to lift.
-      - name: Let Chrome's sandbox open a user namespace
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      # The three §23.4 print tests drive a real browser, and the runner's
+      # `chromium` is a raw upstream snapshot build symlinked into /usr/bin.
+      # Two failures deep: first it died by signal (Ubuntu 24.04 restricts the
+      # unprivileged user namespaces the sandbox needs), and lifting that got
+      # it as far as *starting* — after which all three tests stalled for their
+      # full budget and returned nothing (60113 / 60212 / 60484 ms; a stall,
+      # not a slow render, and the plain-markdown page has nothing external to
+      # wait on). Taking the sandbox out removes that whole path.
+      #
+      # A shim rather than flags in `print.ts`: `--no-sandbox` is a reasonable
+      # thing for a throwaway CI VM to choose and a bad thing to ship to
+      # somebody's desktop, and `systools.chromium` exists precisely so an
+      # environment can name the browser it wants. The candidate list tries
+      # `chromium` first, so this shadows it for the probe and the tool alike,
+      # and the product code never learns it is on a runner.
+      #
+      # Chromium's stderr goes to a file because that is the one thing neither
+      # failure ever gave us: `print_failed` redacts the command line to keep
+      # the embed token out of model context (§22.3.2), and the tests run with
+      # logging silenced, so the browser's own account of itself was never
+      # written down anywhere.
+      - name: A chromium that finishes in a headless VM
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          cat > "$HOME/.local/bin/chromium" <<'SHIM'
+          #!/usr/bin/env bash
+          exec /usr/bin/chromium \
+            --no-sandbox \
+            --disable-gpu \
+            --disable-dev-shm-usage \
+            "$@" 2>>"${CHROMIUM_STDERR_LOG:-/tmp/chromium-ci.log}"
+          SHIM
+          chmod +x "$HOME/.local/bin/chromium"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/chromium" --version
 
       - run: npm test
+
+      # If the print tests fail again, this is the browser saying why.
+      - name: What chromium said
+        if: failure()
+        run: tail -n 100 /tmp/chromium-ci.log || echo "chromium wrote no stderr"
+
       - run: npm run build
       - run: npm run build:extensions
 
