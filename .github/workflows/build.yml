@@ -28,8 +28,8 @@ jobs:
     name: browser extensions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -40,7 +40,7 @@ jobs:
       # the service's version over it would be a lie about which extension
       # this is.
       - run: npm run build:extensions
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: extensions
           path: dist/extension/*.zip
@@ -77,9 +77,9 @@ jobs:
       APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           # The build Node, not the bundled one: the runtime that ships inside
           # the artifact is hash-pinned in app/node-runtime.json and fetched by
@@ -128,7 +128,7 @@ jobs:
       # The registry, not `target/`: four release-profile Tauri trees would
       # crowd the repository's whole cache budget and start evicting each
       # other, which costs more than the compile it saves.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -163,7 +163,7 @@ jobs:
       - name: Collect
         run: node .github/collect-bundles.mjs --target ${{ matrix.target }} --version "${{ inputs.version }}" --out artifacts
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: app-${{ matrix.target }}
           path: artifacts/*

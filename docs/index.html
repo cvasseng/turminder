@@ -713,6 +713,25 @@
       .foot-links a:hover {
         color: var(--accent);
       }
+      /* The closing aside. Everything above argues for restraint, so the one
+         joke on the page gets to sit apart from it, quietly. The punchline is
+         a shade brighter than the setup so the deadpan lands. Neutral greys
+         only: on this page colour means a permission level. */
+      .colophon {
+        margin-top: 2.25rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid var(--line-soft);
+        max-width: 52ch;
+        font-size: 0.8125rem;
+        line-height: 1.6;
+        color: var(--dimmer);
+      }
+      .colophon .beat {
+        /* Its own line at every width, so the beat before the punchline is a
+           decision rather than an accident of wrapping. */
+        display: block;
+        color: var(--dim);
+      }
 
       @media (prefers-reduced-motion: reduce) {
         * {
@@ -1128,6 +1147,9 @@
           <a href="https://github.com/cvasseng/turminder/blob/main/LICENSE">License</a>
         </nav>
       </div>
+      <p class="colophon">
+      Named after a Culture drone that got around a permissions restriction by disguising itself as a smaller tool and stowing away in the luggage. This one asks.
+      </p>
     </footer>
 
     <script>

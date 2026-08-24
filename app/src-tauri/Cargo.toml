@@ -46,6 +46,13 @@ keyring = { version = "3", features = ["windows-native"] }
 # terminated outright (§28.1).
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    # `CreateJobObjectW` takes a `SECURITY_ATTRIBUTES` pointer, and windows-sys
+    # omits any binding whose signature reaches a namespace you did not ask
+    # for — the function simply is not there, and the compiler suggests
+    # `CreateJobSet` instead. Enabling the JobObjects namespace is not enough;
+    # this is the one symbol in the file that needs a second one. Found by the
+    # first Windows CI run, which is what that job exists for.
+    "Win32_Security",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
