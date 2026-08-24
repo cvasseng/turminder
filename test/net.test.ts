@@ -132,6 +132,55 @@ describe('setup api (plan §3b)', () => {
     expect(await (await fetch(`${h.baseUrl}/`)).text()).toContain('id="composer"');
   });
 
+  it('lists every model the endpoint serves and measures the one that was chosen', async () => {
+    h = await bootService({ configured: false, watchFiles: false });
+    // A hosted provider's shape: several models, in an order nobody chose.
+    h.fake.otherModels = ['second-model', 'third-model'];
+    h.fake.always((req) => {
+      const body = req.body;
+      if (body.response_format) return { text: '{"ok":true,"note":"hello"}' };
+      if (body.tools)
+        return { toolCalls: [{ name: 'probe.echo', args: { word: 'pineapple' } }] };
+      return { text: 'ready' };
+    });
+
+    // Nobody has chosen yet: the first is all the endpoint's order can mean.
+    const first = await postJson(`${h.baseUrl}/api/setup/probe`, { url: h.fake.baseUrl });
+    expect(first.body.models).toEqual(['fake-model', 'second-model', 'third-model']);
+    expect(first.body.model_id).toBe('fake-model');
+
+    // Choosing one measures *that* model — capability tags belong to a model,
+    // not to an address (§10.2), so the completions must carry the new name.
+    h.fake.requests.length = 0;
+    const chosen = await postJson(`${h.baseUrl}/api/setup/probe`, {
+      url: h.fake.baseUrl,
+      model: 'third-model',
+    });
+    expect(chosen.body.model_id).toBe('third-model');
+    expect(chosen.body.models).toEqual(['fake-model', 'second-model', 'third-model']);
+    const asked = h.fake.requests.filter((r) => r.path.endsWith('/chat/completions'));
+    expect(asked.length).toBeGreaterThan(0);
+    expect([...new Set(asked.map((r) => r.body.model))]).toEqual(['third-model']);
+  });
+
+  it('presents the API key as x-api-key as well as a bearer token', async () => {
+    // The regression this pins: Anthropic serves /v1/models from its native
+    // API, where an API key sent as `Authorization: Bearer` is refused as an
+    // invalid *bearer token* — so a perfectly good key made the probe report
+    // the endpoint unreachable. Its /v1/chat/completions takes the bearer form
+    // happily, which is why only listing broke.
+    h = await bootService({ configured: false, watchFiles: false });
+    h.fake.always({ text: 'ready' });
+    await postJson(`${h.baseUrl}/api/setup/probe`, {
+      url: h.fake.baseUrl,
+      api_key: 'sentinel-probe-key',
+    });
+    const listed = h.fake.requests.find((r) => r.path.endsWith('/models'));
+    expect(listed).toBeTruthy();
+    expect(listed!.headers['x-api-key']).toBe('sentinel-probe-key');
+    expect(listed!.headers['authorization']).toBe('Bearer sentinel-probe-key');
+  });
+
   it('puts the API key in the secret store and a reference in models.yaml (§28.5)', async () => {
     h = await bootService({ configured: false, watchFiles: false });
     const probe = await postJson(`${h.baseUrl}/api/setup/probe`, { url: h.fake.baseUrl });

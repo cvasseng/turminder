@@ -519,6 +519,9 @@ describe('docs.to_pdf (§23.4, App. F.14)', () => {
     expect(args.some((a) => a.startsWith('--user-data-dir='))).toBe(true);
     // No date, source URL or page counter stamped onto the artifact (§23.4).
     expect(args).toContain('--no-pdf-header-footer');
+    // Load-bearing, not hygiene: GCM registration retrying in the background
+    // keeps virtual time paused, so the budget above never expires (§23.4).
+    expect(args).toContain('--disable-background-networking');
     expect(args.at(-1)).toBe('http://127.0.0.1:7787/embed/01ABC?t=deadbeef');
     fs.rmSync(out, { force: true });
   });

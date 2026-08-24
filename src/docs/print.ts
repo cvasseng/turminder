@@ -66,6 +66,15 @@ export class ChromiumPrinter {
         // ignores a switch it does not know.
         '--no-pdf-header-footer',
         '--print-to-pdf-no-header',
+        // A print reaches one URL — the one it was handed — and chromium's
+        // background services are not part of that. Left on, a fresh profile
+        // registers with Google Cloud Messaging on startup, and `DEPRECATED_
+        // ENDPOINT` puts that request into a retry loop. Which would be merely
+        // rude, except that virtual time *pauses while network fetches are
+        // pending*: the budget above never expires, the browser never exits,
+        // and the print dies on its timeout instead. Fast here, fatal on a CI
+        // runner, and the difference was only ever how quickly Google answered.
+        '--disable-background-networking',
         `--user-data-dir=${profile}`,
         '--no-first-run',
         '--disable-extensions',

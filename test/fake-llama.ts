@@ -46,6 +46,8 @@ export interface ScriptedTurn {
 export interface RecordedRequest {
   path: string;
   body: Record<string, any>;
+  /** Lower-cased, so a test can assert how a credential was presented. */
+  headers: Record<string, string>;
   at: number;
 }
 
@@ -67,6 +69,12 @@ export class FakeLlama {
   readonly requests: RecordedRequest[] = [];
   props = { default_generation_settings: { n_ctx: 32768 }, model_path: '/models/fake.gguf' };
   modelId = 'fake-model';
+  /**
+   * Anything this endpoint serves beyond `modelId`. Empty by default, because
+   * llama.cpp serves one model and that is the shape most tests want; a hosted
+   * provider listing several is what makes choosing one a question at all.
+   */
+  otherModels: string[] = [];
   embeddingDim = 8;
   /**
    * Whether this endpoint can read image parts (§26.3). Off by default, like a
@@ -141,7 +149,11 @@ export class FakeLlama {
         body = { _unparsable: raw };
       }
     }
-    const recorded: RecordedRequest = { path: url.pathname, body, at: Date.now() };
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (typeof v === 'string') headers[k.toLowerCase()] = v;
+    }
+    const recorded: RecordedRequest = { path: url.pathname, body, headers, at: Date.now() };
     this.requests.push(recorded);
 
     const json = (status: number, payload: unknown) => {
@@ -151,7 +163,10 @@ export class FakeLlama {
 
     if (url.pathname === '/props') return json(200, this.props);
     if (url.pathname === '/v1/models' || url.pathname === '/models') {
-      return json(200, { object: 'list', data: [{ id: this.modelId, object: 'model' }] });
+      return json(200, {
+        object: 'list',
+        data: [this.modelId, ...this.otherModels].map((id) => ({ id, object: 'model' })),
+      });
     }
     if (url.pathname === '/health' || url.pathname === '/healthz') {
       return json(200, { status: 'ok' });
