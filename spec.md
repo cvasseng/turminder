@@ -2900,11 +2900,14 @@ Signing is a per-platform story, and only one platform has a gate:
   smoke test cannot be faked, so a cross-staged tree reports itself as
   unverified, and a shipped artifact is always staged on its own platform.
 - **The bundle layout is the built service's, not a new one**: `dist/`
-  expects `ui/` and `node_modules/` as its own siblings, because
-  `dist/src/net/static.js` resolves them two levels up. `npm run build`
-  populates neither, so assembling a *runnable* tree is packaging's job
-  — and until this tier existed, nothing had ever run the built output
-  rather than the `tsx` dev path.
+  expects `ui/` and `node_modules/` as its own siblings. The code finds
+  them by **searching upward for the directory** (`core/appdir.ts`), never
+  by counting `..`: `rootDir` is the repo, so the built
+  `dist/src/net/static.js` sits one level deeper than `src/net/static.ts`
+  and any fixed count serves one layout while breaking the other. `npm run
+  build` populates neither sibling, so assembling a *runnable* tree is
+  packaging's job — and until this tier existed, nothing had ever run the
+  built output rather than the `tsx` dev path.
 
 ### 28.5 Onboarding for the bundled cohort
 
@@ -4665,7 +4668,8 @@ src/
   index.ts        # CLI (commander): serve|setup|token|events|replay|onboard
   core/           # ulid, time, logger, config loader (+ ${secret:} resolve), git ops,
                   #   reserved-marker vocabulary (§20.8), device-token store (§24),
-                  #   systool registry (§23.1), secret store backends (§27)
+                  #   systool registry (§23.1), secret store backends (§27),
+                  #   non-compiled asset lookup (§28.4)
   db/             # connection, migrations/, repositories per table
   model/          # models.yaml types, router, inference scheduler, agent loop, probes
   tools/          # dispatcher, grants, run-grant registry (§23.2), mcp-client,
