@@ -61,7 +61,9 @@ pub fn parse_connect_url(input: &str) -> Result<Connection, ConnectError> {
             _ => {}
         }
     }
-    let token = token.filter(|t| !t.is_empty()).ok_or(ConnectError::NoToken)?;
+    let token = token
+        .filter(|t| !t.is_empty())
+        .ok_or(ConnectError::NoToken)?;
 
     let mut base = parsed.clone();
     base.set_fragment(None);
@@ -72,7 +74,9 @@ pub fn parse_connect_url(input: &str) -> Result<Connection, ConnectError> {
         token,
         // A device name is a label; the token is what authenticates, so a URL
         // without one still connects rather than being refused.
-        device: device.filter(|d| !d.is_empty()).unwrap_or_else(|| "desktop".to_string()),
+        device: device
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| "desktop".to_string()),
     })
 }
 
@@ -134,8 +138,8 @@ mod tests {
 
     #[test]
     fn keeps_https_and_drops_path_and_query() {
-        let c = parse_connect_url("https://turminder.example.net/chat?x=1#connect=t&device=d")
-            .unwrap();
+        let c =
+            parse_connect_url("https://turminder.example.net/chat?x=1#connect=t&device=d").unwrap();
         assert_eq!(c.base_url, "https://turminder.example.net");
     }
 
@@ -172,7 +176,10 @@ mod tests {
     #[test]
     fn round_trips_into_a_window_url() {
         let c = parse_connect_url("http://h:7787/#connect=tok&device=my%20laptop").unwrap();
-        assert_eq!(window_url(&c), "http://h:7787/#connect=tok&device=my%20laptop");
+        assert_eq!(
+            window_url(&c),
+            "http://h:7787/#connect=tok&device=my%20laptop"
+        );
         // And the page will strip it again, which is what makes this safe to
         // put in a window URL at all (§24.3).
         assert_eq!(parse_connect_url(&window_url(&c)).unwrap(), c);

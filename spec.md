@@ -2867,10 +2867,20 @@ Signing is a per-platform story, and only one platform has a gate:
   toolchain, which is the honest Linux answer to "what produced this
   binary". AppImage is deliberately *not* a target: its bundler resolves
   library paths by copying them, and nix store paths defeat that.
-- **macOS**: **signed and notarized** (Developer ID) — for that audience
-  an unsigned app does not exist. No workarounds, ever (the standing hard
-  boundary): a build that cannot be signed fails, it does not ship
-  ad-hoc. This lands with the macOS build, not before.
+- **macOS**: **signed and notarized** (Developer ID) wherever there is an
+  identity to sign with — for that audience an unsigned app barely
+  exists. This clause was once absolute ("a build that cannot be signed
+  fails, it does not ship ad-hoc"), and it was written before anything
+  could build for macOS at all. It is **amended here rather than quietly
+  worked around**, which is the standing rule about hard boundaries: an
+  unsigned macOS artifact may ship, and **must announce itself as one**.
+  The release notes carry the warning and the Gatekeeper workaround,
+  generated from the *absence of the signing credentials* rather than
+  remembered by a human (§32.4). What stays absolute is the silence: an
+  artifact that is unsigned and does not say so is the thing this
+  boundary existed to prevent. Where a Developer ID **is** configured,
+  signing and notarization are not optional and a failure to sign fails
+  the build.
 - **Updates**: the Tauri updater with signed manifests, endpoint
   configured in `app/tauri.conf.json`; the sidecar rides every update.
   Update checks are shell behavior; the service knows nothing of them.
@@ -3384,6 +3394,147 @@ three weeks of use:
   paths stay explicit and the model stays free — files are visible,
   user-corrected artifacts, so a soft default suffices where memory
   needs a hard one.
+
+---
+
+## 32. Continuous integration and releases
+
+Three things ship from this repo — the service, the desktop shell (§28) and
+the browser extension (§29) — and until this section existed all three were
+built on one machine, by the person who wrote them, on Linux. That is a
+delivery story with two holes in it. The smaller one is that a stranger has
+nothing to download. The larger one is that
+`app/src-tauri/src/platform.rs` carries process control and data-dir logic
+for three platforms and only one of them had ever been *compiled*: a nix box
+ships the Linux `std` and no other, so the macOS and Windows arms were a
+reviewed first draft that nothing had type-checked. A CI job per platform is
+the only thing that changes that.
+
+**Everything CI lives under `.github/`** — §28.3's isolation rules verbatim:
+its scripts are node builtins only, nothing under `src/` knows it exists, it
+consumes built artifacts and never service source, and deleting the
+directory leaves lint, typecheck and tests green.
+
+Two rules keep the pipeline inspectable rather than merely working:
+
+- **First-party `actions/*` steps only** — checkout, setup-node, cache,
+  upload-artifact, download-artifact. Every decision the pipeline makes
+  beyond those is a script in this repo or the `gh` CLI already present on
+  every runner. This is App. J's reasoning applied to build tooling: a
+  release pipeline's failure mode is *shipping the wrong bytes*, and a
+  third-party action is a dependency that rewrites itself between releases
+  with nothing in a lockfile to notice.
+- **One build serves both channels.** `build.yml` is a reusable workflow
+  called by the release and by the nightly alike; they differ in what they
+  publish and what they call it, never in how the bytes were made. Two build
+  paths would mean the nightly stops predicting the release it exists to be
+  a preview of.
+
+### 32.1 CI: the gate on every push
+
+`ci.yml`, on push to `main` and on every pull request, two jobs:
+
+- **service** — `npm ci`, lint, typecheck, the vitest suite over `src/`,
+  then `npm run build` and `npm run build:extensions`, on Node 22 **and**
+  24: the floor `package.json` declares and the version the author's box
+  actually runs, because a supported range nobody tests both ends of is a
+  guess. This is the job the README's badge reports.
+- **shell** — `cargo test` over `app/src-tauri/` on Linux, macOS and
+  Windows, against a **placeholder** `service/` directory. `tauri-build`
+  validates `bundle.resources` at *compile* time, so the crate does not
+  build with that directory absent; a placeholder satisfies the glob and
+  keeps 300MB of staging out of a per-push gate. This job's question is
+  whether `platform.rs` compiles on each platform, not whether the bundle
+  assembles — the release build answers the second one by staging for real
+  and smoke-testing it (§28.4). Its point is the compile, not the
+  assertions.
+
+### 32.2 Release notes are CHANGELOG.md, transcribed
+
+Pushing `vX.Y.Z` is the human act; everything after it is transcription.
+`.github/release-notes.mjs` lifts that version's section out of CHANGELOG.md
+and the release body is exactly that, unedited — the changelog is already
+written for someone reading release notes rather than someone reading
+history, so a second place to say what changed is a second place to be
+wrong.
+
+Both gates run **before** any artifact is built, so a release that cannot
+describe itself fails in seconds rather than after four runners have spent
+twenty minutes:
+
+- **The tag and `package.json` must agree.** They are two copies of one
+  fact, and a release is the wrong moment to find out they diverged.
+- **A missing or empty section fails the build.** The thing that reliably
+  rots about release notes is shipping without them once.
+
+### 32.3 The build
+
+Per target: the service is built, the version stamped, the sidecar staged
+and smoke-tested, and Tauri bundles it.
+
+- **Targets are the keys of `app/node-runtime.json`.** The matrix covers
+  `linux-x64`, `linux-arm64`, `darwin-arm64` and `win32-x64`, one runner
+  each. Windows on ARM stays off it for the reason §28.4 already gives:
+  `sqlite-vec` publishes no `windows-arm64` package.
+- **Staging is always native, never cross.** `stage-service.mjs` runs with
+  no `--target`, so its §28.4 smoke test can actually run — and it refuses
+  to finish unless the assembled sidecar answers both `/healthz` and `/`. A
+  cross-staged tree reports itself unverified by construction and has no
+  business in a release.
+- **The version is stamped, not maintained.** §28.1 promises service version
+  == app version, and three hand-edited numbers cannot keep that promise:
+  `.github/stamp-version.mjs` writes `package.json`'s version into
+  `app/src-tauri/tauri.conf.json` and `Cargo.toml` in the build machine's
+  working tree, and never commits it. The checkout stays authored; the
+  artifact stays honest. The extension keeps its **own** manifest version
+  (§29.6) — browser stores count that one monotonically, and it is a
+  separately versioned thing.
+- **The Linux toolchain here is apt, not nix.** `app/shell.nix` remains the
+  *developer's* declaration and the answer to "what produced this binary on
+  my machine"; a shipped `.deb` wants system sonames and a real `Depends`,
+  and a bundle linked against `/nix/store` paths runs on the build box and
+  nowhere else — the trap that took AppImage off the target list. The two
+  toolchains are named separately because they answer different questions.
+- **An empty collection is a failure.** `.github/collect-bundles.mjs`
+  renames the bundler's three per-platform vocabularies into one
+  (`turminder-<version>-<label>.<ext>`), and exits non-zero if the tree held
+  nothing for this target or two candidates for one published name. A
+  release that quietly contains nothing for a platform is worse than a
+  failed build.
+- **Every release carries a `SHA256SUMS`.** Someone who did not watch the
+  run has no other way to tell whether the file they downloaded is the file
+  it built.
+
+### 32.4 Signing
+
+Signing is per-platform, and driven entirely by whether the repository holds
+credentials — no workflow input decides it:
+
+- **macOS**: with the `APPLE_*` secrets configured, Tauri signs and
+  notarizes, and a failure to sign fails the build. Without them the `.dmg`
+  ships **unsigned and labelled**, the notice generated from the absence of
+  the credentials rather than remembered by a human. This is the amendment
+  §28.4 records, and the labelling is the half of it that is not
+  negotiable.
+- **Linux and Windows** have no gate: a `.deb` has no Gatekeeper equivalent,
+  and an unsigned Windows installer costs a SmartScreen click-through.
+
+### 32.5 The nightly channel
+
+`nightly.yml` at 03:00 UTC, and on demand. It publishes to one **rolling**
+prerelease named `nightly`, replaced each night rather than added to: the
+point of a nightly is a link that always means "the latest", and a year of
+dated tags buries the releases people want among three hundred they do not.
+
+- **It does not build a night where nothing was committed.** A nightly whose
+  only difference from yesterday's is its timestamp teaches people to ignore
+  the feed it publishes to.
+- **Its version is a prerelease** — `<version>-nightly.<YYYYMMDD>` — so a
+  nightly installed over a release reads as the newer thing it is.
+- **Its notes are `# Next`, and may be empty.** This is the one place
+  `release-notes.mjs` tolerates an empty section: cutting a version leaves a
+  fresh empty `# Next` behind by procedure, so for the first nights after a
+  release the emptiness is the truth rather than a missing step.
 
 ---
 
@@ -4713,6 +4864,13 @@ extension/        # §29 browser extension — plain JS, no bundler:
 contrib/          # deployment extras, copied out by the user, imported by
                   #   nothing: systemd/turminder.service (user unit over the
                   #   built artifact; bind placed via TURMINDER_BIND per G.1)
+.github/          # §32 CI and releases — workflows/{ci,build,release,
+                  #   nightly}.yml plus node-builtins-only scripts:
+                  #   release-notes.mjs (CHANGELOG.md → release body),
+                  #   stamp-version.mjs (§28.1's one version number),
+                  #   collect-bundles.mjs (bundler names → published names).
+                  #   CI tier, §28.3 rules verbatim; first-party actions/*
+                  #   steps only, everything else a script in this repo
 ```
 
 Dependency rules (**enforced by `eslint.config.js`**, boundary blocks at the

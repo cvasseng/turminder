@@ -37,8 +37,12 @@ pub fn get(url: &str, token: Option<&str>, timeout: Duration) -> Result<Response
     };
 
     let mut stream = TcpStream::connect((host, port)).map_err(|e| e.to_string())?;
-    stream.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
-    stream.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|e| e.to_string())?;
     let auth = token
         .map(|t| format!("Authorization: Bearer {t}\r\n"))
         .unwrap_or_default();
@@ -46,12 +50,16 @@ pub fn get(url: &str, token: Option<&str>, timeout: Duration) -> Result<Response
         "GET {target} HTTP/1.1\r\nHost: {host}:{port}\r\n{auth}\
          Connection: close\r\nAccept: application/json\r\n\r\n"
     );
-    stream.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| e.to_string())?;
 
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).map_err(|e| e.to_string())?;
     let raw = String::from_utf8_lossy(&raw).into_owned();
-    let (head, body) = raw.split_once("\r\n\r\n").ok_or("the service sent no body")?;
+    let (head, body) = raw
+        .split_once("\r\n\r\n")
+        .ok_or("the service sent no body")?;
     let status = head
         .lines()
         .next()
@@ -87,7 +95,9 @@ mod tests {
             let n = socket.read(&mut buf).unwrap();
             let request = String::from_utf8_lossy(&buf[..n]).into_owned();
             socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true}")
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true}",
+                )
                 .unwrap();
             request
         });

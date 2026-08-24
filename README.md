@@ -1,5 +1,7 @@
 # Turminder
 
+[![ci](https://github.com/cvasseng/turminder/actions/workflows/ci.yml/badge.svg)](https://github.com/cvasseng/turminder/actions/workflows/ci.yml)
+
 A self-hosted, event-driven personal assistant that runs on your own
 hardware — against a local model, or any endpoint you point it at. Named
 after Turminder Xuss,
@@ -120,7 +122,9 @@ nothing acts until you have said, once and durably, what it may do.
   computer, where the app carries its own Node runtime and looks after the
   service for you, or on a machine you already run it on, which you point
   it at with a connect link. Its key lives in your keyring, never in a
-  file. Built from `app/` with nix; macOS and Windows are not built yet.
+  file. Every release ships a `.deb`, a `.dmg` and a Windows installer, or
+  build it yourself from `app/`. Linux is the platform it has been lived in;
+  the macOS and Windows builds are new and unproven.
 - **A browser extension** — open a page, click, and read the exact text
   that will be sent before it goes: extraction, a note field, Send. It
   cannot read a page until you invoke it on that one, and the note you type
@@ -172,6 +176,11 @@ Open `http://127.0.0.1:7787`:
 Everything it knows lives in `~/.turminder` (override with `--data-dir`
 or `TURMINDER_DATA_DIR`) — a git repo of markdown plus `events.db`. Back
 it up by copying the folder.
+
+Prebuilt desktop apps and packaged browser extensions are attached to every
+[release](https://github.com/cvasseng/turminder/releases), alongside a rolling
+`nightly` prerelease built from `main` — with a `SHA256SUMS` to check them
+against.
 
 Optional:
 

@@ -58,7 +58,10 @@ mod tests {
         // The file is written by one version of the shell and read by the next,
         // so the wire form is a name rather than a tuple index.
         assert_eq!(
-            serde_json::to_string(&Stored { mode: Mode::Bundled }).unwrap(),
+            serde_json::to_string(&Stored {
+                mode: Mode::Bundled
+            })
+            .unwrap(),
             r#"{"mode":"bundled"}"#
         );
         let parsed: Stored = serde_json::from_str(r#"{"mode":"connect"}"#).unwrap();

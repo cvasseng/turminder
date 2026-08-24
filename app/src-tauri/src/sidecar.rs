@@ -116,7 +116,10 @@ pub fn service_dir(app: &AppHandle) -> Result<PathBuf, String> {
 /// to turn into a retry.
 fn free_port() -> Result<u16, String> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    listener.local_addr().map(|a| a.port()).map_err(|e| e.to_string())
+    listener
+        .local_addr()
+        .map(|a| a.port())
+        .map_err(|e| e.to_string())
 }
 
 struct Inner {
@@ -236,7 +239,10 @@ fn mint_token(layout: &Layout, data_dir: &Path) -> Result<String, String> {
 /// `stop` covers the tray's Quit and Tauri's exit hook, but neither runs when
 /// the shell is killed outright, and a leaked sidecar holds the data dir
 /// against the next launch. A live drive on Linux found exactly that.
-fn spawn_service(inner: &Arc<Inner>, keeper: &mut crate::platform::ChildKeeper) -> Result<(), String> {
+fn spawn_service(
+    inner: &Arc<Inner>,
+    keeper: &mut crate::platform::ChildKeeper,
+) -> Result<(), String> {
     let mut command = Command::new(&inner.layout.node);
     command
         .arg(&inner.layout.entry)
@@ -413,7 +419,10 @@ mod tests {
         std::fs::write(dir.join("dist").join("src").join("index.js"), "").unwrap();
         let resolved = layout(&dir).unwrap();
         assert_eq!(resolved.node, dir.join("bin").join("node"));
-        assert_eq!(resolved.entry, dir.join("dist").join("src").join("index.js"));
+        assert_eq!(
+            resolved.entry,
+            dir.join("dist").join("src").join("index.js")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -431,5 +440,4 @@ mod tests {
         let e = await_health(port, Duration::from_millis(600)).unwrap_err();
         assert!(e.contains("did not come up"), "{e}");
     }
-
 }
