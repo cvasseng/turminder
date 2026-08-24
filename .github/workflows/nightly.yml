@@ -1,0 +1,128 @@
+# What `main` looks like this morning, built the same way a release is (§32.5).
+#
+# One rolling `nightly` release rather than a tag per night: the point of a
+# nightly is a link that always means "the latest", and a year of dated tags
+# buries the releases people actually want among three hundred they do not.
+#
+# It does not build a night where nothing was committed. A nightly whose only
+# difference from yesterday's is its timestamp teaches people to ignore the
+# feed it publishes to.
+name: nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: has main moved
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          built="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly" --jq .object.sha 2>/dev/null || true)"
+          if [ "${built}" = "${GITHUB_SHA}" ] && [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then
+            echo "nightly already covers ${GITHUB_SHA}; nothing new to build"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A prerelease version, so a nightly installed over a release reads
+          # as the newer thing it is, and so the two never collide in a
+          # package manager's idea of history.
+          base="$(node -p "require('./package.json').version")"
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          echo "version=${base}-nightly.$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.gate.outputs.version }}
+      channel: nightly
+
+  publish:
+    name: publish
+    needs: [gate, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: incoming
+
+      # `--allow-empty`, unlike the release channel: cutting a version leaves a
+      # fresh empty `# Next` behind by procedure, so for the first nights after
+      # a release the emptiness is the truth rather than a missing step.
+      - name: Notes from CHANGELOG.md
+        shell: bash
+        run: |
+          node .github/release-notes.mjs Next --allow-empty --out next.md
+          {
+            echo "Built from \`${GITHUB_SHA}\` on $(date -u +%Y-%m-%d)."
+            echo
+            echo "This is \`main\`, not a release: it has had no soak, and the notes below are the"
+            echo "in-progress entries for whatever version ships next."
+            echo
+            echo "---"
+            echo
+            cat next.md
+          } > notes.md
+
+      - name: Gather the build
+        shell: bash
+        run: |
+          mkdir -p release
+          find incoming -type f \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
+               -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.zip' \) \
+            -exec cp {} release/ \;
+          ( cd release && sha256sum -- * > ../SHA256SUMS )
+          mv SHA256SUMS release/
+          ls -l release
+
+      - name: Say so if macOS went out unsigned
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "${APPLE_SIGNING_IDENTITY}" ] && ls release/*macos*.dmg >/dev/null 2>&1; then
+            {
+              echo "> **The macOS build is not signed or notarized.** Gatekeeper will refuse it on"
+              echo "> first open — right-click the app and choose *Open* to let it through."
+              echo
+              cat notes.md
+            } > notes.new
+            mv notes.new notes.md
+          fi
+
+      # Replaced rather than added to: the release named `nightly` is a
+      # position, not an event, and it holds exactly one night's build.
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly \
+            --prerelease \
+            --target "${GITHUB_SHA}" \
+            --title "Nightly $(date -u +%Y-%m-%d)" \
+            --notes-file notes.md \
+            release/*

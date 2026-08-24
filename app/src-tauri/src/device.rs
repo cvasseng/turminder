@@ -142,7 +142,11 @@ fn handle_frame(app: &AppHandle, tx: &mpsc::UnboundedSender<Outbound>, text: &st
         .and_then(Value::as_str)
         .unwrap_or("Turminder")
         .to_string();
-    let text_body = body.get("body").and_then(Value::as_str).unwrap_or("").to_string();
+    let text_body = body
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
 
     let _ = app
         .notification()

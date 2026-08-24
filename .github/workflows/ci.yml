@@ -1,0 +1,120 @@
+# The gate on every push and pull request (§32.1).
+#
+# Two jobs, because this repo is two tiers. The service job is the one the
+# README's badge reports: lint, typecheck, and the TypeScript suite over
+# `src/`, plus the two builds, so "it compiles" and "it packages" are not
+# separate acts of faith.
+#
+# The shell job exists for a narrower reason. `app/src-tauri/src/platform.rs`
+# carries all three platforms' process control and data-dir logic, and until
+# this file existed only the Linux arm had ever been *compiled* — a nix box
+# ships the Linux std and no other, so the macOS and Windows arms were a
+# reviewed first draft that nothing had ever type-checked. Compiling them on
+# each platform is the only thing that changes that, and it is cheap enough to
+# do on every commit rather than discovering it during a release.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  service:
+    name: service (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor package.json declares, and the version the author's box
+        # actually runs. A range nobody tests both ends of is a guess.
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run build:extensions
+
+  desktop-shell:
+    name: desktop shell (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Webview and tray libraries
+        if: startsWith(matrix.runner, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libxdo-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            build-essential \
+            patchelf \
+            file
+
+      - name: Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --component rustfmt
+          rustup default stable
+          rustc --version
+
+      # Formatting is platform-independent, so one runner answers for all
+      # three; rustfmt needs no build, so this fails in seconds rather than
+      # after a full compile.
+      - name: Formatting
+        if: startsWith(matrix.runner, 'ubuntu')
+        run: cargo fmt --manifest-path app/src-tauri/Cargo.toml --check
+
+      # The registry, not `target/`. Three debug Tauri trees are several
+      # gigabytes each and would spend the repository's entire cache budget
+      # evicting one another — which costs more than the compile it saves.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-ci-${{ matrix.runner }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-ci-${{ matrix.runner }}-
+
+      # `tauri-build` validates `bundle.resources` at *compile* time, so the
+      # crate does not build with `service/` absent — it fails the build
+      # script with "glob pattern service/**/* path not found". A placeholder
+      # satisfies the glob. This job's question is whether platform.rs
+      # compiles on each platform, not whether the bundle assembles; the
+      # release build answers the second one by staging for real and refusing
+      # to finish unless the sidecar answers /healthz and / (§28.4).
+      - name: Placeholder for the sidecar resource
+        shell: bash
+        run: |
+          mkdir -p app/src-tauri/service
+          echo "Not a sidecar — see .github/workflows/ci.yml." > app/src-tauri/service/PLACEHOLDER
+
+      - name: Build and test the shell
+        run: cargo test --manifest-path app/src-tauri/Cargo.toml

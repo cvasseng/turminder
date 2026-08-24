@@ -1,602 +1,1225 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Turminder — the assistant that can only do what you tell it to</title>
-<meta name="description" content="A self-hosted, event-driven personal assistant that runs on your own hardware against a local model. Every capability it has is one you granted, checked where the tool is called rather than requested in a prompt.">
-<meta name="color-scheme" content="dark">
-<link rel="canonical" href="https://turminder.com/">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://turminder.com/">
-<meta property="og:title" content="Turminder — the assistant that can only do what you tell it to">
-<meta property="og:description" content="A self-hosted, event-driven personal assistant for your own hardware. Every capability it has is one you handed it, and every step it takes is written down.">
-<meta name="twitter:card" content="summary_large_image">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23101214'/%3E%3Ccircle cx='11' cy='16' r='3.6' fill='%237fb2f0'/%3E%3Crect x='19' y='6' width='2.6' height='20' rx='1.3' fill='%2386c06c'/%3E%3C/svg%3E">
-<style>
-/* The product is a dark monospace surface; the page is the same room with the
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Turminder — the assistant that can only do what you tell it to</title>
+    <meta
+      name="description"
+      content="A self-hosted, event-driven personal assistant that runs on your own hardware against a local model. Every capability it has is one you granted, checked where the tool is called rather than requested in a prompt."
+    />
+    <meta name="color-scheme" content="dark" />
+    <link rel="canonical" href="https://turminder.com/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://turminder.com/" />
+    <meta
+      property="og:title"
+      content="Turminder — the assistant that can only do what you tell it to"
+    />
+    <meta
+      property="og:description"
+      content="A self-hosted, event-driven personal assistant for your own hardware. Every capability it has is one you handed it, and every step it takes is written down."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23101214'/%3E%3Ccircle cx='11' cy='16' r='3.6' fill='%237fb2f0'/%3E%3Crect x='19' y='6' width='2.6' height='20' rx='1.3' fill='%2386c06c'/%3E%3C/svg%3E"
+    />
+    <style>
+      /* The product is a dark monospace surface; the page is the same room with the
    lights a little lower, so the app's own panels would sit on it unchanged.
    Mono is the machine's voice — identifiers, paths, commands, labels. Sans is
    the human's — every sentence written for a reader. The split is the
    product's whole argument, so the page keeps it in the type. */
-:root {
-  --void: #0b0d0f;
-  --panel: #14181b;
-  --panel-hi: #191e22;
-  --line: #232a30;
-  --line-soft: #1b2126;
-  --text: #dfe3e7;
-  --dim: #8b949e;
-  --dimmer: #6a737d;
-  --accent: #7fb2f0;
-  --go: #86c06c;
-  --ask: #e0a458;
-  --stop: #e06c75;
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --pad: clamp(1.25rem, 5vw, 2.5rem);
-  --measure: 62ch;
-}
-* { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
-body {
-  margin: 0;
-  background: var(--void);
-  color: var(--text);
-  font: 400 16px/1.65 var(--sans);
-  overflow-x: clip;
-}
-h1, h2, h3 { margin: 0; font-weight: 600; }
-p { margin: 0; }
-a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
-code { font-family: var(--mono); }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+      :root {
+        --void: #0b0d0f;
+        --panel: #14181b;
+        --panel-hi: #191e22;
+        --line: #232a30;
+        --line-soft: #1b2126;
+        --text: #dfe3e7;
+        --dim: #8b949e;
+        --dimmer: #6a737d;
+        --accent: #7fb2f0;
+        --go: #86c06c;
+        --ask: #e0a458;
+        --stop: #e06c75;
+        --mono:
+          ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+        --sans:
+          ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+          sans-serif;
+        --pad: clamp(1.25rem, 5vw, 2.5rem);
+        --measure: 62ch;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        -webkit-text-size-adjust: 100%;
+      }
+      body {
+        margin: 0;
+        background: var(--void);
+        color: var(--text);
+        font: 400 16px/1.65 var(--sans);
+        overflow-x: clip;
+      }
+      h1,
+      h2,
+      h3 {
+        margin: 0;
+        font-weight: 600;
+      }
+      p {
+        margin: 0;
+      }
+      a {
+        color: var(--accent);
+        text-decoration-thickness: 1px;
+        text-underline-offset: 3px;
+      }
+      code {
+        font-family: var(--mono);
+      }
+      :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+        border-radius: 3px;
+      }
 
-.wrap { width: 100%; max-width: 76rem; margin: 0 auto; padding-inline: var(--pad); }
-.band { padding-block: clamp(3.5rem, 9vw, 6.5rem); border-top: 1px solid var(--line-soft); }
-.band-head { max-width: var(--measure); margin-bottom: 2.75rem; }
-.eyebrow {
-  font: 500 0.75rem/1 var(--mono);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--dimmer);
-  margin-bottom: 1rem;
-}
-.band h2 { font-size: clamp(1.5rem, 3.2vw, 2.1rem); letter-spacing: -0.02em; }
-.band-head p { color: var(--dim); margin-top: 0.9rem; }
+      .wrap {
+        width: 100%;
+        max-width: 76rem;
+        margin: 0 auto;
+        padding-inline: var(--pad);
+      }
+      .band {
+        padding-block: clamp(3.5rem, 9vw, 6.5rem);
+        border-top: 1px solid var(--line-soft);
+      }
+      .band-head {
+        max-width: var(--measure);
+        margin-bottom: 2.75rem;
+      }
+      .eyebrow {
+        font: 500 0.75rem/1 var(--mono);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--dimmer);
+        margin-bottom: 1rem;
+      }
+      .band h2 {
+        font-size: clamp(1.5rem, 3.2vw, 2.1rem);
+        letter-spacing: -0.02em;
+      }
+      .band-head p {
+        color: var(--dim);
+        margin-top: 0.9rem;
+      }
 
-/* ---------- top bar ---------- */
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  background: rgba(11, 13, 15, 0.82);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--line-soft);
-}
-.topbar-in {
-  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
-  padding-block: 1.15rem;
-}
-.logotype { display: flex; align-items: center; gap: 0.75rem; text-decoration: none; color: var(--text); }
-.logotype svg { display: block; flex: none; }
-.logotype span {
-  font: 500 clamp(1.05rem, 2.6vw, 1.4rem)/1 var(--mono);
-  letter-spacing: 0.26em;
-  text-transform: uppercase;
-  padding-left: 0.06em;
-}
-.ghbadge {
-  display: inline-flex; align-items: center; gap: 0.55rem;
-  font: 500 0.8125rem/1 var(--mono);
-  color: var(--dim);
-  text-decoration: none;
-  padding: 0.55rem 0.8rem;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--panel);
-  transition: color 0.15s, border-color 0.15s;
-}
-.ghbadge svg { display: block; flex: none; }
-.ghbadge:hover { color: var(--text); border-color: var(--accent); }
-@media (max-width: 30rem) { .ghbadge span { display: none; } .ghbadge { padding: 0.55rem; } }
+      /* ---------- top bar ---------- */
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        background: rgba(11, 13, 15, 0.82);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border-bottom: 1px solid var(--line-soft);
+      }
+      .topbar-in {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        padding-block: 1.15rem;
+      }
+      .logotype {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        text-decoration: none;
+        color: var(--text);
+      }
+      .logotype svg {
+        display: block;
+        flex: none;
+      }
+      .logotype span {
+        font: 500 clamp(1.05rem, 2.6vw, 1.4rem)/1 var(--mono);
+        letter-spacing: 0.26em;
+        text-transform: uppercase;
+        padding-left: 0.06em;
+      }
+      .ghbadge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        font: 500 0.8125rem/1 var(--mono);
+        color: var(--dim);
+        text-decoration: none;
+        padding: 0.55rem 0.8rem;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--panel);
+        transition:
+          color 0.15s,
+          border-color 0.15s;
+      }
+      .ghbadge svg {
+        display: block;
+        flex: none;
+      }
+      .ghbadge:hover {
+        color: var(--text);
+        border-color: var(--accent);
+      }
+      @media (max-width: 30rem) {
+        .ghbadge span {
+          display: none;
+        }
+        .ghbadge {
+          padding: 0.55rem;
+        }
+      }
 
-/* ---------- hero ---------- */
-.hero { padding-block: clamp(3rem, 8vw, 5rem) clamp(3rem, 7vw, 4.5rem); }
-.hero h1 {
-  font-family: var(--mono);
-  font-size: clamp(1.7rem, 4.6vw, 3.15rem);
-  line-height: 1.12;
-  letter-spacing: -0.035em;
-  font-weight: 500;
-  max-width: 28ch;
-}
-.hero h1 em { font-style: normal; color: var(--accent); }
-.lede { max-width: var(--measure); margin-top: 1.6rem; color: var(--dim); font-size: 1.0625rem; }
-.lede strong { color: var(--text); font-weight: 500; }
+      /* ---------- hero ---------- */
+      .hero {
+        padding-block: clamp(3rem, 8vw, 5rem) clamp(3rem, 7vw, 4.5rem);
+      }
+      .hero h1 {
+        font-family: var(--mono);
+        font-size: clamp(1.7rem, 4.6vw, 3.15rem);
+        line-height: 1.12;
+        letter-spacing: -0.035em;
+        font-weight: 500;
+        max-width: 28ch;
+      }
+      .hero h1 em {
+        font-style: normal;
+        color: var(--accent);
+      }
+      .lede {
+        max-width: var(--measure);
+        margin-top: 1.6rem;
+        color: var(--dim);
+        font-size: 1.0625rem;
+      }
+      .lede strong {
+        color: var(--text);
+        font-weight: 500;
+      }
 
-/* ---------- the flow: the one place boldness is spent ---------- */
-.flow-figure { margin: clamp(2.75rem, 7vw, 4rem) 0 0; }
-.panel {
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--panel);
-  /* One soft bloom behind the panel — the only atmosphere on the page. */
-  box-shadow: 0 0 0 1px #0b0d0f, 0 24px 60px -30px rgba(127, 178, 240, 0.28);
-}
-.panel-bar {
-  display: flex; align-items: center; gap: 0.6rem;
-  padding: 0.75rem 1.25rem;
-  border-bottom: 1px solid var(--line-soft);
-  font: 400 0.75rem/1 var(--mono);
-  color: var(--dimmer);
-  letter-spacing: 0.06em;
-}
-.panel-bar .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--go); flex: none; }
-.panel-foot {
-  padding: 0.9rem 1.25rem 1.1rem;
-  border-top: 1px solid var(--line-soft);
-  font: 400 0.8125rem/1.5 var(--sans);
-  color: var(--dimmer);
-}
+      .shot {
+        margin: clamp(2rem, 5vw, 2.75rem) auto clamp(2rem, 5vw, 2.75rem);
+        max-width: 62rem;
+      }
+      /* Below the two-column breakpoint the shot renders at a third of native
+         and its text stops being text. The headline is the better lead there,
+         and the flow panel below it stays legible at any width. */
+      @media (max-width: 40rem) {
+        .shot {
+          display: none;
+        }
+      }
+      .shot img {
+        display: block;
+        width: 100%;
+        height: auto;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        /* The same frame as the flow panel below it, so the two read as one family. */
+        box-shadow:
+          0 0 0 1px #0b0d0f,
+          0 24px 60px -30px rgba(127, 178, 240, 0.28);
+      }
 
-.flow { position: relative; list-style: none; margin: 0; padding: 1.4rem 1.25rem 1.5rem; }
-.flow::before {
-  content: "";
-  position: absolute;
-  left: calc(1.25rem + 4px);
-  top: 2rem; bottom: 2.1rem;
-  width: 1px;
-  background: #2c343b;
-}
-.step {
-  position: relative;
-  display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0.5rem 1.25rem;
-  padding: 0 0 1.35rem 2.25rem;
-  opacity: 0;
-  transform: translateY(4px);
-  transition: opacity 0.35s ease, transform 0.35s ease;
-}
-.step:last-child { padding-bottom: 0; }
-.step.on { opacity: 1; transform: none; }
-.step::before {
-  content: "";
-  position: absolute;
-  left: 0; top: 0.42rem;
-  width: 9px; height: 9px;
-  border-radius: 50%;
-  background: var(--dimmer);
-  box-shadow: 0 0 0 4px var(--panel);
-}
-.step-go::before { background: var(--go); }
-.step-ask::before { background: var(--ask); }
-.step-stop::before { background: var(--stop); }
-.step-main { flex: 1 1 20rem; min-width: 0; }
-.step-say { font-size: 1rem; color: var(--text); }
-.step-detail { font: 400 0.8125rem/1.6 var(--mono); color: var(--dim); margin-top: 0.3rem; overflow-wrap: anywhere; }
-.step-aside { font-size: 0.8125rem; color: var(--dimmer); margin-top: 0.35rem; }
-.pill {
-  font: 500 0.75rem/1 var(--mono);
-  padding: 0.35rem 0.6rem;
-  border-radius: 999px;
-  border: 1px solid currentColor;
-  white-space: nowrap;
-  margin-left: auto;
-}
-.pill-go { color: var(--go); }
-.pill-ask { color: var(--ask); }
-.pill-stop { color: var(--stop); }
+      /* ---------- the flow: the one place boldness is spent ---------- */
+      .flow-figure {
+        margin: clamp(2.75rem, 7vw, 4rem) 0 0;
+      }
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--panel);
+        /* One soft bloom behind the panel — the only atmosphere on the page. */
+        box-shadow:
+          0 0 0 1px #0b0d0f,
+          0 24px 60px -30px rgba(127, 178, 240, 0.28);
+      }
+      .panel-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.75rem 1.25rem;
+        border-bottom: 1px solid var(--line-soft);
+        font: 400 0.75rem/1 var(--mono);
+        color: var(--dimmer);
+        letter-spacing: 0.06em;
+      }
+      .panel-bar .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--go);
+        flex: none;
+      }
+      .panel-foot {
+        padding: 0.9rem 1.25rem 1.1rem;
+        border-top: 1px solid var(--line-soft);
+        font: 400 0.8125rem/1.5 var(--sans);
+        color: var(--dimmer);
+      }
 
-.gate {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 0.85rem;
-  margin: 0 1.25rem 1.5rem;
-  padding: 1rem 1.15rem;
-  border: 1px solid var(--ask);
-  border-radius: 7px;
-  background: rgba(224, 164, 88, 0.06);
-}
-.gate[hidden] { display: none; }
-.gate p { font-size: 0.9375rem; color: var(--text); flex: 1 1 17rem; }
-.gate-btns { display: flex; gap: 0.5rem; }
-.gate button {
-  font: 500 0.8125rem/1 var(--mono);
-  padding: 0.65rem 1rem;
-  border-radius: 5px;
-  border: 1px solid var(--line);
-  background: var(--panel-hi);
-  color: var(--text);
-  cursor: pointer;
-  transition: border-color 0.15s, color 0.15s;
-}
-.gate .approve:hover { border-color: var(--go); color: var(--go); }
-.gate .deny:hover { border-color: var(--stop); color: var(--stop); }
+      .flow {
+        position: relative;
+        list-style: none;
+        margin: 0;
+        padding: 1.4rem 1.25rem 1.5rem;
+      }
+      .flow::before {
+        content: '';
+        position: absolute;
+        left: calc(1.25rem + 4px);
+        top: 2rem;
+        bottom: 2.1rem;
+        width: 1px;
+        background: #2c343b;
+      }
+      .step {
+        position: relative;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        gap: 0.5rem 1.25rem;
+        padding: 0 0 1.35rem 2.25rem;
+        opacity: 0;
+        transform: translateY(4px);
+        transition:
+          opacity 0.35s ease,
+          transform 0.35s ease;
+      }
+      .step:last-child {
+        padding-bottom: 0;
+      }
+      .step.on {
+        opacity: 1;
+        transform: none;
+      }
+      .step::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        top: 0.42rem;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--dimmer);
+        box-shadow: 0 0 0 4px var(--panel);
+      }
+      .step-go::before {
+        background: var(--go);
+      }
+      .step-ask::before {
+        background: var(--ask);
+      }
+      .step-stop::before {
+        background: var(--stop);
+      }
+      .step-main {
+        flex: 1 1 20rem;
+        min-width: 0;
+      }
+      .step-say {
+        font-size: 1rem;
+        color: var(--text);
+      }
+      .step-detail {
+        font: 400 0.8125rem/1.6 var(--mono);
+        color: var(--dim);
+        margin-top: 0.3rem;
+        overflow-wrap: anywhere;
+      }
+      .step-aside {
+        font-size: 0.8125rem;
+        color: var(--dimmer);
+        margin-top: 0.35rem;
+      }
+      .pill {
+        font: 500 0.75rem/1 var(--mono);
+        padding: 0.35rem 0.6rem;
+        border-radius: 999px;
+        border: 1px solid currentColor;
+        white-space: nowrap;
+        margin-left: auto;
+      }
+      .pill-go {
+        color: var(--go);
+      }
+      .pill-ask {
+        color: var(--ask);
+      }
+      .pill-stop {
+        color: var(--stop);
+      }
 
-.verdict {
-  margin-top: 1.15rem;
-  min-height: 1.5rem;
-  font-size: 0.9375rem;
-  color: var(--dim);
-  max-width: var(--measure);
-}
-.verdict strong { color: var(--text); font-weight: 600; }
-.replay {
-  margin-top: 0.8rem;
-  font: 500 0.8125rem/1 var(--mono);
-  background: none;
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  color: var(--dim);
-  padding: 0 0 0.3rem;
-  cursor: pointer;
-}
-.replay:hover { color: var(--text); border-color: var(--accent); }
-.replay[hidden] { display: none; }
+      .gate {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.85rem;
+        margin: 0 1.25rem 1.5rem;
+        padding: 1rem 1.15rem;
+        border: 1px solid var(--ask);
+        border-radius: 7px;
+        background: rgba(224, 164, 88, 0.06);
+      }
+      .gate[hidden] {
+        display: none;
+      }
+      .gate p {
+        font-size: 0.9375rem;
+        color: var(--text);
+        flex: 1 1 17rem;
+      }
+      .gate-btns {
+        display: flex;
+        gap: 0.5rem;
+      }
+      .gate button {
+        font: 500 0.8125rem/1 var(--mono);
+        padding: 0.65rem 1rem;
+        border-radius: 5px;
+        border: 1px solid var(--line);
+        background: var(--panel-hi);
+        color: var(--text);
+        cursor: pointer;
+        transition:
+          border-color 0.15s,
+          color 0.15s;
+      }
+      .gate .approve:hover {
+        border-color: var(--go);
+        color: var(--go);
+      }
+      .gate .deny:hover {
+        border-color: var(--stop);
+        color: var(--stop);
+      }
 
-/* ---------- permission legend ---------- */
-.legend { display: grid; gap: 1px; background: var(--line-soft); border: 1px solid var(--line-soft); border-radius: 7px; overflow: hidden; }
-@media (min-width: 46rem) { .legend { grid-template-columns: repeat(3, 1fr); } }
-.grant { background: var(--void); padding: 1.5rem; }
-.grant h3 { font-size: 1rem; margin-bottom: 0.3rem; }
-.grant .key { font: 500 0.75rem/1 var(--mono); color: var(--dimmer); display: block; margin-bottom: 0.9rem; }
-.grant p { font-size: 0.9375rem; color: var(--dim); }
-.grant-1 h3 { color: var(--dim); }
-.grant-2 h3 { color: var(--ask); }
-.grant-3 h3 { color: var(--go); }
+      .verdict {
+        margin-top: 1.15rem;
+        min-height: 1.5rem;
+        font-size: 0.9375rem;
+        color: var(--dim);
+        max-width: var(--measure);
+      }
+      .verdict strong {
+        color: var(--text);
+        font-weight: 600;
+      }
+      .replay {
+        margin-top: 0.8rem;
+        font: 500 0.8125rem/1 var(--mono);
+        background: none;
+        border: 0;
+        border-bottom: 1px solid var(--line);
+        color: var(--dim);
+        padding: 0 0 0.3rem;
+        cursor: pointer;
+      }
+      .replay:hover {
+        color: var(--text);
+        border-color: var(--accent);
+      }
+      .replay[hidden] {
+        display: none;
+      }
 
-/* ---------- teaching it new things ---------- */
-.teach { display: grid; gap: 1.5rem; }
-@media (min-width: 52rem) { .teach { grid-template-columns: 1fr 1fr; gap: 1.75rem; } }
-.card {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  padding: 1.75rem;
-  display: flex; flex-direction: column; gap: 0.9rem;
-}
-.card > * { min-width: 0; }
-.card-path {
-  font: 500 0.75rem/1 var(--mono);
-  color: var(--dimmer);
-  margin-top: auto;
-  padding-top: 1.1rem;
-  border-top: 1px solid var(--line-soft);
-}
-.card h3 { font-size: 1.125rem; }
-.card p { color: var(--dim); font-size: 0.9375rem; }
-.card p b { color: var(--text); font-weight: 500; }
+      /* ---------- permission legend ---------- */
+      .legend {
+        display: grid;
+        gap: 1px;
+        background: var(--line-soft);
+        border: 1px solid var(--line-soft);
+        border-radius: 7px;
+        overflow: hidden;
+      }
+      @media (min-width: 46rem) {
+        .legend {
+          grid-template-columns: repeat(3, 1fr);
+        }
+      }
+      .grant {
+        background: var(--void);
+        padding: 1.5rem;
+      }
+      .grant h3 {
+        font-size: 1rem;
+        margin-bottom: 0.3rem;
+      }
+      .grant .key {
+        font: 500 0.75rem/1 var(--mono);
+        color: var(--dimmer);
+        display: block;
+        margin-bottom: 0.9rem;
+      }
+      .grant p {
+        font-size: 0.9375rem;
+        color: var(--dim);
+      }
+      .grant-1 h3 {
+        color: var(--dim);
+      }
+      .grant-2 h3 {
+        color: var(--ask);
+      }
+      .grant-3 h3 {
+        color: var(--go);
+      }
 
-/* ---------- the trade ---------- */
-.trade { display: grid; gap: 2.5rem; }
-@media (min-width: 46rem) { .trade { grid-template-columns: 1fr 1fr; gap: 3.5rem; } }
-.trade h3 {
-  font: 500 0.75rem/1 var(--mono);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  padding-bottom: 0.9rem;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 1.25rem;
-}
-.trade-get h3 { color: var(--go); }
-.trade-cost h3 { color: var(--ask); }
-.trade ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.9rem; }
-.trade li { padding-left: 1.4rem; position: relative; color: var(--dim); }
-.trade li::before { position: absolute; left: 0; top: 0; font-family: var(--mono); }
-.trade-get li::before { content: "+"; color: var(--go); }
-.trade-cost li::before { content: "\2022"; color: var(--ask); }
-.trade li b { color: var(--text); font-weight: 500; }
+      /* ---------- teaching it new things ---------- */
+      .teach {
+        display: grid;
+        gap: 1.5rem;
+      }
+      @media (min-width: 52rem) {
+        .teach {
+          grid-template-columns: 1fr 1fr;
+          gap: 1.75rem;
+        }
+      }
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 1.75rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.9rem;
+      }
+      .card > * {
+        min-width: 0;
+      }
+      .card-path {
+        font: 500 0.75rem/1 var(--mono);
+        color: var(--dimmer);
+        margin-top: auto;
+        padding-top: 1.1rem;
+        border-top: 1px solid var(--line-soft);
+      }
+      .card h3 {
+        font-size: 1.125rem;
+      }
+      .card p {
+        color: var(--dim);
+        font-size: 0.9375rem;
+      }
+      .card p b {
+        color: var(--text);
+        font-weight: 500;
+      }
 
-/* ---------- capability grid ---------- */
-.caps { display: grid; gap: 1px; background: var(--line-soft); border: 1px solid var(--line-soft); border-radius: 7px; overflow: hidden; }
-@media (min-width: 40rem) { .caps { grid-template-columns: repeat(2, 1fr); } }
-@media (min-width: 62rem) { .caps { grid-template-columns: repeat(3, 1fr); } }
-.cap { background: var(--void); padding: 1.5rem; }
-.cap h3 { font: 500 0.875rem/1 var(--mono); color: var(--accent); margin-bottom: 0.7rem; }
-.cap p { font-size: 0.9375rem; color: var(--dim); }
+      /* ---------- the trade ---------- */
+      .trade {
+        display: grid;
+        gap: 2.5rem;
+      }
+      @media (min-width: 46rem) {
+        .trade {
+          grid-template-columns: 1fr 1fr;
+          gap: 3.5rem;
+        }
+      }
+      .trade h3 {
+        font: 500 0.75rem/1 var(--mono);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        padding-bottom: 0.9rem;
+        border-bottom: 1px solid var(--line);
+        margin-bottom: 1.25rem;
+      }
+      .trade-get h3 {
+        color: var(--go);
+      }
+      .trade-cost h3 {
+        color: var(--ask);
+      }
+      .trade ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 0.9rem;
+      }
+      .trade li {
+        padding-left: 1.4rem;
+        position: relative;
+        color: var(--dim);
+      }
+      .trade li::before {
+        position: absolute;
+        left: 0;
+        top: 0;
+        font-family: var(--mono);
+      }
+      .trade-get li::before {
+        content: '+';
+        color: var(--go);
+      }
+      .trade-cost li::before {
+        content: '\2022';
+        color: var(--ask);
+      }
+      .trade li b {
+        color: var(--text);
+        font-weight: 500;
+      }
 
-/* ---------- run it ---------- */
-.run { display: grid; gap: 2.5rem; align-items: start; }
-@media (min-width: 52rem) { .run { grid-template-columns: 1fr 1.1fr; gap: 3.5rem; } }
-.run > * { min-width: 0; }
-.steps { list-style: none; margin: 0; padding: 0; counter-reset: s; display: grid; gap: 1.5rem; }
-.steps li { counter-increment: s; padding-left: 2.5rem; position: relative; color: var(--dim); }
-.steps li::before {
-  content: counter(s, decimal-leading-zero);
-  position: absolute; left: 0; top: 0.1rem;
-  font: 500 0.8125rem/1 var(--mono);
-  color: var(--dimmer);
-}
-.steps b { color: var(--text); font-weight: 500; display: block; margin-bottom: 0.2rem; }
-pre {
-  margin: 0;
-  padding: 1.25rem;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel);
-  overflow-x: auto;
-  font: 400 0.875rem/1.75 var(--mono);
-  color: var(--text);
-}
-pre .c { color: var(--dimmer); }
-pre .p { color: var(--go); }
-.note { margin-top: 1.25rem; font-size: 0.9375rem; color: var(--dim); }
-.note code { font-size: 0.8125rem; color: var(--accent); }
+      /* ---------- capability grid ---------- */
+      .caps {
+        display: grid;
+        gap: 1px;
+        background: var(--line-soft);
+        border: 1px solid var(--line-soft);
+        border-radius: 7px;
+        overflow: hidden;
+      }
+      @media (min-width: 40rem) {
+        .caps {
+          grid-template-columns: repeat(2, 1fr);
+        }
+      }
+      @media (min-width: 62rem) {
+        .caps {
+          grid-template-columns: repeat(3, 1fr);
+        }
+      }
+      .cap {
+        background: var(--void);
+        padding: 1.5rem;
+      }
+      .cap h3 {
+        font: 500 0.875rem/1 var(--mono);
+        color: var(--accent);
+        margin-bottom: 0.7rem;
+      }
+      .cap p {
+        font-size: 0.9375rem;
+        color: var(--dim);
+      }
 
-/* ---------- footer ---------- */
-footer { border-top: 1px solid var(--line-soft); padding-block: 2.75rem 4rem; }
-.foot { display: flex; flex-wrap: wrap; gap: 1.5rem 2.5rem; align-items: center; justify-content: space-between; }
-.foot-mark { display: flex; align-items: center; gap: 0.65rem; font: 500 0.8125rem/1 var(--mono); letter-spacing: 0.2em; text-transform: uppercase; color: var(--dim); }
-.foot-links { display: flex; flex-wrap: wrap; gap: 1.5rem; font: 400 0.875rem/1 var(--mono); }
-.foot-links a { color: var(--dim); text-decoration: none; }
-.foot-links a:hover { color: var(--accent); }
+      /* ---------- run it ---------- */
+      .run {
+        display: grid;
+        gap: 2.5rem;
+        align-items: start;
+      }
+      @media (min-width: 52rem) {
+        .run {
+          grid-template-columns: 1fr 1.1fr;
+          gap: 3.5rem;
+        }
+      }
+      .run > * {
+        min-width: 0;
+      }
+      .steps {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        counter-reset: s;
+        display: grid;
+        gap: 1.5rem;
+      }
+      .steps li {
+        counter-increment: s;
+        padding-left: 2.5rem;
+        position: relative;
+        color: var(--dim);
+      }
+      .steps li::before {
+        content: counter(s, decimal-leading-zero);
+        position: absolute;
+        left: 0;
+        top: 0.1rem;
+        font: 500 0.8125rem/1 var(--mono);
+        color: var(--dimmer);
+      }
+      .steps b {
+        color: var(--text);
+        font-weight: 500;
+        display: block;
+        margin-bottom: 0.2rem;
+      }
+      pre {
+        margin: 0;
+        padding: 1.25rem;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--panel);
+        overflow-x: auto;
+        font: 400 0.875rem/1.75 var(--mono);
+        color: var(--text);
+      }
+      pre .c {
+        color: var(--dimmer);
+      }
+      pre .p {
+        color: var(--go);
+      }
+      .note {
+        margin-top: 1.25rem;
+        font-size: 0.9375rem;
+        color: var(--dim);
+      }
+      .note code {
+        font-size: 0.8125rem;
+        color: var(--accent);
+      }
 
-@media (prefers-reduced-motion: reduce) {
-  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
-}
-</style>
-</head>
-<body>
+      /* ---------- footer ---------- */
+      footer {
+        border-top: 1px solid var(--line-soft);
+        padding-block: 2.75rem 4rem;
+      }
+      .foot {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1.5rem 2.5rem;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .foot-mark {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        font: 500 0.8125rem/1 var(--mono);
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+        color: var(--dim);
+      }
+      .foot-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1.5rem;
+        font: 400 0.875rem/1 var(--mono);
+      }
+      .foot-links a {
+        color: var(--dim);
+        text-decoration: none;
+      }
+      .foot-links a:hover {
+        color: var(--accent);
+      }
 
-<div class="topbar">
-  <div class="wrap topbar-in">
-    <a class="logotype" href="/">
-      <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#14181b" stroke="#232a30"/><circle cx="11" cy="16" r="3.6" fill="#7fb2f0"/><rect x="19" y="6" width="2.6" height="20" rx="1.3" fill="#86c06c"/></svg>
-      <span>Turminder</span>
-    </a>
-    <a class="ghbadge" href="https://github.com/cvasseng/turminder">
-      <svg viewBox="0 0 16 16" width="17" height="17" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
-      <span>cvasseng/turminder</span>
-    </a>
-  </div>
-</div>
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          animation-duration: 0.01ms !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="topbar">
+      <div class="wrap topbar-in">
+        <a class="logotype" href="/">
+          <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
+            <rect width="32" height="32" rx="7" fill="#14181b" stroke="#232a30" />
+            <circle cx="11" cy="16" r="3.6" fill="#7fb2f0" />
+            <rect x="19" y="6" width="2.6" height="20" rx="1.3" fill="#86c06c" />
+          </svg>
+          <span>Turminder</span>
+        </a>
+        <a class="ghbadge" href="https://github.com/cvasseng/turminder">
+          <svg
+            viewBox="0 0 16 16"
+            width="17"
+            height="17"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <path
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+            />
+          </svg>
+          <span>cvasseng/turminder</span>
+        </a>
+      </div>
+    </div>
 
-<header class="hero wrap">
-  <h1>The assistant that can only do what <em>you tell it to</em></h1>
-  <p class="lede">Self-hosted and event-driven, running on your own hardware against a local model or any endpoint you point it at. <strong>Every capability it has is one you handed it.</strong> The check runs where the tool is called, not in a prompt the model might ignore.</p>
+    <header class="hero wrap">
+      <h1>The assistant that can only do what <em>you tell it to</em></h1>
+      <figure class="shot">
+        <img
+          src="screen.png"
+          width="998"
+          height="554"
+          decoding="async"
+          alt="The onboarding conversation: the assistant proposes calling itself Sleeper Service, after one of the Minds in Iain Banks' Culture novels, and asks what you would like to be called."
+        />
+      </figure>
+      <p class="lede">
+        Self-hosted and event-driven, running on your own hardware against a local model or any
+        endpoint you point it at.
+        <strong>Every capability it has is one you handed it.</strong> The check runs where the
+        tool is called, not in a prompt the model might ignore.
+      </p>
 
-  <figure class="flow-figure">
-    <div class="panel">
-      <div class="panel-bar"><span class="dot"></span> Tuesday, 09:14</div>
-      <ol class="flow" id="flow">
-        <li class="step" data-step>
-          <div class="step-main">
-            <p class="step-say">You type a line in your notes and save.</p>
-            <p class="step-detail">files/work/q3.md — “@turminder book the review with the team, Thursday afternoon”</p>
-            <p class="step-aside">It acts on the line addressed to it. The rest of the file stays your file.</p>
+      <figure class="flow-figure">
+        <div class="panel">
+          <div class="panel-bar"><span class="dot"></span> Tuesday, 09:14</div>
+          <ol class="flow" id="flow">
+            <li class="step" data-step>
+              <div class="step-main">
+                <p class="step-say">You type a line in your notes and save.</p>
+                <p class="step-detail">
+                  files/work/q3.md — “@turminder book the review with the team, Thursday
+                  afternoon”
+                </p>
+                <p class="step-aside">
+                  It acts on the line addressed to it. The rest of the file stays your file.
+                </p>
+              </div>
+            </li>
+            <li class="step" data-step>
+              <div class="step-main">
+                <p class="step-say">The behavior you set up for this picks it up.</p>
+                <p class="step-detail">
+                  handlers/meetings.md — may read your calendar, must ask before writing to it
+                </p>
+              </div>
+            </li>
+            <li class="step step-go" data-step>
+              <div class="step-main">
+                <p class="step-say">It looks at Thursday and finds a slot.</p>
+                <p class="step-detail">two hours free after 14:00</p>
+              </div>
+              <span class="pill pill-go">you allowed this</span>
+            </li>
+            <li class="step step-ask" data-step id="last">
+              <div class="step-main">
+                <p class="step-say">It wants to put the review on your calendar.</p>
+                <p class="step-detail" id="lastDetail">Thursday 14:00–15:30, “Q3 review”</p>
+              </div>
+              <span class="pill pill-ask" id="lastPill">needs your say-so</span>
+            </li>
+          </ol>
+          <div class="gate" id="gate" hidden>
+            <p>
+              You said this one always comes to you first. Nothing happens until you answer.
+            </p>
+            <div class="gate-btns">
+              <button class="approve" id="approve" type="button">Approve</button>
+              <button class="deny" id="deny" type="button">Deny</button>
+            </div>
           </div>
-        </li>
-        <li class="step" data-step>
-          <div class="step-main">
-            <p class="step-say">The behavior you set up for this picks it up.</p>
-            <p class="step-detail">handlers/meetings.md — may read your calendar, must ask before writing to it</p>
-          </div>
-        </li>
-        <li class="step step-go" data-step>
-          <div class="step-main">
-            <p class="step-say">It looks at Thursday and finds a slot.</p>
-            <p class="step-detail">two hours free after 14:00</p>
-          </div>
-          <span class="pill pill-go">you allowed this</span>
-        </li>
-        <li class="step step-ask" data-step id="last">
-          <div class="step-main">
-            <p class="step-say">It wants to put the review on your calendar.</p>
-            <p class="step-detail" id="lastDetail">Thursday 14:00–15:30, “Q3 review”</p>
-          </div>
-          <span class="pill pill-ask" id="lastPill">needs your say-so</span>
-        </li>
-      </ol>
-      <div class="gate" id="gate" hidden>
-        <p>You said this one always comes to you first. Nothing happens until you answer.</p>
-        <div class="gate-btns">
-          <button class="approve" id="approve" type="button">Approve</button>
-          <button class="deny" id="deny" type="button">Deny</button>
+          <p class="panel-foot">
+            Every step is written down, in order, with the reason for it. You can ask why it did
+            any of this.
+          </p>
         </div>
-      </div>
-      <p class="panel-foot">Every step is written down, in order, with the reason for it. You can ask why it did any of this.</p>
-    </div>
-    <p class="verdict" id="verdict" role="status" aria-live="polite"></p>
-    <button class="replay" id="replay" type="button" hidden>Play it again</button>
-  </figure>
-</header>
+        <p class="verdict" id="verdict" role="status" aria-live="polite"></p>
+        <button class="replay" id="replay" type="button" hidden>Play it again</button>
+      </figure>
+    </header>
 
-<main>
-  <section class="band wrap">
-    <div class="band-head">
-      <p class="eyebrow">Capabilities</p>
-      <h2>What it can do on day one.</h2>
-    </div>
-    <div class="caps">
-      <div class="cap"><h3>chat</h3><p>A web UI with streaming and tool use. Drop in an image and a model that can see will look at it. One that cannot will say so rather than guess.</p></div>
-      <div class="cap"><h3>handlers</h3><p>"When a new file lands in the scans folder, rename it and log what it is." A short markdown file written with you in chat, run against incoming events with only the tools you granted it.</p></div>
-      <div class="cap"><h3>memory</h3><p>What it learns about you, kept as markdown files with retrieval over them. Every change is a commit, and past conversations are searchable too.</p></div>
-      <div class="cap"><h3>files</h3><p>A workspace of notes and todo lists. Point it at your Obsidian vault. Type <code>@turminder do X</code> in any file and it becomes something it acts on.</p></div>
-      <div class="cap"><h3>projects</h3><p>A fenced island of files, memories and past conversations. Load one when you start work on it. Until you do, nothing inside reaches a prompt, because the search itself is scoped, and notes written while it is loaded are filed inside it.</p></div>
-      <div class="cap"><h3>documents</h3><p>Reads PDFs and Word files by outline first, then only the pages that matter. A .docx full of tracked changes reads as its final text. Any note or dashboard goes back out as a PDF.</p></div>
-      <div class="cap"><h3>schedule</h3><p>Reminders and recurring work, arriving as desktop notifications, with approve and deny buttons on the ones that need you.</p></div>
-      <div class="cap"><h3>watch</h3><p>"Track this package." A status checked on a timer by plain code, waking the model only when the answer changes. A delivered parcel closes its own watch.</p></div>
-      <div class="cap"><h3>embeds</h3><p>Small sandboxed pages it writes for you: charts, dashboards wired to live data, slides, and mini-apps whose buttons it can act on.</p></div>
-      <div class="cap"><h3>integrations</h3><p>Asana, Google Calendar, weather, web search and page fetching are built in. Credentials go in through a form, and only the tools you activate exist.</p></div>
-      <div class="cap"><h3>cost</h3><p>Price your endpoints and every chat carries a running estimate. Ask what it has cost you this month. Every call records which model answered and why.</p></div>
-      <div class="cap"><h3>devices</h3><p>Press connect on your phone and approve the prompt on a machine already linked. A Linux desktop app and a browser extension come in the same door.</p></div>
-    </div>
-  </section>
+    <main>
+      <section class="band wrap">
+        <div class="band-head">
+          <p class="eyebrow">Capabilities</p>
+          <h2>What it can do on day one.</h2>
+        </div>
+        <div class="caps">
+          <div class="cap">
+            <h3>chat</h3>
+            <p>
+              A web UI with streaming and tool use. Drop in an image and a model that can see
+              will look at it. One that cannot will say so rather than guess.
+            </p>
+          </div>
+          <div class="cap">
+            <h3>handlers</h3>
+            <p>
+              "When a new file lands in the scans folder, rename it and log what it is." A short
+              markdown file written with you in chat, run against incoming events with only the
+              tools you granted it.
+            </p>
+          </div>
+          <div class="cap">
+            <h3>memory</h3>
+            <p>
+              What it learns about you, kept as markdown files with retrieval over them. Every
+              change is a commit, and past conversations are searchable too.
+            </p>
+          </div>
+          <div class="cap">
+            <h3>files</h3>
+            <p>
+              A workspace of notes and todo lists. Point it at your Obsidian vault. Type
+              <code>@turminder do X</code> in any file and it becomes something it acts on.
+            </p>
+          </div>
+          <div class="cap">
+            <h3>projects</h3>
+            <p>
+              A fenced island of files, memories and past conversations. Load one when you start
+              work on it. Until you do, nothing inside reaches a prompt, because the search
+              itself is scoped, and notes written while it is loaded are filed inside it.
+            </p>
+          </div>
+          <div class="cap">
+            <h3>documents</h3>
+            <p>
+              Reads PDFs and Word files by outline first, then only the pages that matter. A
+              .docx full of tracked changes reads as its final text. Any note or dashboard goes
+              back out as a PDF.
+            </p>
+          </div>
+          <div class="cap">
+            <h3>schedule</h3>
+            <p>
+              Reminders and recurring work, arriving as desktop notifications, with approve and
+              deny buttons on the ones that need you.
+            </p>
+          </div>
+          <div class="cap">
+            <h3>watch</h3>
+            <p>
+              "Track this package." A status checked on a timer by plain code, waking the model
+              only when the answer changes. A delivered parcel closes its own watch.
+            </p>
+          </div>
+          <div class="cap">
+            <h3>embeds</h3>
+            <p>
+              Small sandboxed pages it writes for you: charts, dashboards wired to live data,
+              slides, and mini-apps whose buttons it can act on.
+            </p>
+          </div>
+          <div class="cap">
+            <h3>integrations</h3>
+            <p>
+              Asana, Google Calendar, weather, web search and page fetching are built in.
+              Credentials go in through a form, and only the tools you activate exist.
+            </p>
+          </div>
+          <div class="cap">
+            <h3>cost</h3>
+            <p>
+              Price your endpoints and every chat carries a running estimate. Ask what it has
+              cost you this month. Every call records which model answered and why.
+            </p>
+          </div>
+          <div class="cap">
+            <h3>devices</h3>
+            <p>
+              Press connect on your phone and approve the prompt on a machine already linked. A
+              Linux desktop app and a browser extension come in the same door.
+            </p>
+          </div>
+        </div>
+      </section>
 
-  <section class="band wrap">
-    <div class="band-head">
-      <p class="eyebrow">Skills and MCP servers</p>
-      <h2>Ask for it, and it sets it up with you.</h2>
-      <p>You never open a config file to connect something new. You ask, the assistant does the finding and the filling in, and then it stops at the one step that has to be yours.</p>
-    </div>
-    <div class="teach">
-      <div class="card">
-        <h3>Connecting something new</h3>
-        <p>Say “connect my password manager”, or ask whether it can reach your home automation. The assistant works out which MCP server you need, tells you what it does, and puts a form in front of you with the exact command it wants to run and fields for your credentials.</p>
-        <p><b>Submitting that form is the approval</b>, and it is the one step the assistant cannot take for you. Your key goes from that form into your keychain and stays there. It never passes through the chat, and the model only ever sees a reference to it.</p>
-        <p class="card-path">config/mcp.yaml</p>
-      </div>
-      <div class="card">
-        <h3>Teaching it the house rules</h3>
-        <p>A connection gives it tools. It still has to know when to reach for them and how you like the job done, and that is what a skill is: a short note in plain language about one kind of work.</p>
-        <p>The assistant offers to write one as soon as the connection works, and asks you the questions it needs answered. Months later you can open that file, change your mind, and it follows the new version.</p>
-        <p class="card-path">skills/&lt;name&gt;.md</p>
-      </div>
-    </div>
-  </section>
+      <section class="band wrap">
+        <div class="band-head">
+          <p class="eyebrow">Skills and MCP servers</p>
+          <h2>Ask for it, and it sets it up with you.</h2>
+          <p>
+            You never open a config file to connect something new. You ask, the assistant does
+            the finding and the filling in, and then it stops at the one step that has to be
+            yours.
+          </p>
+        </div>
+        <div class="teach">
+          <div class="card">
+            <h3>Connecting something new</h3>
+            <p>
+              Say “connect my password manager”, or ask whether it can reach your home
+              automation. The assistant works out which MCP server you need, tells you what it
+              does, and puts a form in front of you with the exact command it wants to run and
+              fields for your credentials.
+            </p>
+            <p>
+              <b>Submitting that form is the approval</b>, and it is the one step the assistant
+              cannot take for you. Your key goes from that form into your keychain and stays
+              there. It never passes through the chat, and the model only ever sees a reference
+              to it.
+            </p>
+            <p class="card-path">config/mcp.yaml</p>
+          </div>
+          <div class="card">
+            <h3>Teaching it the house rules</h3>
+            <p>
+              A connection gives it tools. It still has to know when to reach for them and how
+              you like the job done, and that is what a skill is: a short note in plain language
+              about one kind of work.
+            </p>
+            <p>
+              The assistant offers to write one as soon as the connection works, and asks you
+              the questions it needs answered. Months later you can open that file, change your
+              mind, and it follows the new version.
+            </p>
+            <p class="card-path">skills/&lt;name&gt;.md</p>
+          </div>
+        </div>
+      </section>
 
-  <section class="band wrap">
-    <div class="band-head">
-      <p class="eyebrow">Permissions</p>
-      <h2>Three levels, set per tool.</h2>
-      <p>Every behavior you set up names the tools it may use, and you decide how far each one goes. Nothing it reads can raise its own permissions, whether that is a file, a web page, or a reply from a service you connected.</p>
-    </div>
-    <div class="legend">
-      <div class="grant grant-1">
-        <h3>Off the table</h3>
-        <span class="key">absent</span>
-        <p>It doesn't have the tool and isn't offered one. There is nothing to reach for, and nothing it reads can put the tool back on the table.</p>
-      </div>
-      <div class="grant grant-2">
-        <h3>Ask me first</h3>
-        <span class="key">confirm</span>
-        <p>Everything stops and the question comes to you, wherever you are. Say no and it carries on with what it was allowed to do, and it can tell you what it wanted.</p>
-      </div>
-      <div class="grant grant-3">
-        <h3>Go ahead</h3>
-        <span class="key">tools</span>
-        <p>You decided once and it holds. It won't ask again for this, and every time it does the thing, that goes on the record too.</p>
-      </div>
-    </div>
-  </section>
+      <section class="band wrap">
+        <div class="band-head">
+          <p class="eyebrow">Permissions</p>
+          <h2>Three levels, set per tool.</h2>
+          <p>
+            Every behavior you set up names the tools it may use, and you decide how far each
+            one goes. Nothing it reads can raise its own permissions, whether that is a file, a
+            web page, or a reply from a service you connected.
+          </p>
+        </div>
+        <div class="legend">
+          <div class="grant grant-1">
+            <h3>Off the table</h3>
+            <span class="key">absent</span>
+            <p>
+              It doesn't have the tool and isn't offered one. There is nothing to reach for, and
+              nothing it reads can put the tool back on the table.
+            </p>
+          </div>
+          <div class="grant grant-2">
+            <h3>Ask me first</h3>
+            <span class="key">confirm</span>
+            <p>
+              Everything stops and the question comes to you, wherever you are. Say no and it
+              carries on with what it was allowed to do, and it can tell you what it wanted.
+            </p>
+          </div>
+          <div class="grant grant-3">
+            <h3>Go ahead</h3>
+            <span class="key">tools</span>
+            <p>
+              You decided once and it holds. It won't ask again for this, and every time it does
+              the thing, that goes on the record too.
+            </p>
+          </div>
+        </div>
+      </section>
 
-  <section class="band wrap">
-    <div class="band-head">
-      <p class="eyebrow">The trade</p>
-      <h2>Slower to get to know you. Far harder to surprise you.</h2>
-      <p>The usual shape is one always-on agent with broad standing permissions, where everything it reads lands in the same context that decides what to do. That gets you something useful in an afternoon. Turminder takes the other side of that bet, and both halves are worth stating plainly.</p>
-    </div>
-    <div class="trade">
-      <div class="trade-get">
-        <h3>What you get</h3>
-        <ul>
-          <li><b>Nothing acts until you have said it may</b>, once, in a permission rather than a request the model is trusted to follow.</li>
-          <li><b>An answer to "why did it do that".</b> Every step is recorded: what set it off, what it decided, what it called, what came back.</li>
-          <li><b>Your credentials never reach the model.</b> They go from a form into your keychain, and what the model sees is a reference.</li>
-          <li><b>Figures that came from the source.</b> Dashboards pull live numbers through frozen read-only calls replayed by ordinary code, so they never pass through the model on the way to your screen.</li>
-          <li><b>Your data is a folder.</b> Markdown under git plus one database file. Copy it to a new machine and it is the same assistant, memories and all.</li>
-        </ul>
-      </div>
-      <div class="trade-cost">
-        <h3>What it asks of you</h3>
-        <ul>
-          <li><b>An evening to set up</b>, and a few minutes each time you want it to do something new.</li>
-          <li><b>You decide the behaviors.</b> It writes them with you in chat, but the call is yours, and so is the file.</li>
-          <li><b>No skill marketplace.</b> Connecting an outside service is a form you submit with the command in front of you. It can suggest. It cannot install.</li>
-          <li><b>Saying yes now and then</b>, until a new routine has earned a standing permission.</li>
-          <li><b>Patience early on.</b> If what you want is maximum capability out of the box, the first week here will feel deliberate.</li>
-        </ul>
-      </div>
-    </div>
-  </section>
+      <section class="band wrap">
+        <div class="band-head">
+          <p class="eyebrow">The trade</p>
+          <h2>Slower to get to know you. Far harder to surprise you.</h2>
+          <p>
+            The usual shape is one always-on agent with broad standing permissions, where
+            everything it reads lands in the same context that decides what to do. That gets you
+            something useful in an afternoon. Turminder takes the other side of that bet, and
+            both halves are worth stating plainly.
+          </p>
+        </div>
+        <div class="trade">
+          <div class="trade-get">
+            <h3>What you get</h3>
+            <ul>
+              <li>
+                <b>Nothing acts until you have said it may</b>, once, in a permission rather
+                than a request the model is trusted to follow.
+              </li>
+              <li>
+                <b>An answer to "why did it do that".</b> Every step is recorded: what set it
+                off, what it decided, what it called, what came back.
+              </li>
+              <li>
+                <b>Your credentials never reach the model.</b> They go from a form into your
+                keychain, and what the model sees is a reference.
+              </li>
+              <li>
+                <b>Figures that came from the source.</b> Dashboards pull live numbers through
+                frozen read-only calls replayed by ordinary code, so they never pass through the
+                model on the way to your screen.
+              </li>
+              <li>
+                <b>Your data is a folder.</b> Markdown under git plus one database file. Copy it
+                to a new machine and it is the same assistant, memories and all.
+              </li>
+            </ul>
+          </div>
+          <div class="trade-cost">
+            <h3>What it asks of you</h3>
+            <ul>
+              <li>
+                <b>An evening to set up</b>, and a few minutes each time you want it to do
+                something new.
+              </li>
+              <li>
+                <b>You decide the behaviors.</b> It writes them with you in chat, but the call
+                is yours, and so is the file.
+              </li>
+              <li>
+                <b>No skill marketplace.</b> Connecting an outside service is a form you submit
+                with the command in front of you. It can suggest. It cannot install.
+              </li>
+              <li>
+                <b>Saying yes now and then</b>, until a new routine has earned a standing
+                permission.
+              </li>
+              <li>
+                <b>Patience early on.</b> If what you want is maximum capability out of the box,
+                the first week here will feel deliberate.
+              </li>
+            </ul>
+          </div>
+        </div>
+      </section>
 
-  <section class="band wrap">
-    <div class="band-head">
-      <p class="eyebrow">Run it</p>
-      <h2>Node 22, an endpoint, and about five minutes.</h2>
-      <p>Any OpenAI-compatible endpoint works: a model served on your own machine, or a hosted provider whose key you paste into setup. Handling tool calls well matters more than parameter count.</p>
-    </div>
-    <div class="run">
-      <ol class="steps">
-        <li><b>Set up</b> Pick your provider and it fills in the rest. It probes what the endpoint can do before writing any config.</li>
-        <li><b>Meet it</b> The assistant opens the conversation itself, picks its own name, asks yours, and writes down who it is.</li>
-        <li><b>Give it something to do</b> "Set up google calendar." "When my notes mention a deadline, put it in my todo list." It asks for the permissions the new thing needs and remembers the arrangement.</li>
-      </ol>
-      <div>
-<pre><span class="c">$</span> git clone https://github.com/cvasseng/turminder
+      <section class="band wrap">
+        <div class="band-head">
+          <p class="eyebrow">Run it</p>
+          <h2>Node 22, an endpoint, and about five minutes.</h2>
+          <p>
+            Any OpenAI-compatible endpoint works: a model served on your own machine, or a
+            hosted provider whose key you paste into setup. Handling tool calls well matters
+            more than parameter count.
+          </p>
+        </div>
+        <div class="run">
+          <ol class="steps">
+            <li>
+              <b>Set up</b> Pick your provider and it fills in the rest. It probes what the
+              endpoint can do before writing any config.
+            </li>
+            <li>
+              <b>Meet it</b> The assistant opens the conversation itself, picks its own name,
+              asks yours, and writes down who it is.
+            </li>
+            <li>
+              <b>Give it something to do</b> "Set up google calendar." "When my notes mention a
+              deadline, put it in my todo list." It asks for the permissions the new thing needs
+              and remembers the arrangement.
+            </li>
+          </ol>
+          <div>
+            <pre><span class="c">$</span> git clone https://github.com/cvasseng/turminder
 <span class="c">$</span> cd turminder &amp;&amp; npm install
 <span class="c">$</span> npm start
 <span class="p">→</span> http://127.0.0.1:7787</pre>
-        <p class="note">Everything it knows lives in <code>~/.turminder</code>, a git repo of markdown plus one database file. Back it up by copying the folder. It listens on localhost by default; for other machines on your network, put it behind Tailscale or WireGuard.</p>
+            <p class="note">
+              Everything it knows lives in <code>~/.turminder</code>, a git repo of markdown
+              plus one database file. Back it up by copying the folder. It listens on localhost
+              by default; for other machines on your network, put it behind Tailscale or
+              WireGuard.
+            </p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="wrap">
+      <div class="foot">
+        <p class="foot-mark">
+          <svg width="18" height="18" viewBox="0 0 32 32" aria-hidden="true">
+            <circle cx="11" cy="16" r="3.6" fill="#7fb2f0" />
+            <rect x="19" y="6" width="2.6" height="20" rx="1.3" fill="#86c06c" />
+          </svg>
+          Turminder — MIT licensed
+        </p>
+        <nav class="foot-links">
+          <a href="https://github.com/cvasseng/turminder">GitHub</a>
+          <a href="https://github.com/cvasseng/turminder/blob/main/spec.md">Spec</a>
+          <a href="https://github.com/cvasseng/turminder/blob/main/LICENSE">License</a>
+        </nav>
       </div>
-    </div>
-  </section>
-</main>
+    </footer>
 
-<footer class="wrap">
-  <div class="foot">
-    <p class="foot-mark">
-      <svg width="18" height="18" viewBox="0 0 32 32" aria-hidden="true"><circle cx="11" cy="16" r="3.6" fill="#7fb2f0"/><rect x="19" y="6" width="2.6" height="20" rx="1.3" fill="#86c06c"/></svg>
-      Turminder — MIT licensed
-    </p>
-    <nav class="foot-links">
-      <a href="https://github.com/cvasseng/turminder">GitHub</a>
-      <a href="https://github.com/cvasseng/turminder/blob/main/spec.md">Spec</a>
-      <a href="https://github.com/cvasseng/turminder/blob/main/LICENSE">License</a>
-    </nav>
-  </div>
-</footer>
+    <script>
+      (function () {
+        var steps = Array.prototype.slice.call(
+          document.querySelectorAll('#flow .step[data-step]'),
+        );
+        var gate = document.getElementById('gate');
+        var last = document.getElementById('last');
+        var lastPill = document.getElementById('lastPill');
+        var lastDetail = document.getElementById('lastDetail');
+        var verdict = document.getElementById('verdict');
+        var replay = document.getElementById('replay');
+        var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        var timers = [];
 
-<script>
-(function () {
-  var steps = Array.prototype.slice.call(document.querySelectorAll('#flow .step[data-step]'));
-  var gate = document.getElementById('gate');
-  var last = document.getElementById('last');
-  var lastPill = document.getElementById('lastPill');
-  var lastDetail = document.getElementById('lastDetail');
-  var verdict = document.getElementById('verdict');
-  var replay = document.getElementById('replay');
-  var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  var timers = [];
+        function play() {
+          timers.forEach(clearTimeout);
+          timers = [];
+          steps.forEach(function (s) {
+            s.classList.remove('on');
+          });
+          last.classList.remove('step-go', 'step-stop');
+          last.classList.add('step-ask');
+          lastPill.className = 'pill pill-ask';
+          lastPill.textContent = 'needs your say-so';
+          lastDetail.textContent = 'Thursday 14:00–15:30, “Q3 review”';
+          verdict.textContent = '';
+          replay.hidden = true;
+          gate.hidden = true;
 
-  function play() {
-    timers.forEach(clearTimeout);
-    timers = [];
-    steps.forEach(function (s) { s.classList.remove('on'); });
-    last.classList.remove('step-go', 'step-stop');
-    last.classList.add('step-ask');
-    lastPill.className = 'pill pill-ask';
-    lastPill.textContent = 'needs your say-so';
-    lastDetail.textContent = 'Thursday 14:00–15:30, “Q3 review”';
-    verdict.textContent = '';
-    replay.hidden = true;
-    gate.hidden = true;
+          if (reduced) {
+            steps.forEach(function (s) {
+              s.classList.add('on');
+            });
+            gate.hidden = false;
+            return;
+          }
+          steps.forEach(function (s, i) {
+            timers.push(
+              setTimeout(
+                function () {
+                  s.classList.add('on');
+                },
+                250 + i * 520,
+              ),
+            );
+          });
+          timers.push(
+            setTimeout(
+              function () {
+                gate.hidden = false;
+              },
+              250 + steps.length * 520 + 200,
+            ),
+          );
+        }
 
-    if (reduced) {
-      steps.forEach(function (s) { s.classList.add('on'); });
-      gate.hidden = false;
-      return;
-    }
-    steps.forEach(function (s, i) {
-      timers.push(setTimeout(function () { s.classList.add('on'); }, 250 + i * 520));
-    });
-    timers.push(setTimeout(function () { gate.hidden = false; }, 250 + steps.length * 520 + 200));
-  }
+        function resolve(approved) {
+          gate.hidden = true;
+          last.classList.remove('step-ask', 'step-go', 'step-stop');
+          if (approved) {
+            last.classList.add('step-go');
+            lastPill.className = 'pill pill-go';
+            lastPill.textContent = 'you said yes';
+            lastDetail.textContent = 'added to your calendar';
+            verdict.innerHTML =
+              '<strong>Approved.</strong> It is on your calendar because you said yes, and the record shows that you were asked, what you answered, and when.';
+          } else {
+            last.classList.add('step-stop');
+            lastPill.className = 'pill pill-stop';
+            lastPill.textContent = 'you said no';
+            lastDetail.textContent = 'nothing was written to your calendar';
+            verdict.innerHTML =
+              '<strong>Denied.</strong> Nothing was written to your calendar. It carried on with what it was allowed to do, and it can tell you what it wanted and why.';
+          }
+          replay.hidden = false;
+        }
 
-  function resolve(approved) {
-    gate.hidden = true;
-    last.classList.remove('step-ask', 'step-go', 'step-stop');
-    if (approved) {
-      last.classList.add('step-go');
-      lastPill.className = 'pill pill-go';
-      lastPill.textContent = 'you said yes';
-      lastDetail.textContent = 'added to your calendar';
-      verdict.innerHTML = '<strong>Approved.</strong> It is on your calendar because you said yes, and the record shows that you were asked, what you answered, and when.';
-    } else {
-      last.classList.add('step-stop');
-      lastPill.className = 'pill pill-stop';
-      lastPill.textContent = 'you said no';
-      lastDetail.textContent = 'nothing was written to your calendar';
-      verdict.innerHTML = '<strong>Denied.</strong> Nothing was written to your calendar. It carried on with what it was allowed to do, and it can tell you what it wanted and why.';
-    }
-    replay.hidden = false;
-  }
+        document.getElementById('approve').addEventListener('click', function () {
+          resolve(true);
+        });
+        document.getElementById('deny').addEventListener('click', function () {
+          resolve(false);
+        });
+        replay.addEventListener('click', function () {
+          play();
+          replay.blur();
+        });
 
-  document.getElementById('approve').addEventListener('click', function () { resolve(true); });
-  document.getElementById('deny').addEventListener('click', function () { resolve(false); });
-  replay.addEventListener('click', function () { play(); replay.blur(); });
-
-  play();
-})();
-</script>
-</body>
+        play();
+      })();
+    </script>
+  </body>
 </html>

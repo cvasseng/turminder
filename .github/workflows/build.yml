@@ -1,0 +1,171 @@
+# Everything a release contains, built once and reused by both channels
+# (§32.3). Release and nightly differ in what they publish and what they call
+# it — never in how the bytes were made, because two build paths means the
+# nightly stops predicting the release it is supposed to be a preview of.
+#
+# Only first-party `actions/*` steps are used here. Everything else this
+# pipeline does is a script in the repo that a reader can open: the packaging
+# tier's rule that a build must be inspectable does not stop at the repo edge.
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version stamped into the shell and into every artifact name.
+        required: true
+        type: string
+      channel:
+        description: release | nightly — decides how long the intermediate artifacts are kept.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  extensions:
+    name: browser extensions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # §29.6: one assembly step, two manifests, reproducible zips. The zips
+      # keep the extension's own manifest version — it is a separately
+      # versioned thing that browser stores count monotonically, and stamping
+      # the service's version over it would be a lie about which extension
+      # this is.
+      - run: npm run build:extensions
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extensions
+          path: dist/extension/*.zip
+          if-no-files-found: error
+          retention-days: ${{ inputs.channel == 'nightly' && 7 || 30 }}
+
+  app:
+    name: desktop shell (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One platform failing must not hide whether the others are fine — the
+      # whole reason this matrix exists is that platform-specific code had
+      # never been compiled anywhere but Linux.
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-22.04
+          - target: linux-arm64
+            runner: ubuntu-22.04-arm
+          - target: darwin-arm64
+            runner: macos-14
+          - target: win32-x64
+            runner: windows-latest
+    env:
+      # Tauri's bundler signs and notarizes when these are set, and ships
+      # unsigned when they are not (§28.4, §32.4). Nothing in this file decides
+      # which happens — the repository's secrets do, and the publishing job
+      # says out loud which one it got.
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The build Node, not the bundled one: the runtime that ships inside
+          # the artifact is hash-pinned in app/node-runtime.json and fetched by
+          # the staging script (§28.4). This one only has to run tsc and npm.
+          node-version: '22'
+          cache: npm
+
+      # The webview and its libraries are what make an app build per-platform
+      # (§28.3). On a developer's Linux box these come from app/shell.nix; a
+      # runner has apt, and the .deb wants system sonames anyway — a bundle
+      # linked against a /nix/store path runs on the build box and nowhere
+      # else, which is the trap that took AppImage off the target list.
+      - name: Webview and tray libraries
+        if: startsWith(matrix.runner, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libxdo-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            build-essential \
+            patchelf \
+            file
+
+      # `npm run build` finishes with `mkdir -p` and `cp -R`, which cmd.exe has
+      # never heard of. Pointing npm at the bash every Windows runner ships is
+      # a CI-local accommodation: the service's build script stays the one
+      # thing it already is, rather than being rewritten for a packaging tier
+      # that is supposed to consume it unchanged (§28.3).
+      - name: Run npm scripts under bash
+        if: runner.os == 'Windows'
+        run: npm config set script-shell bash
+
+      - name: Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+
+      # The registry, not `target/`: four release-profile Tauri trees would
+      # crowd the repository's whole cache budget and start evicting each
+      # other, which costs more than the compile it saves.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ matrix.target }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.target }}-
+
+      - run: npm ci
+
+      - name: Build the service
+        run: npm run build
+
+      # §28.1: service version == app version, so "what version are they
+      # running" has one answer. package.json is what the release is cut from,
+      # so it is the one that wins — in the working tree, never committed.
+      - name: Stamp the version
+        run: node .github/stamp-version.mjs "${{ inputs.version }}"
+
+      # Natively, with no --target: this is the platform the artifact ships
+      # for, so the staging script's smoke test can actually run — and it
+      # refuses to finish unless the assembled sidecar answers both /healthz
+      # and / (§28.4). A cross-staged tree reports itself unverified by
+      # construction and has no business in a release.
+      - name: Stage and smoke-test the sidecar
+        run: node app/stage-service.mjs
+
+      - name: Bundle
+        working-directory: app
+        run: npx --yes @tauri-apps/cli@2 build
+
+      - name: Collect
+        run: node .github/collect-bundles.mjs --target ${{ matrix.target }} --version "${{ inputs.version }}" --out artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ matrix.target }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: ${{ inputs.channel == 'nightly' && 7 || 30 }}

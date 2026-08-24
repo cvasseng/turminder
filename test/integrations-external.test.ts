@@ -639,7 +639,10 @@ describe('google calendar', () => {
       },
     ];
     const respond = calendarTools(client).find((t) => t.name === 'calendar.respond')!;
-    const result = (await respond.execute({ event_id: 'own', response: 'accepted' }, ctx)) as any;
+    const result = (await respond.execute(
+      { event_id: 'own', response: 'accepted' },
+      ctx,
+    )) as any;
     expect(result.error).toBe('not_an_invitee');
     expect(fake.requests.some((r) => r.method === 'PATCH')).toBe(false);
   });
@@ -673,7 +676,9 @@ describe('google calendar', () => {
     authorise();
     const list = calendarTools(client).find((t) => t.name === 'calendar.list_events')!;
     await list.execute({ query: 'dentist' }, ctx);
-    const request = fake.requests.find((r) => r.path.endsWith('/events') && r.method === 'GET')!;
+    const request = fake.requests.find(
+      (r) => r.path.endsWith('/events') && r.method === 'GET',
+    )!;
     expect(request.query.q).toBe('dentist');
   });
 

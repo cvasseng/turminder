@@ -194,11 +194,7 @@ fn start_bundled(app: tauri::AppHandle) {
 
 fn stop_sidecar(app: &tauri::AppHandle) {
     let sidecars = app.state::<Sidecars>();
-    let taken = sidecars
-        .0
-        .lock()
-        .expect("sidecar slot poisoned")
-        .take();
+    let taken = sidecars.0.lock().expect("sidecar slot poisoned").take();
     if let Some(sidecar) = taken {
         sidecar.stop();
     }

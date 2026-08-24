@@ -69,7 +69,8 @@ impl Supervisor {
                     "the bundled service exited immediately {} times in a row{} — \
                      open the log, or point the app at a service running elsewhere",
                     self.consecutive_fast_crashes,
-                    code.map(|c| format!(" (last exit code {c})")).unwrap_or_default()
+                    code.map(|c| format!(" (last exit code {c})"))
+                        .unwrap_or_default()
                 ),
             },
         }
@@ -127,6 +128,9 @@ mod tests {
     fn a_requested_quit_is_not_a_crash() {
         let mut s = Supervisor::new();
         s.stopping();
-        assert_eq!(s.exited(Duration::from_millis(1), Some(143)), Decision::Stay);
+        assert_eq!(
+            s.exited(Duration::from_millis(1), Some(143)),
+            Decision::Stay
+        );
     }
 }

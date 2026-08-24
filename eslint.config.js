@@ -66,7 +66,11 @@ export default tseslint.config(
     // Node scripts and fixtures outside the TS program. extension/build.mjs
     // is node, not browser — it assembles the browser-land files (§29.6) but
     // never runs beside them, so it takes node globals, not the block below.
-    files: ['test/fixtures/**/*.mjs', 'scripts/**/*.mjs', 'extension/*.mjs'],
+    // `.github/*.mjs` is the release pipeline's own tooling (§32) and joins
+    // them for the same reason the extension is linted rather than ignored:
+    // packaging tiers are not opaque, and the scripts that decide what ships
+    // are the last place to stop reading the code.
+    files: ['test/fixtures/**/*.mjs', 'scripts/**/*.mjs', 'extension/*.mjs', '.github/*.mjs'],
     languageOptions: {
       globals: {
         process: 'readonly',

@@ -134,7 +134,10 @@ export class CalendarClient {
       signal: AbortSignal.timeout(30_000),
     });
     if (!res.ok) {
-      throw new CalendarHttpError(res.status, `calendar GET ${path} failed: HTTP ${res.status}`);
+      throw new CalendarHttpError(
+        res.status,
+        `calendar GET ${path} failed: HTTP ${res.status}`,
+      );
     }
     return res.json();
   }
@@ -567,7 +570,10 @@ export function calendarTools(client: CalendarClient): ToolDefinition[] {
           .optional()
           .describe('replaces the whole guest list and emails it — include everyone who stays'),
         timezone: z.string().optional(),
-        calendar_id: z.string().optional().describe("the event's own calendar_id, if not primary"),
+        calendar_id: z
+          .string()
+          .optional()
+          .describe("the event's own calendar_id, if not primary"),
       }),
       async execute(args: {
         event_id: string;
@@ -611,7 +617,7 @@ export function calendarTools(client: CalendarClient): ToolDefinition[] {
     {
       name: 'calendar.respond',
       description:
-        "RSVP to an invitation as the user: accepted, declined or tentative. Find the event first (calendar.list_events — my_response of needsAction means unanswered) and pass its id verbatim. On a recurring meeting, an occurrence id answers that occurrence only; its recurring_event_id answers the whole series. Only works on events the user is invited to.",
+        'RSVP to an invitation as the user: accepted, declined or tentative. Find the event first (calendar.list_events — my_response of needsAction means unanswered) and pass its id verbatim. On a recurring meeting, an occurrence id answers that occurrence only; its recurring_event_id answers the whole series. Only works on events the user is invited to.',
       tier: 'se',
       args: z.object({
         event_id: z.string().min(1).describe('verbatim from a calendar read tool'),

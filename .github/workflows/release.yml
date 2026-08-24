@@ -1,0 +1,116 @@
+# A tag becomes a release (§32.2).
+#
+# Pushing `vX.Y.Z` is the human act; everything after it is transcription. The
+# notes are CHANGELOG.md's section for that version and nothing else, and the
+# job that reads them runs *first* — a tag whose version nobody wrote notes for
+# fails before four runners spend twenty minutes building artifacts for it.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  notes:
+    name: notes and version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tag and the manifest are two copies of one fact, and a release is
+      # exactly the wrong moment to discover they disagree.
+      - name: The tag and package.json must agree
+        id: version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          declared="$(node -p "require('./package.json').version")"
+          if [ "$version" != "$declared" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} says ${version}, package.json says ${declared} — bump the manifest or move the tag"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Notes from CHANGELOG.md
+        run: node .github/release-notes.mjs "${{ steps.version.outputs.version }}" --out notes.md
+
+      - run: cat notes.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: notes.md
+          if-no-files-found: error
+
+  build:
+    needs: notes
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.notes.outputs.version }}
+      channel: release
+
+  publish:
+    name: publish
+    needs: [notes, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: incoming
+
+      - name: Gather the release
+        shell: bash
+        run: |
+          mkdir -p release
+          find incoming -type f \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
+               -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.zip' \) \
+            -exec cp {} release/ \;
+          cp incoming/notes/notes.md notes.md
+          # A checksum list is the only way someone who did not watch this run
+          # can tell whether the file they downloaded is the file it built.
+          ( cd release && sha256sum -- * > ../SHA256SUMS )
+          mv SHA256SUMS release/
+          ls -l release
+
+      # §28.4 as amended (§32.4): unsigned macOS artifacts may ship, but never
+      # quietly. If this repository has no Developer ID, the people downloading
+      # a .dmg are told before they download it, not by Gatekeeper afterwards.
+      - name: Say so if macOS went out unsigned
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "${APPLE_SIGNING_IDENTITY}" ] && ls release/*macos*.dmg >/dev/null 2>&1; then
+            {
+              echo "> **The macOS build is not signed or notarized.** Gatekeeper will refuse it on"
+              echo "> first open — right-click the app and choose *Open* to let it through, or"
+              echo "> build it yourself from \`app/\`. Signed macOS builds land when there is a"
+              echo "> Developer ID to sign them with."
+              echo
+              cat notes.md
+            } > notes.new
+            mv notes.new notes.md
+          fi
+
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --verify-tag \
+            --title "Turminder ${{ needs.notes.outputs.version }}" \
+            --notes-file notes.md \
+            release/*
