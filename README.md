@@ -24,14 +24,14 @@ call. The cost is more setup and fewer things that happen on their own.
 Pre-release, and young, so expect rough edges.
 
 Linux is the platform it runs on daily, against a locally served
-Qwen3.8-27B (4090, 24gb - configured with ~98k of usable context). The macOS and Windows desktop builds compile in CI and have
-never been run; nobody has watched either of them supervise a service. There
+[Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) (4090, 24gb - configured with ~98k of usable context). The macOS and Windows desktop builds compile in CI and have
+never been run outside CI. There
 is no tagged release, only a rolling `nightly` prerelease built from `main`.
 
 The context rules are what make a local model workable: 30,000 tokens per
 run, tool results capped at 4,000 characters where they enter the transcript,
 and 8 tool namespaces in the prompt until the model asks for more. The suite
-is 54 test files (`npm test`), three of which exist to keep those numbers
+is 53 test files (`npm test`), three of which exist to keep those numbers
 from drifting.
 
 ## Run it
