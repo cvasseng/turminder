@@ -100,9 +100,14 @@ jobs:
       - name: Say so if macOS went out unsigned
         shell: bash
         env:
+          # Either one means signing was configured: Tauri can derive the
+          # identity from an imported certificate, so a cert-only setup signs
+          # perfectly well and must not be labelled unsigned.
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
         run: |
-          if [ -z "${APPLE_SIGNING_IDENTITY}" ] && ls release/*macos*.dmg >/dev/null 2>&1; then
+          if [ -z "${APPLE_SIGNING_IDENTITY}${APPLE_CERTIFICATE}" ] &&
+             ls release/*macos*.dmg >/dev/null 2>&1; then
             {
               echo "> **The macOS build is not signed or notarized.** Gatekeeper will refuse it on"
               echo "> first open — right-click the app and choose *Open* to let it through."
