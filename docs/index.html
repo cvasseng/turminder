@@ -109,6 +109,12 @@
         color: var(--dimmer);
         margin-bottom: 1rem;
       }
+      html {
+        scroll-behavior: smooth;
+      }
+      .band[id] {
+        scroll-margin-top: 5.5rem;
+      }
       .band h2 {
         font-size: clamp(1.5rem, 3.2vw, 2.1rem);
         letter-spacing: -0.02em;
@@ -520,6 +526,44 @@
         color: var(--text);
         font-weight: 500;
       }
+      .cta-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-top: 2rem;
+      }
+      .cta-note {
+        margin-top: 0.9rem;
+        font-size: 0.8125rem;
+        color: var(--dimmer);
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.8rem 1.1rem;
+        font: 500 0.875rem/1 var(--mono);
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: var(--panel-hi);
+        color: var(--text);
+        text-decoration: none;
+        transition:
+          border-color 0.15s,
+          background 0.15s,
+          color 0.15s;
+      }
+      .btn:hover {
+        border-color: var(--accent);
+      }
+      .btn-primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #0b0d0f;
+      }
+      .btn-primary:hover {
+        background: #9cc4f4;
+        border-color: #9cc4f4;
+      }
 
       /* ---------- the trade ---------- */
       .trade {
@@ -611,6 +655,17 @@
       }
 
       /* ---------- run it ---------- */
+      .shortcut {
+        margin-bottom: 2.75rem;
+        padding-left: 1rem;
+        border-left: 2px solid var(--accent);
+        max-width: var(--measure);
+        font-size: 0.9375rem;
+        color: var(--dim);
+      }
+      .shortcut a {
+        white-space: nowrap;
+      }
       .run {
         display: grid;
         gap: 2.5rem;
@@ -734,6 +789,9 @@
       }
 
       @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
         * {
           animation-duration: 0.01ms !important;
           transition-duration: 0.01ms !important;
@@ -771,6 +829,17 @@
 
     <header class="hero wrap">
       <h1>The assistant that can only do what <em>you tell it to</em></h1>
+      <div class="cta-row">
+        <a
+          class="btn btn-primary"
+          href="https://github.com/cvasseng/turminder/releases/tag/nightly"
+          >Get the app</a
+        >
+        <a class="btn" href="#run-it">Run it headless</a>
+      </div>
+      <p class="cta-note">
+        Nightly builds for Linux, macOS and Windows, cut from main as it moves.
+      </p>
       <figure class="shot">
         <img
           src="screen.png"
@@ -936,7 +1005,7 @@
             <h3>devices</h3>
             <p>
               Press connect on your phone and approve the prompt on a machine already linked. A
-              Linux desktop app and a browser extension come in the same door.
+              desktop app and a browser extension come in the same door.
             </p>
           </div>
         </div>
@@ -1090,7 +1159,7 @@
         </div>
       </section>
 
-      <section class="band wrap">
+      <section class="band wrap" id="run-it">
         <div class="band-head">
           <p class="eyebrow">Run it</p>
           <h2>Node 22, an endpoint, and about five minutes.</h2>
@@ -1100,6 +1169,12 @@
             more than parameter count.
           </p>
         </div>
+        <p class="shortcut">
+          Just want the app? It brings its own runtime and looks after all of this for you.
+          <a href="https://github.com/cvasseng/turminder/releases/tag/nightly"
+            >Download it &rarr;</a
+          >
+        </p>
         <div class="run">
           <ol class="steps">
             <li>

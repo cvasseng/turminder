@@ -2910,8 +2910,16 @@ Signing is a per-platform story, and only one platform has a gate:
   no Gatekeeper equivalent and no identity to buy; the artifact is the
   build. Reproducibility comes from `app/shell.nix` pinning the
   toolchain, which is the honest Linux answer to "what produced this
-  binary". AppImage is deliberately *not* a target: its bundler resolves
-  library paths by copying them, and nix store paths defeat that.
+  binary". AppImage is deliberately *not* in `bundle.targets`: its bundler
+  resolves library paths by copying them, and nix store paths defeat that —
+  so a developer's `cargo tauri build` would fail on the one machine the
+  toolchain is pinned for. That is a statement about **nix**, not about
+  AppImage, and the release pipeline does not run on nix: §32.3's x64 Linux
+  runner asks for it explicitly and ships it **alongside** the `deb`. The
+  `deb` stays the artifact for Debian and Ubuntu, where it brings real
+  dependency management; the AppImage is the one for everyone else, who
+  should not need a package manager's blessing to run a program. Neither
+  replaces the other.
 - **macOS**: **signed and notarized** (Developer ID) wherever there is an
   identity to sign with — for that audience an unsigned app barely
   exists. This clause was once absolute ("a build that cannot be signed
@@ -2947,7 +2955,9 @@ Signing is a per-platform story, and only one platform has a gate:
 - **`bundle.targets` names every platform the shell is meant to reach**,
   and Tauri builds only those the host can produce — so one config serves
   all three and a Linux run still emits just the `deb`. AppImage stays off
-  the list.
+  the list because that list also serves the nix developer build; a release
+  adds it per-target on the command line instead (§32.3), which is the one
+  thing a shared config cannot express.
 - **Cross-staging is possible and never trusted.** `npm ci` can be told
   which platform's optional native packages to resolve, so a bundle tree
   for another OS can be assembled anywhere — useful for checking that the
@@ -3541,6 +3551,13 @@ and smoke-tested, and Tauri bundles it.
   `linux-x64`, `linux-arm64`, `darwin-arm64` and `win32-x64`, one runner
   each. Windows on ARM stays off it for the reason §28.4 already gives:
   `sqlite-vec` publishes no `windows-arm64` package.
+- **`linux-x64` also ships an AppImage.** It is the one leg that overrides
+  `bundle.targets`, because that config has to keep a nix `cargo tauri build`
+  working and AppImage cannot be built there (§28.4) — while a runner, which
+  is not a nix box, can. A `.deb` and an AppImage are for different people:
+  one integrates with a package manager, the other needs nothing installed.
+  `linux-arm64` gets the `deb` alone; linuxdeploy's arm64 support is not
+  something to make a nightly depend on.
 - **Staging is always native, never cross.** `stage-service.mjs` runs with
   no `--target`, so its §28.4 smoke test can actually run — and it refuses
   to finish unless the assembled sidecar answers both `/healthz` and `/`. A
@@ -3647,6 +3664,7 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Bindings per embed / bound_data cap | 20 / 256 KB | §23.2 |
 | Binding call timeout / on_serve cache TTL | 10s per call / 60s | §23.2 |
 | PDF print timeout / virtual-time-budget | 60s / 10s | §23.4 |
+| Tool call timeout (the transport's, not the tool's) | 120s | §11.1 — every bundled integration is served over the in-memory MCP transport, whose SDK default is 60s; that default is therefore a ceiling on every tool in the system. It must sit **above** every tool's own budget, or the transport decides a tool failed and the tool's own error — the one that says what was being attempted — is lost. It was exactly equal to the PDF print timeout, and a tie went to the transport |
 | Background concurrency per endpoint | 1 | §10.3 |
 | `web.search` max_results / timeout | 5 / 10s | §11.2 |
 | `web.query` max_matches / per-match cap / find context window | 20 / 2000 chars / ±200 chars | App. F.5 |
