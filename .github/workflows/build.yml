@@ -61,6 +61,15 @@ jobs:
         include:
           - target: linux-x64
             runner: ubuntu-22.04
+            # The one target that asks for more than `bundle.targets` gives.
+            # AppImage is off that list because it cannot be built on nix —
+            # its bundler resolves library paths by copying them and chokes on
+            # /nix/store paths (§28.4) — and the list has to keep a developer's
+            # `cargo tauri build` working. A runner is not a nix box, which is
+            # precisely the fix LIMITS.md recorded for this, so the release
+            # adds it here rather than in a config a developer also uses.
+            # x64 only: linuxdeploy's arm64 story is not one to bet a nightly on.
+            bundles: deb,appimage
           - target: linux-arm64
             runner: ubuntu-22.04-arm
           - target: darwin-arm64
@@ -201,7 +210,12 @@ jobs:
 
       - name: Bundle
         working-directory: app
-        run: npx --yes @tauri-apps/cli@2 build
+        env:
+          # appimagetool mounts itself with FUSE, which a runner has no kernel
+          # module for; this is its own documented way to run without one.
+          # Inert on every other target.
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: npx --yes @tauri-apps/cli@2 build ${{ matrix.bundles && format('--bundles {0}', matrix.bundles) || '' }}
 
       - name: Collect
         run: node .github/collect-bundles.mjs --target ${{ matrix.target }} --version "${{ inputs.version }}" --out artifacts

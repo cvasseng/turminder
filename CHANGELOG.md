@@ -29,7 +29,8 @@
  * Prebuilt downloads: every release carries the desktop app for Linux (x64
    and arm64), macOS (Apple silicon) and Windows, the packaged browser
    extensions, and a `SHA256SUMS` to check them against — plus a rolling
-   `nightly` prerelease built from `main`.
+   `nightly` prerelease built from `main`. Linux x64 comes as both a `.deb`
+   and a portable AppImage that needs nothing installed.
 
  * Fixed: the built service (`npm run build` + `npm start`, and the systemd
    unit over it) served no interface — the chat page, setup page, styles and

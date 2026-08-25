@@ -7,6 +7,7 @@ import { errMessage } from '../../core/errors.js';
 import { log } from '../../core/logger.js';
 import type { McpYaml } from '../../core/config-schemas.js';
 import { META_KEY, type ToolContext, type ToolDefinition, type ToolHandle } from '../types.js';
+import { TOOL_CALL_TIMEOUT_MS } from '../timeouts.js';
 import { buildIntegrationServer } from './serve.js';
 
 const l = log('mcp');
@@ -113,20 +114,24 @@ export class McpConnection {
     ctx: ToolContext,
   ): Promise<{ ok: boolean; output: unknown }> {
     try {
-      const result = await this.client.callTool({
-        name: tool,
-        arguments: (args ?? {}) as Record<string, unknown>,
-        // Run context rides as request metadata, so it can never be confused
-        // with model-supplied arguments (App. F.4).
-        _meta: {
-          [META_KEY]: {
-            run_id: ctx.runId,
-            event_id: ctx.eventId,
-            conversation_id: ctx.conversationId ?? null,
-            handler_name: ctx.handlerName ?? null,
+      const result = await this.client.callTool(
+        {
+          name: tool,
+          arguments: (args ?? {}) as Record<string, unknown>,
+          // Run context rides as request metadata, so it can never be confused
+          // with model-supplied arguments (App. F.4).
+          _meta: {
+            [META_KEY]: {
+              run_id: ctx.runId,
+              event_id: ctx.eventId,
+              conversation_id: ctx.conversationId ?? null,
+              handler_name: ctx.handlerName ?? null,
+            },
           },
         },
-      });
+        undefined,
+        { timeout: TOOL_CALL_TIMEOUT_MS },
+      );
       const content = (result.content ?? []) as { type: string; text?: string }[];
       const text = content
         .filter((c) => c.type === 'text' && typeof c.text === 'string')

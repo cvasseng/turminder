@@ -122,8 +122,8 @@ nothing acts until you have said, once and durably, what it may do.
   computer, where the app carries its own Node runtime and looks after the
   service for you, or on a machine you already run it on, which you point
   it at with a connect link. Its key lives in your keyring, never in a
-  file. Every release ships a `.deb`, a `.dmg` and a Windows installer, or
-  build it yourself from `app/`. Linux is the platform it has been lived in;
+  file. Every release ships a `.deb` and a portable AppImage for Linux, a
+  `.dmg`, and a Windows installer — or build it yourself from `app/`. Linux is the platform it has been lived in;
   the macOS and Windows builds are new and unproven.
 - **A browser extension** — open a page, click, and read the exact text
   that will be sent before it goes: extraction, a note field, Send. It

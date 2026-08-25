@@ -72,6 +72,30 @@ jobs:
       # honours an override). Re-running the one file with warnings on costs
       # nothing when the suite is green and explains it when it is not. No
       # shim, no PATH games: the instrument is already in the product.
+      # Chromium on its own, with no vitest, no MCP transport and no service
+      # in the way: the same flags `print.ts` uses, against a local file. If
+      # this prints in a fraction of a second the browser is fine and the
+      # stall is in what we ask it to fetch; if it hangs, it is the browser.
+      # Three rounds of inference have not settled that, and one command does.
+      - name: Can chromium print at all here
+        if: failure()
+        shell: bash
+        run: |
+          printf '<html><body><h1>probe</h1></body></html>' > /tmp/probe.html
+          time timeout 90 chromium \
+            --headless=new \
+            --print-to-pdf=/tmp/probe.pdf \
+            --virtual-time-budget=10000 \
+            --no-pdf-header-footer \
+            --print-to-pdf-no-header \
+            --disable-background-networking \
+            --user-data-dir="$(mktemp -d)" \
+            --no-first-run \
+            --disable-extensions \
+            file:///tmp/probe.html
+          echo "exit=$?"
+          ls -l /tmp/probe.pdf || echo "no pdf written"
+
       - name: What chromium said
         if: failure()
         env:
