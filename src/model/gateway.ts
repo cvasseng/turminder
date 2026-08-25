@@ -10,6 +10,7 @@ import {
 } from 'ai';
 import { log } from '../core/logger.js';
 import { ThinkFilter, stripThink } from './reasoning.js';
+import { internalToolName, toWireMessages, toWireToolSet } from './tool-names.js';
 import { timingsFetch, withTimings, type TimingsSlot } from './timings.js';
 import type { InferenceScheduler } from './scheduler.js';
 import type { ModelRouter } from './router.js';
@@ -174,13 +175,22 @@ export class ModelGateway {
         // The wrapped fetch writes into this (§21.1). One slot per call, so a
         // second concurrent call on the same endpoint cannot land in it.
         const timings: TimingsSlot = {};
+        // §11.5: dotted tool names are an internal fact and the wire gets
+        // `__`, because Anthropic and OpenAI reject a dot in a tool name
+        // outright. A pure facade in both directions (`tool-names.ts`) — the
+        // reverse has to work for names this request never offered, since a
+        // paged-closed or ungranted call is exactly the one an error quotes.
+        const wireTools =
+          req.tools && Object.keys(req.tools).length ? toWireToolSet(req.tools) : undefined;
         const common = {
           model,
           system: req.system,
-          messages: req.messages,
+          // History names tools too: a run's own tool-call and tool-result
+          // parts ride along on every later step and are validated the same way.
+          messages: toWireMessages(req.messages) as ModelMessage[],
           stopWhen: stepCountIs(1),
           maxRetries: 1,
-          ...(req.tools && Object.keys(req.tools).length ? { tools: req.tools } : {}),
+          ...(wireTools ? { tools: wireTools } : {}),
           ...(req.maxOutputTokens ? { maxOutputTokens: req.maxOutputTokens } : {}),
           ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
           ...(req.abortSignal ? { abortSignal: req.abortSignal } : {}),
@@ -362,7 +372,9 @@ function normaliseToolCall(c: unknown): RawToolCall {
   };
   const out: RawToolCall = {
     toolCallId: call.toolCallId,
-    toolName: call.toolName,
+    // Back to the name the rest of the system knows. A model that answered
+    // with the dotted name anyway passes through unchanged.
+    toolName: internalToolName(call.toolName),
     input: call.input,
     invalid: call.invalid === true,
     unknownTool: call.invalid === true && NoSuchToolError.isInstance(call.error),

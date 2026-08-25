@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { bootService, type ServiceHarness } from './service-harness.js';
+import { bootService, offeredTools, type ServiceHarness } from './service-harness.js';
 import { HandlerLoader, matches } from '../src/exec/handlers.js';
 import { HandlerFrontmatterSchema } from '../src/core/config-schemas.js';
 import { openDataHome } from '../src/core/datadir.js';
@@ -362,8 +362,9 @@ describe('ingress + handler execution (§5.3, §5.4)', () => {
     });
     await drain(h);
 
-    const offered = (h.fake.requests.find((r) => r.body.tools)?.body.tools ?? []).map(
-      (t: any) => t.function.name,
+    const offered = offeredTools(
+      h,
+      h.fake.requests.find((r) => r.body.tools)!,
     );
     expect(offered).toEqual(['memory.query']);
     // The tool is not in the definitions at all, so the call never becomes a

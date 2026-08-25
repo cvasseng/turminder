@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { bootService, type ServiceHarness } from './service-harness.js';
+import { bootService, offeredTools, type ServiceHarness } from './service-harness.js';
 import { nextOccurrence } from '../src/scheduler/loop.js';
 import { isoPlusSeconds, nowIso } from '../src/core/time.js';
 import type { ScheduleRow } from '../src/db/repos/schedules.js';
@@ -239,7 +239,7 @@ describe('schedule tools (App. F.2)', () => {
     h.fake.always({ text: 'noted' });
     h.service.chat.send({ text: 'remind me to call the dentist tomorrow' });
     await h.service.queue.drain();
-    const tools = (h.fake.requests.at(-1)!.body.tools ?? []).map((t: any) => t.function.name);
+    const tools = offeredTools(h);
     expect(tools).toContain('schedule.create');
     expect(tools).toContain('schedule.list');
   });

@@ -1,3 +1,4 @@
+import { wireToolName } from '../src/model/tool-names.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -62,6 +63,19 @@ export function hasImagePart(body: Record<string, any>): boolean {
   );
 }
 
+/**
+ * Tools cross the wire as `memory__save` (`src/model/tool-names.ts`), so a real
+ * endpoint never answers with the catalog's own spelling. Scripts are
+ * written in the catalog's vocabulary because that is what a test is about, and
+ * translated here — this class *is* the endpoint, so this is where the wire
+ * form belongs.
+ *
+ * The guard keeps its teeth: if the gateway ever stopped translating, its tool
+ * set would be keyed by dotted names, the wire name below would match none of
+ * them, and every scripted tool call would come back as an unknown tool.
+ */
+const scriptedToolName = wireToolName;
+
 export class FakeLlama {
   private server: http.Server | null = null;
   private queue: ScriptedTurn[] = [];
@@ -75,6 +89,12 @@ export class FakeLlama {
    * provider listing several is what makes choosing one a question at all.
    */
   otherModels: string[] = [];
+  /**
+   * Whether this endpoint embeds at all. On by default, like llama.cpp; off is
+   * a hosted provider that only does chat, which is the case the setup page
+   * has to notice rather than assume.
+   */
+  embeddings = true;
   embeddingDim = 8;
   /**
    * Whether this endpoint can read image parts (§26.3). Off by default, like a
@@ -172,6 +192,7 @@ export class FakeLlama {
       return json(200, { status: 'ok' });
     }
     if (url.pathname === '/embedding' || url.pathname === '/v1/embeddings') {
+      if (!this.embeddings) return json(404, { error: 'no embeddings here' });
       const input = body.input ?? body.content ?? '';
       const texts: string[] = Array.isArray(input) ? input : [input];
       const vec = (t: string) =>
@@ -208,7 +229,7 @@ export class FakeLlama {
       id: `call_${i}_${Math.random().toString(36).slice(2, 8)}`,
       type: 'function' as const,
       function: {
-        name: tc.name,
+        name: scriptedToolName(tc.name),
         arguments: typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}),
       },
     }));

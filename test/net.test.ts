@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
+import YAML from 'yaml';
 import { LAYOUT_VERSION } from '../src/core/datadir.js';
 import { DB_VERSION } from '../src/db/index.js';
 import { bootService, postJson, TestClient, type ServiceHarness } from './service-harness.js';
@@ -179,6 +180,58 @@ describe('setup api (plan §3b)', () => {
     expect(listed).toBeTruthy();
     expect(listed!.headers['x-api-key']).toBe('sentinel-probe-key');
     expect(listed!.headers['authorization']).toBe('Bearer sentinel-probe-key');
+  });
+
+  it('probes whether an endpoint embeds, and how wide (App. E)', async () => {
+    h = await bootService({ configured: false, watchFiles: false });
+    const found = await postJson(`${h.baseUrl}/api/setup/probe`, {
+      url: h.fake.baseUrl,
+      kind: 'embedding',
+      model: 'fake-model',
+    });
+    expect(found.status).toBe(200);
+    // The named attempt is the one that ran: an endpoint serving several
+    // models requires the field and 422s without it.
+    expect(h.fake.requests.at(-1)!.body.model).toBe('fake-model');
+    // "Answered at all" is never the question — the vector's width is (§27.1).
+    expect(found.body).toMatchObject({ reachable: true, dimensions: 8 });
+
+    // A chat-only endpoint is a real answer, not an error.
+    h.fake.embeddings = false;
+    const absent = await postJson(`${h.baseUrl}/api/setup/probe`, {
+      url: h.fake.baseUrl,
+      kind: 'embedding',
+    });
+    expect(absent.body.reachable).toBe(false);
+    // Every shape was tried, including the named one an endpoint that serves
+    // several models requires — a 422 for a missing `model` field is not the
+    // same answer as "this endpoint does not embed" (§28.5).
+    expect(absent.body.error).toContain('/embedding');
+    expect(absent.body.dimensions).toBeUndefined();
+    expect(absent.body.error).toContain('/v1/embeddings');
+  });
+
+  it('gives the embedding endpoint the same key, so the offer is not a lie', async () => {
+    // The page offers the box because a probe *carrying the key* got a vector
+    // back. Committing the URL without the key would auto-check a capability
+    // that then 401s on the first index build.
+    h = await bootService({ configured: false, watchFiles: false });
+    await postJson(`${h.baseUrl}/api/setup/commit`, {
+      endpoints: [
+        {
+          name: 'main',
+          url: h.fake.baseUrl,
+          classes: ['fast', 'best'],
+          caps: [],
+          api_key: 'sentinel-embedding-key',
+        },
+      ],
+      embedding: true,
+    });
+    const yaml = fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8');
+    expect(yaml).not.toContain('sentinel-embedding-key');
+    const doc = YAML.parse(yaml);
+    expect(doc.embedding.api_key).toBe('${secret:MODEL_API_KEY_MAIN}');
   });
 
   it('puts the API key in the secret store and a reference in models.yaml (§28.5)', async () => {

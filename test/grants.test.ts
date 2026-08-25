@@ -14,7 +14,12 @@ import {
   patternsToRecord,
 } from '../src/tools/integrations/setup/access.js';
 import type { ToolHandle } from '../src/tools/types.js';
-import { bootService, TestClient, type ServiceHarness } from './service-harness.js';
+import {
+  bootService,
+  offeredTools,
+  TestClient,
+  type ServiceHarness,
+} from './service-harness.js';
 import { tmpDir, write } from './helpers.js';
 
 let h: ServiceHarness;
@@ -250,7 +255,7 @@ describe('setup.request_access, end to end', () => {
     h.fake.always({ text: 'nothing to do' });
     h.service.chat.send({ text: 'hello' });
     await drain(h);
-    const offered = (h.fake.requests.at(-1)!.body.tools ?? []).map((t: any) => t.function.name);
+    const offered = offeredTools(h);
     expect(offered).not.toContain('clock.now');
     expect(h.service.grants.covers(h.service.chatGrants(), 'clock.now')).toBeNull();
   });

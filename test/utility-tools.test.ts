@@ -14,7 +14,7 @@ import {
   weatherTools,
 } from '../src/tools/integrations/weather.js';
 import type { ToolDefinition } from '../src/tools/types.js';
-import { bootService, type ServiceHarness } from './service-harness.js';
+import { bootService, offeredTools, type ServiceHarness } from './service-harness.js';
 import { tmpDir, write } from './helpers.js';
 
 let h: ServiceHarness;
@@ -334,7 +334,7 @@ describe('both are in the default chat grant (App. F.7)', () => {
     h.fake.always({ text: 'fine' });
     h.service.chat.send({ text: 'hello' });
     await h.service.queue.drain();
-    const tools = (h.fake.requests.at(-1)!.body.tools ?? []).map((t: any) => t.function.name);
+    const tools = offeredTools(h);
     expect(tools).toContain('time.now');
     expect(tools).toContain('weather.forecast');
   });

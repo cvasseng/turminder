@@ -5,7 +5,8 @@ import WebSocket from 'ws';
 import { bootstrap, type App } from '../src/app.js';
 import { HttpServer } from '../src/net/http.js';
 import { Service, type ServiceOptions } from '../src/service.js';
-import { FakeLlama } from './fake-llama.js';
+import { internalToolName } from '../src/model/tool-names.js';
+import { FakeLlama, type RecordedRequest } from './fake-llama.js';
 import { tmpDir, write } from './helpers.js';
 
 export interface BootOptions extends ServiceOptions {
@@ -276,4 +277,24 @@ export async function postJson(
     body: JSON.stringify(body),
   });
   return { status: res.status, body: await res.json().catch(() => null) };
+}
+
+/**
+ * The tools a request offered, named the way App. F names them.
+ *
+ * Tools cross the wire with underscores because two of the three big hosted
+ * providers reject a dot in a tool name (`src/model/tool-names.ts`), so the
+ * endpoint — and therefore the fake — sees `memory_save`. Almost every test
+ * that looks at this is asking a *policy* question: which capabilities was
+ * this agent offered. That question is asked in the catalog's vocabulary, so
+ * the wire names go back through the gateway's own inverse. The wire format
+ * itself is pinned in `gateway.test.ts`, where it belongs.
+ */
+export function offeredTools(
+  harness: ServiceHarness,
+  req: RecordedRequest = harness.fake.requests.at(-1)!,
+): string[] {
+  return ((req.body.tools ?? []) as { function: { name: string } }[]).map((t) =>
+    internalToolName(t.function.name),
+  );
 }

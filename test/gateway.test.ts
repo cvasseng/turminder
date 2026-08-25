@@ -90,6 +90,85 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
     expect(fake.requests.at(-1)?.body.tools?.[0]?.function?.name).toBe('web_search');
   });
 
+  /**
+   * §11.5. Anthropic and OpenAI pin tool names to `^[a-zA-Z0-9_-]{1,128}$`, so
+   * every dotted name in App. F is rejected outright — the failure that made
+   * the capability probe report "no tool support" for models that have had it
+   * for years.
+   */
+  it('sends dotted tool names as __ and hands them back dotted (§11.5)', async () => {
+    fake.script({ toolCalls: [{ name: 'calendar.create_task', args: { title: 'x' } }] });
+    const disp = new RecordingDispatcher({ 'calendar.create_task': () => ({ ok: true }) });
+    const r = await gw.turn({
+      selector: { caps: ['tools'] },
+      priority: 'event',
+      system: 's',
+      messages: [{ role: 'user', content: 'book it' }],
+      tools: disp.toolSet(),
+    });
+    // What the endpoint was offered: a name its regex accepts.
+    const offered = (fake.requests.at(-1)?.body.tools ?? []).map((t: any) => t.function.name);
+    expect(offered).toEqual(['calendar__create_task']);
+    // What the rest of the system gets back: the name the catalog uses. The
+    // underscore inside `create_task` survives, which a single-underscore
+    // separator could not have promised.
+    expect(r.toolCalls[0]?.toolName).toBe('calendar.create_task');
+    expect(r.toolCalls[0]?.invalid).toBe(false);
+  });
+
+  /**
+   * The reverse cannot depend on the request's own tool set. Under §21.2
+   * paging a granted-but-closed namespace opens itself, so the model calls
+   * tools that were never offered — and those are exactly the names a refusal
+   * or an error is about to quote back at somebody.
+   */
+  it('reverses a tool name this request never offered', async () => {
+    fake.script({ toolCalls: [{ name: 'config.write', args: {} }] });
+    const disp = new RecordingDispatcher({ 'time.now': () => ({}) });
+    const r = await gw.turn({
+      selector: { caps: ['tools'] },
+      priority: 'event',
+      system: 's',
+      messages: [{ role: 'user', content: 'write config' }],
+      tools: disp.toolSet(),
+    });
+    expect(r.toolCalls[0]?.toolName).toBe('config.write');
+    expect(r.toolCalls[0]?.unknownTool).toBe(true);
+  });
+
+  /** History names tools too, and rides along on every later step. */
+  it('translates tool names already in the message history (§11.5)', async () => {
+    fake.script({ text: 'done' });
+    await gw.turn({
+      selector: {},
+      priority: 'event',
+      system: 's',
+      messages: [
+        { role: 'user', content: 'go' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool-call', toolCallId: 'c1', toolName: 'memory.save', input: {} },
+          ],
+        },
+        {
+          role: 'tool',
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'c1',
+              toolName: 'memory.save',
+              output: { type: 'json', value: {} },
+            },
+          ],
+        },
+      ],
+    });
+    const sent = JSON.stringify(fake.requests.at(-1)?.body.messages);
+    expect(sent).toContain('memory__save');
+    expect(sent).not.toContain('memory.save');
+  });
+
   it('flags a tool call with unparsable arguments instead of throwing', async () => {
     fake.script({ toolCalls: [{ name: 'web_search', args: '{"q": broken' }] });
     const disp = new RecordingDispatcher({ web_search: () => ({}) });

@@ -5,7 +5,7 @@ import { log } from '../core/logger.js';
 import { errMessage } from '../core/errors.js';
 import { ModelEndpointSchema } from '../core/config-schemas.js';
 import { modelApiKeyName } from '../core/config.js';
-import { normaliseEndpointUrl, probeEndpoint } from '../model/probe.js';
+import { normaliseEndpointUrl, probeEmbeddings, probeEndpoint } from '../model/probe.js';
 import type { Service } from '../service.js';
 
 const l = log('setup');
@@ -13,6 +13,19 @@ const l = log('setup');
 export const ProbeRequest = z.object({
   url: z.string().min(1),
   api_key: z.string().optional(),
+  /**
+   * Which model to measure. Absent on the first probe — the endpoint has not
+   * said what it serves yet — and set when the page re-probes after someone
+   * picks from the list it came back with (§28.5).
+   */
+  model: z.string().optional(),
+  /**
+   * Which half of App. E's probe to run. `embedding` asks whether this address
+   * can embed at all — the setup page asks before offering the box, because a
+   * hardcoded list of who has an embeddings API is a list that goes stale
+   * (§28.5: the provider list is a convenience, never an authority).
+   */
+  kind: z.enum(['chat', 'embedding']).default('chat'),
 });
 
 export const CommitRequest = z.object({
@@ -47,11 +60,17 @@ export function setupStatus(service: Service): SetupStatus {
 /** POST /api/setup/probe — reachability, identity and capability probes (§10.2). */
 export async function handleProbe(body: unknown): Promise<unknown> {
   const req = ProbeRequest.parse(body);
-  const result = await probeEndpoint(req.url, {
+  const opts = {
     ...(req.api_key ? { apiKey: req.api_key } : {}),
-    timeoutMs: 90_000,
-  });
-  return result;
+    ...(req.model ? { model: req.model } : {}),
+  };
+  if (req.kind === 'embedding') {
+    // Shorter than the chat probe's budget on purpose: embedding is one small
+    // round trip with no model to warm up, and this runs while somebody is
+    // watching a setup page.
+    return probeEmbeddings(req.url, { ...opts, timeoutMs: 30_000 });
+  }
+  return probeEndpoint(req.url, { ...opts, timeoutMs: 90_000 });
 }
 
 /**
@@ -93,12 +112,22 @@ export function handleCommit(
   const doc: Record<string, unknown> = { endpoints };
   // Declining is a real answer (§28.5): only guess an embedding URL when the
   // user did not say no, and never point a hosted endpoint at one implicitly.
-  const embeddingUrl =
-    req.embedding === false
-      ? null
-      : (req.embedding_url ??
-        (req.endpoints[0] ? normaliseEndpointUrl(req.endpoints[0].url).root : null));
-  if (embeddingUrl) doc.embedding = { url: embeddingUrl };
+  const derived = req.endpoints[0] ? normaliseEndpointUrl(req.endpoints[0].url).root : null;
+  const embeddingUrl = req.embedding === false ? null : (req.embedding_url ?? derived);
+  if (embeddingUrl) {
+    /**
+     * The same credential, when it is the same address.
+     *
+     * The setup page offers the box because a probe *carrying the key* got a
+     * vector back; committing the URL without the key would auto-check a
+     * capability that then 401s on the first index build. The reference is
+     * reused rather than the value — the endpoint above already put it in the
+     * secret store (§27), and there is no second copy to keep in step.
+     */
+    const sameHost = embeddingUrl === derived;
+    const key = sameHost ? endpoints[0]?.api_key : undefined;
+    doc.embedding = { url: embeddingUrl, ...(key ? { api_key: key } : {}) };
+  }
 
   fs.writeFileSync(file, YAML.stringify(doc), 'utf8');
   home.git.commit('initial model config', ['config/models.yaml']);
