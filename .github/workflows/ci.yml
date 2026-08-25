@@ -63,6 +63,21 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - run: npm test
+
+      # The §23.4 print tests have now failed three ways on this runner and
+      # never once on a development box, so the browser's own account of
+      # itself is worth more than another guess. `print.ts` already logs
+      # chromium's stderr when a print fails — the test env just silences it
+      # (`vitest.config.ts` defaults TURMINDER_LOG_LEVEL to `silent`, and
+      # honours an override). Re-running the one file with warnings on costs
+      # nothing when the suite is green and explains it when it is not. No
+      # shim, no PATH games: the instrument is already in the product.
+      - name: What chromium said
+        if: failure()
+        env:
+          TURMINDER_LOG_LEVEL: warn
+        run: npx vitest run test/docs.test.ts 2>&1 | tail -n 120
+
       - run: npm run build
       - run: npm run build:extensions
 

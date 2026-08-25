@@ -65,17 +65,6 @@ jobs:
             runner: macos-14
           - target: win32-x64
             runner: windows-latest
-    env:
-      # Tauri's bundler signs and notarizes when these are set, and ships
-      # unsigned when they are not (§28.4, §32.4). Nothing in this file decides
-      # which happens — the repository's secrets do, and the publishing job
-      # says out loud which one it got.
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v7
 
@@ -109,14 +98,41 @@ jobs:
             patchelf \
             file
 
-      # `npm run build` finishes with `mkdir -p` and `cp -R`, which cmd.exe has
-      # never heard of. Pointing npm at the bash every Windows runner ships is
-      # a CI-local accommodation: the service's build script stays the one
-      # thing it already is, rather than being rewritten for a packaging tier
-      # that is supposed to consume it unchanged (§28.3).
-      - name: Run npm scripts under bash
-        if: runner.os == 'Windows'
-        run: npm config set script-shell bash
+      # Tauri signs and notarizes when these are set and ships unsigned when
+      # they are not (§28.4, §32.4) — but "set" means *present*, and a job-level
+      # `env:` block defines every key it names, filling an absent secret with
+      # an empty string. That looked like a configured Developer ID to the
+      # bundler, which then failed on `security import` with an empty
+      # certificate: a repository with no signing credentials could not build
+      # macOS at all. So the variables are exported one at a time and only when
+      # they carry something.
+      - name: Apple signing credentials, if this repository has any
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          carry() {
+            [ -n "$2" ] || return 0
+            # The delimiter form, because a certificate is not one line.
+            { echo "$1<<__TURMINDER_SECRET__"; echo "$2"; echo "__TURMINDER_SECRET__"; } \
+              >> "$GITHUB_ENV"
+            echo "carrying $1"
+          }
+          carry APPLE_CERTIFICATE "${APPLE_CERTIFICATE}"
+          carry APPLE_CERTIFICATE_PASSWORD "${APPLE_CERTIFICATE_PASSWORD}"
+          carry APPLE_SIGNING_IDENTITY "${APPLE_SIGNING_IDENTITY}"
+          carry APPLE_ID "${APPLE_ID}"
+          carry APPLE_PASSWORD "${APPLE_PASSWORD}"
+          carry APPLE_TEAM_ID "${APPLE_TEAM_ID}"
+          if [ -z "${APPLE_CERTIFICATE}" ] && [ -z "${APPLE_SIGNING_IDENTITY}" ]; then
+            echo "no Developer ID configured — this .dmg ships unsigned and says so (§32.4)"
+          fi
 
       - name: Rust toolchain
         shell: bash
@@ -139,8 +155,18 @@ jobs:
 
       - run: npm ci
 
+      # `npm run build` finishes with `mkdir -p` and `cp -R`, which cmd.exe has
+      # never heard of, so on Windows it runs under the bash every runner ships.
+      # Scoped to this one command rather than set as npm config: done globally
+      # it also reaches `npm ci`, where it made npm run better-sqlite3's
+      # implicit `node-gyp rebuild` under bash — and node-gyp cannot find Visual
+      # Studio from there ("could not use PowerShell to find Visual Studio"), so
+      # the Windows build died before it built anything. Harmless elsewhere: on
+      # Linux and macOS the shell it names is the one npm would have picked.
       - name: Build the service
         run: npm run build
+        env:
+          npm_config_script_shell: bash
 
       # §28.1: service version == app version, so "what version are they
       # running" has one answer. package.json is what the release is cut from,
