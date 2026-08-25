@@ -33,7 +33,9 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-      - run: npm ci
+      # Node builtins only downstream of this (§29.6), so the native compiles
+      # would be dead weight — see the app job below for the longer story.
+      - run: npm ci --ignore-scripts
       # §29.6: one assembly step, two manifests, reproducible zips. The zips
       # keep the extension's own manifest version — it is a separately
       # versioned thing that browser stores count monotonically, and stamping
@@ -153,7 +155,22 @@ jobs:
           key: cargo-${{ matrix.target }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
           restore-keys: cargo-${{ matrix.target }}-
 
-      - run: npm ci
+      # `--ignore-scripts`, which is what makes this work on Windows at all.
+      # better-sqlite3 declares no install script, so npm falls back to its
+      # default for anything carrying a `binding.gyp` and runs `node-gyp
+      # rebuild` — compiling from source a package that ships a prebuilt
+      # `win32-x64.node` in the tarball. On the Windows runner that compile
+      # cannot even start: the image has Visual Studio **18**, which node-gyp
+      # 11 does not recognise ("unknown version undefined"), so it concludes
+      # there is no VS at all.
+      #
+      # Nothing in this job needs the native modules. It runs `tsc` and then
+      # hands off to `stage-service.mjs`, which does its own
+      # `npm ci --omit=dev --ignore-scripts` into the staging tree — the tree
+      # that actually ships, and the one the §28.4 smoke test boots. Skipping
+      # the build here removes a compile whose output was never used, on every
+      # platform.
+      - run: npm ci --ignore-scripts
 
       # `npm run build` finishes with `mkdir -p` and `cp -R`, which cmd.exe has
       # never heard of, so on Windows it runs under the bash every runner ships.
