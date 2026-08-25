@@ -11,6 +11,15 @@ const l = log('probe');
 
 export interface ProbeOptions {
   apiKey?: string;
+  /**
+   * Which of the endpoint's models to probe. Absent means the first one it
+   * lists, which is all an endpoint serving exactly one model can mean — but a
+   * hosted provider lists dozens in no particular order, and capability tags
+   * describe *a model*, not an address (§10.2). So the choice has to reach
+   * this far down: probing one model and committing another would tag the
+   * wrong thing.
+   */
+  model?: string;
   fetch?: typeof globalThis.fetch;
   timeoutMs?: number;
 }
@@ -18,7 +27,10 @@ export interface ProbeOptions {
 export interface ProbeResult {
   url: string;
   reachable: boolean;
+  /** The model these `caps` were actually measured against. */
   model_id?: string;
+  /** Every model the endpoint lists, so setup can offer the choice (§28.5). */
+  models?: string[];
   context_size?: number;
   caps: ModelCap[];
   /** Per-probe detail, for honest reporting in the setup UI (plan §3b). */
@@ -67,6 +79,67 @@ export const GREEN_PNG =
   'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAD0lEQVR42mNg+M8AQhAKABvyA/3ULwSAAAAAAElFTkSuQmCC';
 const GREEN_WORDS = /green|lime/;
 
+/**
+ * The credential, in both of the shapes this ecosystem actually uses.
+ *
+ * `/v1/models` is the one route hosted providers commonly serve from their
+ * **native** API rather than their OpenAI-compatible layer, and the two do not
+ * agree on how a key travels. Anthropic is the case that proved it: the same
+ * key is `Invalid bearer token` on `Authorization: Bearer` and accepted on
+ * `x-api-key`, while its `/v1/chat/completions` — the route the gateway
+ * itself uses — takes the bearer form happily. So the probe 401'd on a
+ * perfectly good key and reported the endpoint unreachable.
+ *
+ * Both headers, rather than a table of which provider wants which: a server
+ * ignores the header it does not know, and a per-vendor branch here would be
+ * a second place to keep a list of vendors correct.
+ */
+function authHeaders(apiKey: string | undefined): Record<string, string> {
+  if (!apiKey) return {};
+  return {
+    authorization: `Bearer ${apiKey}`,
+    'x-api-key': apiKey,
+    // Anthropic pins its native API by date and rejects a request without
+    // this. It travels alongside rather than conditionally, for the same
+    // reason as `x-api-key`: a server ignores a header it does not know, and
+    // branching on the hostname would be a vendor list to keep correct.
+    // Worth knowing if this ever looks redundant — an auth error is returned
+    // *before* the version is looked at, so probing with a bad key cannot
+    // tell you whether this line is load-bearing. Only a good one can.
+    'anthropic-version': '2023-06-01',
+  };
+}
+
+/**
+ * What the endpoint actually said, not merely its status code.
+ *
+ * `HTTP 401` is the least useful true statement available here: providers put
+ * the reason in the body, and the reason is usually the entire diagnosis —
+ * "x-api-key header is required" and "Invalid bearer token" are different
+ * bugs wearing the same number. This message becomes a note on the setup
+ * page, so the key is redacted out of it on the way (§27): a credential does
+ * not travel, not even inside somebody else's error string.
+ */
+async function describeFailure(res: Response, apiKey: string | undefined): Promise<string> {
+  let detail = '';
+  try {
+    const text = (await res.text()).trim();
+    if (text) {
+      let parsed: any;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        /* not JSON; the raw text is the best we have */
+      }
+      detail = String(parsed?.error?.message ?? parsed?.message ?? text).slice(0, 200);
+    }
+  } catch {
+    /* a body that cannot be read is not worth failing over */
+  }
+  if (apiKey && detail) detail = detail.split(apiKey).join('<redacted>');
+  return detail ? `HTTP ${res.status} — ${detail}` : `HTTP ${res.status}`;
+}
+
 async function getJson(
   url: string,
   opts: ProbeOptions,
@@ -74,14 +147,106 @@ async function getJson(
   const doFetch = opts.fetch ?? globalThis.fetch;
   try {
     const res = await doFetch(url, {
-      headers: opts.apiKey ? { authorization: `Bearer ${opts.apiKey}` } : {},
+      headers: authHeaders(opts.apiKey),
       signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
     });
-    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    if (!res.ok) return { ok: false, error: await describeFailure(res, opts.apiKey) };
     return { ok: true, body: await res.json() };
   } catch (e) {
     return { ok: false, error: errMessage(e) };
   }
+}
+
+/** The embedding half of App. E's probe: does this endpoint embed, and how wide? */
+export interface EmbeddingProbeResult {
+  /** The root the config will hold — `embeddings.ts` appends its own routes. */
+  url: string;
+  reachable: boolean;
+  model_id?: string;
+  dimensions?: number;
+  error?: string;
+}
+
+/**
+ * Embed one short string and count what comes back (App. E, §28.5).
+ *
+ * "Answered at all" is never the question — §27.1's lesson, and the same one
+ * the green-square vision probe learned: a server can accept the request and
+ * return nothing usable. The vector's **length** is the answer, because that
+ * is the number the index is built around.
+ *
+ * The two routes, in this order, are exactly the ones `rag/embeddings.ts`
+ * tries at runtime. That is the whole point: a probe that reaches embeddings
+ * by some path the real client does not use would auto-check a box for a
+ * capability this install cannot actually reach.
+ */
+export async function probeEmbeddings(
+  rawUrl: string,
+  opts: ProbeOptions = {},
+): Promise<EmbeddingProbeResult> {
+  const { root } = normaliseEndpointUrl(rawUrl);
+  const result: EmbeddingProbeResult = { url: root, reachable: false };
+  const doFetch = opts.fetch ?? globalThis.fetch;
+  const headers = { 'content-type': 'application/json', ...authHeaders(opts.apiKey) };
+  const signal = () => AbortSignal.timeout(opts.timeoutMs ?? 30_000);
+
+  const vectorOf = (body: any): number[] | null => {
+    const candidate = Array.isArray(body)
+      ? body[0]?.embedding
+      : (body?.data?.[0]?.embedding ?? body?.embedding);
+    // llama.cpp sometimes nests a single embedding one level deep.
+    const flat = Array.isArray(candidate?.[0]) ? candidate[0] : candidate;
+    return Array.isArray(flat) && flat.length ? flat : null;
+  };
+
+  /**
+   * Three shapes, most-specific first, because "an OpenAI-compatible
+   * embeddings route" is two different contracts wearing one path. vLLM and
+   * the hosted providers **require** `model` and answer a request without one
+   * with a 422, which is how a perfectly good endpoint was reported as having
+   * no embeddings at all; llama.cpp has no model to name and ignores the
+   * field. The named attempt goes first so a server that has several models
+   * embeds with the one that was asked for rather than a default.
+   */
+  const probeText = 'turminder embedding probe';
+  const attempts: { url: string; body: unknown }[] = [
+    ...(opts.model
+      ? [{ url: `${root}/v1/embeddings`, body: { input: probeText, model: opts.model } }]
+      : []),
+    { url: `${root}/v1/embeddings`, body: { input: probeText } },
+    { url: `${root}/embedding`, body: { content: probeText } },
+  ];
+
+  const failures: string[] = [];
+  for (const attempt of attempts) {
+    try {
+      const res = await doFetch(attempt.url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(attempt.body),
+        signal: signal(),
+      });
+      if (!res.ok) {
+        failures.push(`POST ${attempt.url}: ${await describeFailure(res, opts.apiKey)}`);
+        continue;
+      }
+      const body: any = await res.json();
+      const vector = vectorOf(body);
+      if (!vector) {
+        failures.push(`POST ${attempt.url}: answered without a vector`);
+        continue;
+      }
+      result.reachable = true;
+      result.dimensions = vector.length;
+      if (typeof body?.model === 'string') result.model_id = body.model;
+      l.info({ url: root, dimensions: vector.length }, 'embedding probe complete');
+      return result;
+    } catch (e) {
+      failures.push(`POST ${attempt.url}: ${errMessage(e)}`);
+    }
+  }
+  result.error = failures.join('; ');
+  return result;
 }
 
 function gatewayFor(api: string, opts: ProbeOptions, modelId: string): ModelGateway {
@@ -107,7 +272,11 @@ function gatewayFor(api: string, opts: ProbeOptions, modelId: string): ModelGate
 
 const probeToolSet = (): ToolSet => ({
   // A dotted name on purpose: that is the naming scheme the real tool catalog
-  // uses (App. F), so the probe must prove this endpoint tolerates it.
+  // uses (App. F), so the probe must exercise the same path a real call takes
+  // — including the §11.5 wire translation that makes it legal at providers
+  // which reject a dot. This name is why the probe used to report "no tool
+  // support" for Anthropic and OpenAI: it was the one part of the request
+  // they refused, and the tag was derived from their refusal.
   'probe.echo': tool({
     description: 'Echo a word back. Call this when asked to echo something.',
     inputSchema: jsonSchema<{ word: string }>({
@@ -142,15 +311,29 @@ export async function probeEndpoint(
   // 1. Reachability + model identity.
   const models = await getJson(`${api}/models`, opts);
   let modelId: string | undefined;
+  let modelIds: string[] = [];
   let contextSize: number | undefined;
   if (models.ok) {
     checks.reachable = true;
-    const entry = models.body?.data?.[0];
-    modelId = entry?.id;
+    const data: any[] = Array.isArray(models.body?.data) ? models.body.data : [];
+    modelIds = data.map((m) => m?.id).filter((id): id is string => typeof id === 'string');
+    // A caller who named a model gets that model, listed or not: an endpoint's
+    // catalogue is not always complete, and refusing a name the user knows
+    // works would be this code claiming to know better. Saying so is enough.
+    if (opts.model) {
+      modelId = opts.model;
+      if (modelIds.length && !modelIds.includes(opts.model)) {
+        notes.push(`${opts.model} is not in this endpoint's model list — probing it anyway`);
+      }
+    } else {
+      modelId = modelIds[0];
+    }
+    const entry = data.find((m) => m?.id === modelId) ?? data[0];
     const metaCtx = entry?.meta?.n_ctx;
     if (typeof metaCtx === 'number') contextSize = metaCtx;
   } else {
     notes.push(`GET ${api}/models failed: ${models.error}`);
+    if (opts.model) modelId = opts.model;
   }
 
   const props = await getJson(`${root}/props`, opts);
@@ -174,6 +357,7 @@ export async function probeEndpoint(
   }
   result.reachable = true;
   if (modelId) result.model_id = modelId;
+  if (modelIds.length) result.models = modelIds;
   if (contextSize) result.context_size = contextSize;
 
   const gateway = gatewayFor(api, opts, modelId ?? 'default');

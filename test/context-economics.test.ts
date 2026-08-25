@@ -5,7 +5,7 @@ import { BASE_PROMPTS } from '../src/prompts/base.js';
 import { GrantedDispatcher } from '../src/tools/dispatcher.js';
 import { PagedDispatcher, OPEN_TOOL } from '../src/tools/paged.js';
 import type { ToolHandle } from '../src/tools/types.js';
-import { bootService, type ServiceHarness } from './service-harness.js';
+import { bootService, offeredTools, type ServiceHarness } from './service-harness.js';
 import { FakeLlama } from './fake-llama.js';
 import { gatewayFor } from './model-stack.js';
 import { write } from './helpers.js';
@@ -52,10 +52,7 @@ const installClock = (harness: ServiceHarness, description?: string) =>
 
 const system = (harness: ServiceHarness) =>
   harness.fake.requests.at(-1)!.body.messages[0].content as string;
-const toolNames = (harness: ServiceHarness) =>
-  ((harness.fake.requests.at(-1)!.body.tools ?? []) as any[])
-    .map((t) => t.function.name as string)
-    .sort();
+const toolNames = (harness: ServiceHarness) => offeredTools(harness).sort();
 
 /* ── §21.1 honest usage ───────────────────────────────────────────────────── */
 
@@ -481,9 +478,7 @@ describe('tool paging (§21.2)', () => {
     await drain(h);
     // The handler's own small explicit grant renders in full, catalog-free.
     const handlerRequest = h.fake.requests.filter((r) => !r.body.response_format).at(-1)!;
-    expect((handlerRequest.body.tools as any[]).map((t) => t.function.name)).toEqual([
-      'config.read',
-    ]);
+    expect(offeredTools(h, handlerRequest)).toEqual(['config.read']);
     expect(handlerRequest.body.messages[0].content).not.toContain('closed; open with');
   });
 });
@@ -521,7 +516,7 @@ describe('"turn on the office lights" (§21 exit criteria)', () => {
     await drain(h);
 
     const turnOne = h.fake.requests.slice(firstRequestBefore).filter((r) => r.body.tools)[0]!;
-    const turnOneTools = (turnOne.body.tools as any[]).map((t) => t.function.name);
+    const turnOneTools = offeredTools(h, turnOne);
     expect(turnOneTools).not.toContain('HassTurnOn');
     expect(turnOne.body.messages[0].content).toContain(
       '- home-assistant: 23 tools — control lights, climate, covers and media around the house',
@@ -653,9 +648,7 @@ describe('paging determinism (§21.2.7)', () => {
     h.service.chat.send({ text: 'hello' });
     await drain(h);
 
-    const rendered = ((h.fake.requests.at(-1)!.body.tools ?? []) as any[]).map(
-      (t) => t.function.name as string,
-    );
+    const rendered = offeredTools(h);
     // `tools.open` is appended last by design — its position must not depend on
     // which namespaces happen to be open.
     expect(rendered.at(-1)).toBe(OPEN_TOOL);

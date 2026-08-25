@@ -703,6 +703,42 @@ prompt. A handler run's dispatcher is constructed with only the granted
 tools; ungranted tools do not exist from the model's point of view, and a
 forged call is rejected mechanically.
 
+### 11.5 Names on the wire
+
+Tools are named `<namespace>.<verb>` (App. F), and that dot is **internal
+only**. Anthropic and OpenAI both pin tool names to `^[a-zA-Z0-9_-]{1,128}$`
+and reject a dotted name outright, before the model is ever asked; llama.cpp,
+vLLM and Gemini accept it. Development happened against the permissive ones,
+so the failure surfaced as the §10.2 probe reporting **no tool support** for
+models that have had it for years — a capability tag derived, correctly, from
+a request the provider refused.
+
+So the boundary translates and nothing else changes: `.` becomes `__` on the
+way out and back again on the way in, in `model/tool-names.ts`, applied by
+`ModelGateway.turn()` — the one place every call crosses (§21). The catalog,
+grants, handler frontmatter, prompts and every `grants.yaml` a user has
+already written keep the dotted spelling. Renaming *those* to satisfy one
+vendor's regex would still leave the next vendor free to pick a different one.
+
+Three properties make it a facade rather than a rewrite:
+
+- **It is a pure inverse, not a lookup.** A single underscore would be
+  ambiguous — `calendar.create_task` and `calendar_create.task` flatten
+  together — and resolving that needs a table of the names in play. That
+  table is precisely what is missing where it matters: under §21.2 paging a
+  granted-but-closed namespace **opens itself**, so the model legitimately
+  calls tools absent from the current tool set, and an ungranted or
+  hallucinated call names one that was never offered. Those are the names a
+  refusal is about to quote back, so they must survive. `__` is unambiguous
+  as long as no tool name contains one, which is a permanent contract test
+  over the whole catalog.
+- **History is translated too.** A run's own `tool-call` and `tool-result`
+  parts name their tool and ride along on every later step, so a dotted name
+  in turn three is refused exactly like a dotted name in the tool set.
+- **Order is never touched.** §21.2.7 sorts the paged definitions and appends
+  `tools.open` after that sort; re-sorting at the boundary would move it and
+  break the prefix stability of §20.5.
+
 ---
 
 ## 12. Storage and data home
@@ -2188,9 +2224,18 @@ LibreOffice lost: they render *differently* than the preview).
   write).
 - Mechanics: `chromium --headless=new --print-to-pdf=<out>
   --virtual-time-budget=<App. A> --no-pdf-header-footer
-  "<embed url with scoped token>"`, timeout per App. A. The scoped token in
+  --disable-background-networking "<embed url with scoped token>"`, timeout
+  per App. A. The scoped token in
   the printed URL is the embed's own — chromium gets exactly the capability
   a browser tab has, nothing more.
+- **A print reaches one URL.** `--disable-background-networking` is not
+  hygiene, it is load-bearing: a fresh profile otherwise registers with
+  Google Cloud Messaging on startup, and virtual time **pauses while network
+  fetches are pending**, so a request that retries instead of resolving stops
+  the budget above from ever expiring and the print dies on its timeout with
+  nothing written. It also means the one network destination a PDF export
+  touches is the service's own URL, which is what a local-first tool should
+  have been doing regardless.
 - **No print stamps.** Chromium's default header and footer put the date,
   the source URL and a page counter on every page. None of that is part of
   the artifact the user previewed — "print what you previewed" means
@@ -2935,10 +2980,30 @@ The list is a convenience and never an authority: the probe still decides
 whether anything is written, so a base URL that has moved fails visibly
 instead of being trusted. Two rules keep it honest — a hand-typed address
 returns the list to *Custom* rather than leaving a provider's name above
-an address that is not theirs, and a provider with **no embeddings API of
-its own** has that option *withdrawn and explained*, not merely
-defaulted off: offering a choice that cannot work is worse than not
-offering it. Absent git is normal
+an address that is not theirs, and the embeddings option is settled by **asking the address** rather than
+by consulting a list of who usually has one: once the endpoint answers, the
+page runs App. E's embedding probe against it and sets the box from the
+result — checked, with the vector width named, when a real round trip came
+back; cleared and *explained* when none did. Offering a choice that cannot
+work is worse than not offering it, and a hardcoded table of which vendors
+embed is a table that goes stale silently. The dropdown's own guess still
+sets the box *before* anyone probes, so the page is never blank about it;
+the probe overrules that guess in both directions.
+
+Because the offer is made on the strength of a probe that carried the API
+key, the commit writes that **same key reference into the embedding
+block**. Otherwise setup would auto-check a capability that 401s on the
+first index build — the box would have been telling the truth about the
+endpoint and a lie about this install.
+
+**Which model, not just which provider.** A local llama.cpp serves one
+model and has nothing to ask; a hosted provider lists dozens, in an order
+nobody chose. So the probe returns the endpoint's whole list and the page
+offers it, and picking one **re-probes that model** rather than relabelling
+the answers already on screen — a capability tag describes a model, not an
+address (§10.2), and committing tags measured against whichever id happened
+to sort first is how an install ends up believing the wrong thing about
+itself. Absent git is normal
 here (§12.2): versioning is silently off, doctor says so, nothing
 prompts for Xcode. llama.cpp remains the primary *architecture* target
 (§10.1); this section is about the first five minutes of a user who
@@ -4072,8 +4137,8 @@ localStorage and uses it for `/ws`.
 |---|---|
 | `GET /` | chat UI; serves the setup page instead when `models.yaml` is absent/invalid (plan-v1 §3b). A `#connect=<token>` URL fragment (the §24.3 QR payload) is consumed client-side — **by the setup page too** (scan the first-run QR before configuring and the token survives setup instead of vanishing): token stored, fragment stripped via `history.replaceState`, connect — the fragment never reaches the server |
 | `GET /healthz` | `{status:"ok", db_version, layout_version, linked}` — no auth. `linked` is whether **any** device token exists (§24): the chat UI's gate must choose what to tell someone before it holds a credential to ask with — scan the QR your assistant shows, or (nothing linked, nobody to ask) the CLI. A boolean and nothing more: never a count, never a device name |
-| `POST /api/setup/probe` | `{url, kind?: "chat"="chat"\|"embedding"}` → chat: `{reachable, model_id?, context_size?, caps: {json: bool, tools: bool}, error?}`; embedding: `{reachable, model_id?, dimensions?, error?}` — a real `/v1/embeddings` (then native `/embedding`) round-trip whose vector length is `dimensions`; "answered at all" is never the question (§27.1's lesson). Only enabled while unconfigured |
-| `POST /api/setup/commit` | `{endpoints: [ModelEndpoint], embedding?: {url}}` (App. G.2) → writes `models.yaml`, git commit, 200. The embedding field is **offered on the setup page, optional, with the honest consequence stated** ("without it, semantic search runs on keyword overlap — everything works, recall is cruder"); it landed here after the block spent a day hand-edited and silently broken (2026-08-23). First run only, the response also carries `ui_token` so the page can open `/ws` without the operator copying it out of the terminal — the value comes from the scaffold's in-memory carrier, never from disk (§24: there is only a hash there), so a service that did not create this data dir omits the field |
+| `POST /api/setup/probe` | `{url, api_key?, model?, kind?: "chat"="chat"\|"embedding"}` → chat: `{reachable, model_id?, models?: [string], context_size?, caps: {json: bool, tools: bool}, error?}`; `models` is every id the endpoint lists and `model_id` is the one these caps were **measured against** — absent `model`, the first it lists, which is all an endpoint serving one model can mean. The page re-probes with `model` when someone picks another, because a capability tag describes a model rather than an address (§10.2). The key is presented as **both** `Authorization: Bearer` and `x-api-key`, since `/v1/models` is commonly served from a provider's native API rather than its OpenAI-compatible layer and the two disagree on how a key travels; embedding: `{reachable, model_id?, dimensions?, error?}` — a real `/v1/embeddings` (then native `/embedding`) round-trip whose vector length is `dimensions`; "answered at all" is never the question (§27.1's lesson). Only enabled while unconfigured |
+| `POST /api/setup/commit` | `{endpoints: [ModelEndpoint], embedding?: bool, embedding_url?}` (App. G.2) — `embedding: false` is a decline and writes no block; otherwise the URL defaults to the first endpoint's root and inherits that endpoint's `${secret:}` key reference when it *is* that root (§28.5) → writes `models.yaml`, git commit, 200. The embedding field is **offered on the setup page, optional, with the honest consequence stated** ("without it, semantic search runs on keyword overlap — everything works, recall is cruder"); it landed here after the block spent a day hand-edited and silently broken (2026-08-23). First run only, the response also carries `ui_token` so the page can open `/ws` without the operator copying it out of the terminal — the value comes from the scaffold's in-memory carrier, never from disk (§24: there is only a hash there), so a service that did not create this data dir omits the field |
 | `POST /api/events` | inject an event: `{type, payload, occurred_at?, idempotency_key?, serialization_key?}` → `{event_id}` — generic webhook/testing ingress; `webhook.<name>` types conventionally. **`source` is stamped server-side from the authenticated device** (matching the WS `event` frame, D.1) — a caller-supplied `source` is ignored: provenance comes from the token, identity from the type. Payload caps per App. A where the type declares them (§29.3) → `{error: "too_large"}` |
 | `GET /api/whoami` | bearer auth → `{device, label?}` — the authenticated identity probe; pairing UIs (§29.5) verify a token and show what it authenticated as |
 | `POST /api/pair/request` | no auth; `{kind?: "phone"\|"browser"\|"desktop"}` → `{code, ticket, expires_in_s}` — page-initiated pairing (§24.4): the code goes on the asking device's screen, the ticket stays in it, and the approval dialog goes to the linked devices. `kind` only picks the name that dialog offers, from that closed set — anything else, or any other key, is 400 `{error: "bad_request"}`, because an unauthenticated caller writes none of the text a person reads. Past `pair_pending_max` → `{error: "too_many_pending"}`; on an install with no device token → `{error: "nothing_linked"}` |
@@ -4822,7 +4887,8 @@ src/
                   #   systool registry (§23.1), secret store backends (§27),
                   #   non-compiled asset lookup (§28.4)
   db/             # connection, migrations/, repositories per table
-  model/          # models.yaml types, router, inference scheduler, agent loop, probes
+  model/          # models.yaml types, router, inference scheduler, agent loop, probes,
+                  #   tool-names.ts (the §11.5 wire facade: `.` ↔ `__`)
   tools/          # dispatcher, grants, run-grant registry (§23.2), mcp-client,
                   #   registry, integrations/{memory,schedule,deliver,events,web,config,
                   #   skills,asana,google,files,setup,time,weather,embeds,docs,

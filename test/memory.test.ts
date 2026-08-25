@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { bootService, type ServiceHarness } from './service-harness.js';
+import { bootService, offeredTools, type ServiceHarness } from './service-harness.js';
 import { MemoryStore, slugify } from '../src/memory/store.js';
 import { lexicalSearch } from '../src/rag/index-store.js';
 
@@ -295,7 +295,7 @@ describe('memory in chat (§5.4, §8.2)', () => {
     h.fake.always({ text: 'noted' });
     h.service.chat.send({ text: 'remember that I dislike crowded rooms' });
     await drain(h);
-    const tools = (h.fake.requests.at(-1)!.body.tools ?? []).map((t: any) => t.function.name);
+    const tools = offeredTools(h);
     expect(tools).toContain('memory.save');
     expect(tools).toContain('memory.query');
   });

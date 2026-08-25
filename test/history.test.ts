@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { EmbeddingClient } from '../src/rag/embeddings.js';
 import { InferenceScheduler } from '../src/model/scheduler.js';
 import { TurnsIndex } from '../src/rag/turns-index.js';
-import { bootService, type ServiceHarness } from './service-harness.js';
+import { bootService, offeredTools, type ServiceHarness } from './service-harness.js';
 import { write } from './helpers.js';
 
 let h: ServiceHarness;
@@ -169,7 +169,7 @@ describe('history.search through the tool hub (App. F.15)', () => {
     h.service.chat.send({ text: 'hello' });
     await drain(h);
     const body = h.fake.requests.at(-1)!.body;
-    const names = (body.tools ?? []).map((t: any) => t.function.name);
+    const names = offeredTools(h, h.fake.requests.at(-1)!);
     // Granted, but not core: it is a catalog line until the model opens it.
     expect(names).not.toContain('history.search');
     expect(String(body.messages[0].content)).toContain('- history:');

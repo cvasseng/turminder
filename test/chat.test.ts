@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { bootService, type ServiceHarness } from './service-harness.js';
+import { bootService, offeredTools, type ServiceHarness } from './service-harness.js';
 
 let h: ServiceHarness;
 afterEach(async () => {
@@ -365,7 +365,7 @@ describe('onboarding (plan §3c)', () => {
     h.fake.always({ text: 'thinking about names' });
     h.service.chat.send({ text: 'hello' });
     await drain(h);
-    const tools = (h.fake.requests.at(-1)!.body.tools ?? []).map((t: any) => t.function.name);
+    const tools = offeredTools(h);
     expect(tools.sort()).toEqual(['config.read', 'config.write', 'setup.token_create']);
   });
 
@@ -398,7 +398,7 @@ describe('onboarding (plan §3c)', () => {
     h.fake.always({ text: 'no tools needed' });
     h.service.chat.send({ text: 'hello' });
     await drain(h);
-    const tools = (h.fake.requests.at(-1)!.body.tools ?? []).map((t: any) => t.function.name);
+    const tools = offeredTools(h);
     /**
      * The default grant (App. F.7) covers more than this — `config.*` so chat
      * can author handlers (plan §6) and `setup.*` so it can connect things

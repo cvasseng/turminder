@@ -5,6 +5,7 @@ import YAML from 'yaml';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LAYOUT_VERSION, openDataHome } from '../src/core/datadir.js';
 import { MANIFESTS, manifestFor, namespaceOf } from '../src/tools/integrations/registry.js';
+import { WIRE_SEPARATOR, internalToolName, wireToolName } from '../src/model/tool-names.js';
 import {
   AsanaSettingsSchema,
   CalendarSettingsSchema,
@@ -96,6 +97,33 @@ function toolCallResult(harness: ServiceHarness, eventId: string): any {
     .data as any;
   return { ...row, parsed: JSON.parse(row.result_excerpt) };
 }
+
+/**
+ * §11.5. Tools cross the wire as `namespace__verb`, because Anthropic and
+ * OpenAI reject a dot in a tool name. That translation is only a true inverse
+ * while no tool name contains `__` of its own — `calendar.create_task` must
+ * come back as itself and not as `calendar.create.task`. The separator was
+ * chosen over a single underscore precisely so the reverse needs no lookup
+ * table, which matters because a paged-closed or ungranted call names a tool
+ * the request never offered.
+ */
+describe('tool names survive the wire (§11.5)', () => {
+  let h: ServiceHarness;
+  afterEach(async () => {
+    await h?.cleanup();
+  });
+
+  it('no tool name contains the wire separator, so the round trip is exact', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    const names = h.service.tools.handles().map((t) => t.name);
+    expect(names.length).toBeGreaterThan(20);
+    expect(names.filter((n) => n.includes(WIRE_SEPARATOR))).toEqual([]);
+    for (const name of names) {
+      expect(internalToolName(wireToolName(name))).toBe(name);
+      expect(wireToolName(name)).toMatch(/^[a-zA-Z0-9_-]{1,128}$/);
+    }
+  });
+});
 
 describe('the manifest registry (§19.5)', () => {
   it('declares every integration this build ships, with its activation', () => {

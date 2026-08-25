@@ -164,8 +164,9 @@ Open `http://127.0.0.1:7787`:
 1. **Setup** — pick your provider from the dropdown (Anthropic, OpenAI,
    Gemini, Groq, Mistral, DeepSeek, xAI, OpenRouter, Together, Ollama,
    llama.cpp) and it fills in the base URL, or choose Custom and type your
-   own. Nothing is taken on trust: it probes what the endpoint can actually
-   do before writing any config.
+   own. Then pick which of that endpoint's models to use — a hosted provider
+   offers dozens. Nothing is taken on trust: it probes what the model you
+   chose can actually do before writing any config.
 2. **Onboarding** — the assistant introduces itself, picks a name, asks
    yours, and writes its own identity files. Renaming it later is one
    request away: it rewrites its own identity and points out where the
