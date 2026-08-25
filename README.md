@@ -82,7 +82,6 @@ Each of these in full: [docs/features.md](docs/features.md).
 - [Design](docs/design.md), why it is shaped this way
 - [Running it](docs/running.md), daemon, systemd, LAN access, device pairing
 - [spec.md](spec.md), the architecture and contracts
-- [plan.md](plan.md), the phases and what is left
 - [CHANGELOG.md](CHANGELOG.md), what changed
 - [turminder.com](https://turminder.com), the tour
 
