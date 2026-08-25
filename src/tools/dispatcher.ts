@@ -15,10 +15,20 @@ export interface Grants {
   confirm?: readonly string[];
 }
 
-/** Asks the human. Stubbed to deny until the confirm round-trip lands (phase 8). */
+/**
+ * Asks the human about a `confirm`-level call (§7.3, App. F.7). Both executors
+ * supply `ConfirmBroker.request`, which queues a `confirm` delivery and
+ * suspends the run until the button click arrives back as a
+ * `notification.action` event.
+ */
 export type ConfirmFn = (call: DispatchCall, handle: ToolHandle) => Promise<boolean>;
 
-const denyAll: ConfirmFn = async () => false;
+/**
+ * The default for dispatchers built with no `confirm` globs at all — the embed
+ * binder, most tests. Reaching it means a gated tool got through to a
+ * dispatcher that has nobody to ask, so the only safe answer is no.
+ */
+const denyUnasked: ConfirmFn = async () => false;
 
 /**
  * The enforcement point (§11.4, App. F.7). Built per run from that run's grants:
@@ -48,7 +58,7 @@ export class GrantedDispatcher implements ToolDispatcher {
     private readonly available: OrProvider<readonly ToolHandle[]>,
     private readonly grants: OrProvider<Grants>,
     private readonly ctx: ToolContext,
-    private readonly confirm: ConfirmFn = denyAll,
+    private readonly confirm: ConfirmFn = denyUnasked,
   ) {}
 
   /**
