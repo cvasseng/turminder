@@ -78,6 +78,12 @@ export default tseslint.config(
         setTimeout: 'readonly',
         Buffer: 'readonly',
         URL: 'readonly',
+        // The web trio, for the one script that talks to somebody else's API
+        // (`sign-firefox-extension.mjs` → addons.mozilla.org). Node's own, not
+        // a browser's, and the reason App. J needs no HTTP client.
+        fetch: 'readonly',
+        FormData: 'readonly',
+        Blob: 'readonly',
       },
     },
   },

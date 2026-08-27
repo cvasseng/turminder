@@ -30,7 +30,15 @@ right manifest under the right name, plus a
   the chrome layout).
 - **Firefox**: `about:debugging` → This Firefox → *Load Temporary Add-on* →
   pick any file in `dist/extension/firefox` (or the firefox zip). Temporary
-  add-ons go away on restart; that is the v1 install story (§29.6).
+  add-ons go away on restart, which is what building from source gets you:
+  release Firefox installs nothing Mozilla has not signed, and no amount of
+  local building changes that (§29.6).
+
+  To keep it, take the **`.xpi`** from a release and open it in Firefox. That
+  file is signed by Mozilla on the unlisted channel — self-distribution, so
+  it is not listed on addons.mozilla.org and updates come from here rather
+  than from the store. Releases built without Mozilla credentials carry only
+  the zip, and say so in their notes.
 
 A fresh, unpaired install opens the options page for you (and the popup
 points there instead of capturing until a token is stored). Say where the

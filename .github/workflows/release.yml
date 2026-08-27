@@ -75,7 +75,8 @@ jobs:
           mkdir -p release
           find incoming -type f \
             \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
-               -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.zip' \) \
+               -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.zip' \
+               -o -name '*.xpi' \) \
             -exec cp {} release/ \;
           cp incoming/notes/notes.md notes.md
           # A checksum list is the only way someone who did not watch this run
@@ -109,6 +110,28 @@ jobs:
               echo "> \`xattr -dr com.apple.quarantine /Applications/Turminder.app\` does the same"
               echo "> thing. Or build it yourself from \`app/\`. Signed and notarized macOS builds"
               echo "> land when there is a Developer ID to sign them with."
+              echo
+              cat notes.md
+            } > notes.new
+            mv notes.new notes.md
+          fi
+
+      # §29.6: without a signed `.xpi` there is nothing a Firefox user can
+      # install — release Firefox refuses an unsigned add-on outright, and the
+      # zip beside it is a Chromium install story only. Said before the
+      # download rather than discovered after it, and generated from the
+      # absence of the file rather than remembered by a human, for the same
+      # reason the macOS notice is (§32.4).
+      - name: Say so if Firefox went out unsigned
+        shell: bash
+        run: |
+          if ! ls release/*.xpi >/dev/null 2>&1; then
+            {
+              echo "> **The Firefox extension is not signed.** The \`-firefox.zip\` is source for"
+              echo "> Chromium-style loading and \`about:debugging\` — Firefox will not install it"
+              echo "> permanently, because release Firefox refuses any add-on Mozilla has not"
+              echo "> signed. Load it as a temporary add-on, or use the Chromium build. A signed"
+              echo "> \`.xpi\` lands when there is a Mozilla account to sign it with."
               echo
               cat notes.md
             } > notes.new
