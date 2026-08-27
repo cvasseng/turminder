@@ -189,6 +189,43 @@ fs.renameSync(path.join(staging, 'node_modules'), path.join(staging, 'dist', 'no
 // Node reads `type: module` from it.
 fs.rmSync(path.join(staging, 'package-lock.json'), { force: true });
 
+/* ── one platform's natives, not eight ───────────────────────────────────── */
+
+/**
+ * Drop the `prebuilds/` binaries that are not this target's.
+ *
+ * npm filters *packages* by `os`/`cpu`, which is why `@napi-rs/*` arrives
+ * already narrowed — but better-sqlite3 ships every platform inside one
+ * tarball, so the staged tree carries eight `.node` files of which one can
+ * ever load: two Mach-O, two PE, and four ELF (glibc and musl, x64 and
+ * arm64). Seven are dead weight in every artifact, and on Linux one of them
+ * fails the build outright. `linuxdeploy` walks the AppDir and resolves
+ * dependencies for **every ELF it finds**, so it reaches
+ * `linuxmusl-x64.node`, asks a glibc runner for `libc.musl-x86_64.so.1`,
+ * and stops: `ERROR: Could not find dependency` → `Failed to deploy
+ * dependencies for existing files`. Tauri reports that as
+ * `failed to run linuxdeploy` with the reason discarded, which is why the
+ * AppImage has never once built (§28.4, §32.3).
+ *
+ * Keyed off the file name because that is what the convention is: prebuildify
+ * names these `<platform><libc?>-<arch>.node`. Anything that does not name a
+ * platform at all is left alone — this removes what it recognises, never
+ * what it merely fails to recognise.
+ */
+const keepPrebuild = `${targetOs === 'win32' ? 'win32' : targetOs}-${targetArch}.node`;
+const PREBUILD_NAME = /^(darwin|linux|linuxmusl|win32|android|freebsd)-(x64|arm64|arm|ia32)\.node$/;
+let dropped = 0;
+for (const entry of fs.readdirSync(path.join(staging, 'dist', 'node_modules'), {
+  recursive: true,
+  withFileTypes: true,
+})) {
+  if (!entry.isFile() || path.basename(entry.parentPath ?? entry.path) !== 'prebuilds') continue;
+  if (!PREBUILD_NAME.test(entry.name) || entry.name === keepPrebuild) continue;
+  fs.rmSync(path.join(entry.parentPath ?? entry.path, entry.name));
+  dropped++;
+}
+if (dropped) say(`dropped ${dropped} prebuilt native${dropped === 1 ? '' : 's'} for other platforms`);
+
 /* ── §28.4: a bundle that cannot boot is not an artifact ──────────────────── */
 
 const size = () => {
