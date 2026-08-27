@@ -70,8 +70,26 @@ function parseConnectUrl(input) {
   return { gatewayUrl: parsed.origin, token: token, device: device || 'browser' };
 }
 
+/**
+ * The match pattern for a gateway — scheme and host, and deliberately **no
+ * port**, however unlikely a gateway on the default port is.
+ *
+ * A port is not in the match-pattern grammar the two browsers share. Chromium
+ * honours one; Firefox takes the string, matches nothing with it ever
+ * (bugzilla 1362809), and reports the permission as granted — so
+ * `http://localhost:7787/*` is a grant over nothing, and the first fetch that
+ * actually needs it dies. Pairing is where that lands, because `/api/pair/*`
+ * are the routes with no CORS answer to fall back on (App. E): the page says
+ * it could not reach the service, about a service that is running and
+ * answering.
+ *
+ * Without the port the grant covers every port on that one host. That is the
+ * narrowest either browser can express, and §29.1's rule is about hosts —
+ * nothing here reaches a second one.
+ */
 function originPattern(gatewayUrl) {
-  return new URL(gatewayUrl).origin + '/*';
+  var url = new URL(gatewayUrl);
+  return url.protocol + '//' + url.hostname + '/*';
 }
 
 /** The pairing probe (§29.5): bearer in, `{device, label?}` back. */

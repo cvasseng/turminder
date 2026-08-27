@@ -32,9 +32,12 @@ const PairStartRequest = z.strictObject({
 
 /**
  * The two routes the §29 browser extension calls from its moz-extension://
- * origin. Firefox — unlike Chromium — subjects extension fetches to CORS even
- * with the host permission granted, and a preflight nobody answers kills the
- * request before it is sent (App. E). `*` because extension origins are
+ * origin. Firefox subjects an extension fetch to CORS whenever no *granted*
+ * host pattern matches it, and a preflight nobody answers kills the request
+ * before it is sent (App. E) — so these two answers are what keeps proving a
+ * token and sending a capture working with the grant missing or handed back.
+ * A grant that does match exempts the fetch outright, which is why `/api/pair/*`
+ * needs nothing here and gets nothing. `*` because extension origins are
  * per-install UUIDs; it concedes nothing — bearer auth still decides
  * everything, CORS only lets the browser ask.
  */

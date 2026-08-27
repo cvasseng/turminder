@@ -30,9 +30,27 @@ afterEach(async () => {
 
 const drain = (harness: ServiceHarness) => harness.service.queue.drain();
 
-/** A chromium this machine may or may not have; the gated tests say which. */
+/**
+ * A chromium this machine may or may not have; the gated tests say which.
+ *
+ * `TURMINDER_NO_CHROMIUM_TESTS` is a second gate, and it is deliberately not
+ * spelled as absence: on GitHub's runners chromium is present and answers
+ * `--version`, it just never finishes a headless command. It navigates the
+ * page — the browser log names the URL it is scanning — and then neither
+ * writes its output nor exits: `--dump-dom` of a three-line local file
+ * returns nothing after 300s on twenty cores. The binary is the variable,
+ * not the runner: a distro-built chromium does the same job in a third of a
+ * second in the same container where Google's prebuilt 148 and 151 both
+ * deadlock, and the runner's `chromium` is a Google snapshot build under
+ * `/usr/local/share/chromium/`. Nothing on the command line reaches it —
+ * print flags, virtual time, `--no-sandbox`, `--disable-gpu`, a session bus,
+ * an X display and dummy Google API keys were each tried and each hung — so
+ * the honest thing is to skip these three there and say why, rather than
+ * keep the suite red or claim a fix that is not one (§23.4).
+ */
 const realChromium = new SystoolRegistry();
-const hasChromium = realChromium.probe('chromium').ok;
+const hasChromium =
+  !process.env.TURMINDER_NO_CHROMIUM_TESTS && realChromium.probe('chromium').ok;
 
 /* ── §23.1 the systool registry ───────────────────────────────────────────── */
 

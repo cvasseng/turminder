@@ -57,9 +57,14 @@ permissions is wrong by definition, and a test asserts the permission lists.
 
 The gateway's host permission is declared optional over `http://*/*` and
 `https://*/*` because your gateway can be anywhere; the grant actually
-*requested* is the single origin you configured. Chromium will not let an
+*requested* is the single host you configured. Chromium will not let an
 extension request an origin it never declared, so the declaration is wide and
 the grant is narrow.
+
+The port is deliberately not in that grant. Ports are outside the match-pattern
+grammar Chromium and Firefox share — Firefox calls such a pattern granted and
+then matches nothing with it, which used to leave pairing failing as though the
+service were down — so the grant is the host, every port on it.
 
 ## Matchers — and why there are none yet
 

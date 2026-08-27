@@ -142,7 +142,22 @@ jobs:
           carry APPLE_PASSWORD "${APPLE_PASSWORD}"
           carry APPLE_TEAM_ID "${APPLE_TEAM_ID}"
           if [ -z "${APPLE_CERTIFICATE}" ] && [ -z "${APPLE_SIGNING_IDENTITY}" ]; then
-            echo "no Developer ID configured — this .dmg ships unsigned and says so (§32.4)"
+            echo "no Developer ID configured — this .dmg ships ad-hoc signed and says so (§32.4)"
+            # `-` is codesign's ad-hoc identity, and Tauri passes it straight
+            # through, so this needs no second signing step and no new tool: the
+            # bundler signs the .app before it seals the .dmg around it, which is
+            # the order that matters. It buys no Gatekeeper trust — only a
+            # Developer ID does that — but it is the difference between a bundle
+            # macOS can evaluate and one it cannot. Left off, `Contents/` has no
+            # `_CodeSignature` at all, the main executable carries only the
+            # ad-hoc signature the linker applies to every arm64 binary, and
+            # Gatekeeper reports that state as *"is damaged and can't be opened.
+            # You should move it to the Trash"* — a sentence about a build that
+            # is not damaged, which sends the person who downloaded it looking
+            # for a corrupt file instead of the *Open Anyway* button that would
+            # let them through (§32.4). Notarization stays off: that is driven by
+            # APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID, none of which are set here.
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
           fi
 
       - name: Rust toolchain

@@ -109,8 +109,13 @@ jobs:
           if [ -z "${APPLE_SIGNING_IDENTITY}${APPLE_CERTIFICATE}" ] &&
              ls release/*macos*.dmg >/dev/null 2>&1; then
             {
-              echo "> **The macOS build is not signed or notarized.** Gatekeeper will refuse it on"
-              echo "> first open — right-click the app and choose *Open* to let it through."
+              echo "> **The macOS build is ad-hoc signed, not notarized.** Gatekeeper refuses it on"
+              echo "> first open, and says *\"Turminder is damaged and can't be opened\"* — it is not"
+              echo "> damaged, that is the wording macOS uses for any app it has no Developer ID to"
+              echo "> check. Open it once and let it be refused, then go to **System Settings →"
+              echo "> Privacy & Security**, scroll to *Security*, and click **Open Anyway**."
+              echo "> Control-clicking the app and choosing *Open* no longer works — Apple removed"
+              echo "> that in macOS Sequoia."
               echo
               cat notes.md
             } > notes.new
