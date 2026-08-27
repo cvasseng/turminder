@@ -42,10 +42,36 @@ jobs:
       # the service's version over it would be a lie about which extension
       # this is.
       - run: npm run build:extensions
+
+      # §29.6: a Chromium user can install an unpacked directory; a Firefox
+      # user cannot install anything Mozilla has not signed, and
+      # `about:debugging` only loads a *temporary* add-on that is gone at the
+      # next restart. So the zip beside it is a Chrome-only install story until
+      # this step runs. Unlisted signing is the self-distribution channel —
+      # automatic review, no listing on addons.mozilla.org — and it is driven
+      # by credentials exactly as macOS is (§32.4): present, it signs; absent,
+      # the script says so and exits 0 so a repository with no Mozilla account
+      # can still cut a release. Passed as `env:` rather than a job-level block
+      # because the script's own check is `is this empty`, which an absent
+      # secret satisfies.
+      - name: Sign the Firefox extension for self-distribution
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          node .github/sign-firefox-extension.mjs \
+            --zip "$(ls dist/extension/*-firefox.zip)" \
+            --out dist/extension
+
       - uses: actions/upload-artifact@v7
         with:
           name: extensions
-          path: dist/extension/*.zip
+          # The `.xpi` is there when this repository has Mozilla credentials
+          # and absent when it does not, so the glob covers both and
+          # `if-no-files-found` still catches a build that produced nothing.
+          path: |
+            dist/extension/*.zip
+            dist/extension/*.xpi
           if-no-files-found: error
           retention-days: ${{ inputs.channel == 'nightly' && 7 || 30 }}
 

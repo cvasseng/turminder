@@ -2977,6 +2977,21 @@ Signing is a per-platform story, and only one platform has a gate:
   accepted. The second probe is not redundant: `ui/` is outside the tsc
   output, so a bundle assembled from `dist/` alone answers `/healthz`
   perfectly and serves no interface at all.
+- **"Per-arch" is enforced, not assumed.** npm narrows *packages* by
+  `os`/`cpu`, which is why `@napi-rs/*` arrives already correct — but
+  `better-sqlite3` ships every platform inside one tarball, so a staged
+  tree otherwise carries eight `prebuilds/*.node` of which one can load:
+  two Mach-O, two PE, and four ELF across glibc/musl and x64/arm64.
+  `stage-service.mjs` drops the seven that are not the target's, keyed on
+  the prebuildify name (`<platform><libc?>-<arch>.node`) and removing only
+  names it recognises. Seven dead binaries in every artifact would be
+  reason enough, but on Linux one of them **fails the build**: `linuxdeploy`
+  resolves dependencies for every ELF in the AppDir, reaches
+  `linuxmusl-x64.node`, asks a glibc runner for `libc.musl-x86_64.so.1`
+  and stops — which Tauri surfaces as `failed to run linuxdeploy` with the
+  reason discarded, and which is why the AppImage in §32.3 never once
+  built. The `.deb` was unaffected throughout, because dpkg archives files
+  rather than resolving what they link against.
 - **The pinned runtime is the official nodejs.org build**, hash-pinned,
   and deliberately *not* the toolchain's own Node. A nix-built binary
   carries its ELF interpreter as a `/nix/store` path, so a `.deb`
@@ -3244,7 +3259,31 @@ and zips each (`turminder-capture-<version>-<browser>.zip`,
 reproducible byte-for-byte). Loading a built directory unpacked /
 temporary add-on is the v1 install story (Chromium can also load
 `extension/` itself, which is the chrome output minus the rename); store
-distribution comes with demand. The matcher engine and JSONs are read by
+distribution comes with demand.
+
+**Firefox needs a signature, and gets one without a listing.** The two
+browsers are not symmetric here: a Chromium user can load an unpacked
+directory and keep it, while release Firefox refuses any add-on Mozilla
+has not signed, and `about:debugging` loads only a *temporary* one that
+is gone at the next restart. So the zip is a Chromium install story and
+nothing more until the add-on is signed. `.github/sign-firefox-extension.mjs`
+does that on the **unlisted** channel — AMO reviews automatically, signs,
+and hands the file back for us to host — which is self-distribution, not a
+listing on addons.mozilla.org. It needs `browser_specific_settings.gecko.id`,
+which the Firefox manifest carries, and it publishes a `.xpi` beside the
+zips. Driven by credentials exactly as macOS is (§32.4): `AMO_JWT_ISSUER`
+and `AMO_JWT_SECRET` present, it signs; absent, it says so and exits 0,
+because a repository with no Mozilla account must still build a release —
+and the release notes carry that absence the same way they carry an
+unsigned `.dmg`.
+
+**A version is signed once.** AMO refuses a version string it has already
+seen, and is right to — the signature is over those bytes. The extension
+keeps its own manifest version (§32.3) and most releases do not change it,
+so the script looks for an already-signed build of that exact version and
+downloads it rather than submitting again. That is not a fallback, it is
+the ordinary path, and it is what lets the nightly channel run at all:
+night two would otherwise fail on a version night one had signed. The matcher engine and JSONs are read by
 server-side tests directly from `extension/` — the one sanctioned
 cross-boundary *read*, tests only, so matchers keep a single source of
 truth.
@@ -3657,6 +3696,12 @@ credentials — no workflow input decides it:
   stopped working is worse than none — it reads as confirmation that the
   download really is broken. `xattr -dr com.apple.quarantine` is offered
   beside it for people who would rather use a terminal.
+- **Firefox**: with `AMO_JWT_ISSUER` and `AMO_JWT_SECRET` configured, the
+  extension is signed by Mozilla on the **unlisted** channel and the release
+  carries a `.xpi` (§29.6). Without them it carries only the zip, and the
+  notes say what that does and does not get you — a Firefox gate is stricter
+  than macOS's, since there is no *Open Anyway* for an unsigned add-on: it
+  simply cannot be installed except temporarily.
 - **Linux and Windows** have no gate: a `.deb` has no Gatekeeper equivalent,
   and an unsigned Windows installer costs a SmartScreen click-through.
 

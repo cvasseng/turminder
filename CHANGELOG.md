@@ -46,7 +46,11 @@
    is not. The notes beside the download say so, and give the two ways
    through: **System Settings → Privacy & Security → Open Anyway**, or
    `xattr -dr com.apple.quarantine`. Control-clicking the app and choosing
-   *Open* is not one of them; Apple removed that in macOS Sequoia.
+   *Open* is not one of them; Apple removed that in macOS Sequoia. The Firefox
+   extension ships as a Mozilla-signed `.xpi` you can install and keep, rather
+   than a zip Firefox will only hold onto until you restart it — signed for
+   self-distribution, so it is not listed on addons.mozilla.org and updates
+   come from here.
 
  * Fixed: the built service (`npm run build` + `npm start`, and the systemd
    unit over it) served no interface — the chat page, setup page, styles and

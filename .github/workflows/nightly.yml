@@ -91,7 +91,8 @@ jobs:
           mkdir -p release
           find incoming -type f \
             \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
-               -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.zip' \) \
+               -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.zip' \
+               -o -name '*.xpi' \) \
             -exec cp {} release/ \;
           ( cd release && sha256sum -- * > ../SHA256SUMS )
           mv SHA256SUMS release/
