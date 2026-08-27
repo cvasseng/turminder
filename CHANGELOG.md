@@ -1,5 +1,12 @@
  # Next
 
+ * Fixed: the browser extension could never pair on Firefox. **Connect this
+   browser** said it could not reach the gateway and asked whether the service
+   was running, about a service that was running and answering — it had asked
+   Firefox for access to a URL with the port left on, which Firefox accepts and
+   then matches nothing with, so the pairing calls were blocked inside the
+   browser before they were ever sent. Chromium was unaffected.
+
  * Setup lets you choose which of an endpoint's models to use, instead of
    silently taking whichever one it listed first. Picking one re-probes it,
    so the capabilities shown are the ones that get written down.
@@ -21,16 +28,25 @@
    key — the model list is served from Anthropic's own API, which wants the
    key in a different header than the chat endpoint does.
 
- * Fixed: exporting a PDF could hang until it timed out and produce nothing.
-   Chromium was retrying a Google push-service registration in the
-   background, which held the render open; it now does no background
-   networking at all, so an export reaches your own service and nowhere else.
+ * PDF export does no background networking, so it reaches your own service
+   and nowhere else. If a print does overrun its minute it now says it timed
+   out, instead of reporting that chromium finished and wrote nothing —
+   chromium exits cleanly when asked to stop, which made a hung export look
+   like a completed one. Some chromium builds hang on any headless command,
+   whatever they are asked to print; where that happens the export times out
+   and tells you so, and a chromium from your distribution is the fix.
 
  * Prebuilt downloads: every release carries the desktop app for Linux (x64
    and arm64), macOS (Apple silicon) and Windows, the packaged browser
    extensions, and a `SHA256SUMS` to check them against — plus a rolling
    `nightly` prerelease built from `main`. Linux x64 comes as both a `.deb`
-   and a portable AppImage that needs nothing installed.
+   and a portable AppImage that needs nothing installed. The macOS build is
+   ad-hoc signed rather than notarized, until there is a Developer ID to sign
+   it with — so macOS refuses it on first open and calls it damaged, which it
+   is not. The notes beside the download say so, and give the two ways
+   through: **System Settings → Privacy & Security → Open Anyway**, or
+   `xattr -dr com.apple.quarantine`. Control-clicking the app and choosing
+   *Open* is not one of them; Apple removed that in macOS Sequoia.
 
  * Fixed: the built service (`npm run build` + `npm start`, and the systemd
    unit over it) served no interface — the chat page, setup page, styles and

@@ -104,7 +104,17 @@ function withoutTokens(message: string): string {
 
 function runProcess(command: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    execFile(command, args, { timeout: PRINT_TIMEOUT_MS }, (error, _stdout, stderr) => {
+    // `killSignal`, because the default one loses the diagnosis. A print that
+    // overruns is killed by the `timeout` above, and chromium *handles*
+    // SIGTERM: it shuts down and exits 0, so Node — which decides there was an
+    // error from the exit code and signal, not from having called kill —
+    // reports success. The caller then finds no PDF on disk and says "chromium
+    // exited without writing a PDF", which is true and useless: it describes a
+    // browser that ran to completion and declined, when what happened is that
+    // it never finished. SIGKILL is not negotiable with, so the timeout arrives
+    // as one, and the branch below can tell the two apart.
+    const opts = { timeout: PRINT_TIMEOUT_MS, killSignal: 'SIGKILL' as const };
+    execFile(command, args, opts, (error, _stdout, stderr) => {
       if (!error) return resolve();
       // Node puts the whole command line in `error.message`, and that command
       // line carries the embed's scoped token. It stays out of the log and out

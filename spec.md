@@ -2228,14 +2228,34 @@ LibreOffice lost: they render *differently* than the preview).
   per App. A. The scoped token in
   the printed URL is the embed's own — chromium gets exactly the capability
   a browser tab has, nothing more.
-- **A print reaches one URL.** `--disable-background-networking` is not
-  hygiene, it is load-bearing: a fresh profile otherwise registers with
-  Google Cloud Messaging on startup, and virtual time **pauses while network
-  fetches are pending**, so a request that retries instead of resolving stops
-  the budget above from ever expiring and the print dies on its timeout with
-  nothing written. It also means the one network destination a PDF export
-  touches is the service's own URL, which is what a local-first tool should
-  have been doing regardless.
+- **A print reaches one URL.** `--disable-background-networking` is hygiene,
+  and only hygiene: it means the one network destination a PDF export touches
+  is the service's own URL, which is what a local-first tool should be doing
+  regardless. It was once recorded here as *load-bearing* against a Google
+  Cloud Messaging registration that stalled virtual time, and that was wrong
+  in both halves. The switch has never covered GCM — it covers the
+  intranet-redirect detector, the URL tracker, and the SafeBrowsing and
+  extension updaters — and the browser log shows GCM registering with it set.
+  GCM cannot be switched off from the command line at all.
+- **Some chromium builds cannot print here, and no flag changes that.** A
+  headless command can hang forever on a binary that is otherwise fine: the
+  page *navigates*, and the browser then neither writes its output nor exits.
+  `--dump-dom` of a three-line local file returns nothing after 300s on
+  twenty cores. It is a property of the build — a distro-built chromium does
+  the same job in a third of a second in the same container where Google's
+  own prebuilt 148 and 151 both deadlock — and print flags, `--headless=old`,
+  `--no-sandbox`, `--disable-gpu`, `--single-process`, a session bus, an X
+  display and dummy Google API keys all leave it hung, while
+  `--disable-features=OptimizationHints` segfaults it. Nothing in `print.ts`
+  can detect this in advance, so what the product owes the user is an honest
+  timeout (below) rather than a workaround; §32.1 records what CI does about
+  it, which is to skip those tests by name on runners that ship such a build.
+- **A print that overruns says so.** The timeout kills chromium with
+  `SIGKILL`, not the default `SIGTERM`: chromium *handles* SIGTERM, shutting
+  down and exiting 0, so Node reports no error and the caller reads a missing
+  file as "chromium exited without writing a PDF" — a description of a
+  browser that ran to completion and declined, when what happened is that it
+  never finished.
 - **No print stamps.** Chromium's default header and footer put the date,
   the source URL and a page counter on every page. None of that is part of
   the artifact the user previewed — "print what you previewed" means
@@ -2926,14 +2946,27 @@ Signing is a per-platform story, and only one platform has a gate:
   fails, it does not ship ad-hoc"), and it was written before anything
   could build for macOS at all. It is **amended here rather than quietly
   worked around**, which is the standing rule about hard boundaries: an
-  unsigned macOS artifact may ship, and **must announce itself as one**.
-  The release notes carry the warning and the Gatekeeper workaround,
-  generated from the *absence of the signing credentials* rather than
-  remembered by a human (§32.4). What stays absolute is the silence: an
-  artifact that is unsigned and does not say so is the thing this
-  boundary existed to prevent. Where a Developer ID **is** configured,
-  signing and notarization are not optional and a failure to sign fails
-  the build.
+  un-notarized macOS artifact may ship, and **must announce itself as
+  one**. The release notes carry the warning and the Gatekeeper
+  workaround, generated from the *absence of the signing credentials*
+  rather than remembered by a human (§32.4). What stays absolute is the
+  silence: an artifact that cannot be verified and does not say so is the
+  thing this boundary existed to prevent. Where a Developer ID **is**
+  configured, signing and notarization are not optional and a failure to
+  sign fails the build.
+- **Ad-hoc rather than nothing, when there is nothing.** Where no
+  Developer ID is configured the bundler still signs, with codesign's
+  ad-hoc identity (`-`). This buys no Gatekeeper trust and is not
+  pretending to: it is the difference between a bundle macOS can evaluate
+  and one it cannot. Left unsigned, `Contents/` carries no
+  `_CodeSignature` at all — only the ad-hoc signature the linker puts on
+  every arm64 executable — and Gatekeeper reports that state as *"is
+  damaged and can't be opened. You should move it to the Trash"*. That
+  sentence is false about a build that is fine, and it costs the person
+  who downloaded it a hunt for a corrupt file instead of the *Open
+  Anyway* button. The labelling in §32.4 exists because the sentence
+  cannot be fixed from here; the ad-hoc signature exists so the label is
+  describing the right problem.
 - **Updates**: the Tauri updater with signed manifests, endpoint
   configured in `app/tauri.conf.json`; the sidecar rides every update.
   Update checks are shell behavior; the service knows nothing of them.
@@ -3168,7 +3201,12 @@ token, or the two values by hand.
 
 All three paths end the same way, and the order is the point: request the
 optional host permission for that URL (a browser grants one only inside a
-click), verify with `GET /api/whoami` (App. E), and only then store. A
+click), verify with `GET /api/whoami` (App. E), and only then store. The
+pattern asked for is **`<scheme>://<host>/*` with the port dropped** — a port
+is outside the match-pattern grammar the two browsers share, and Firefox
+reports a pattern carrying one as granted and then matches nothing with it,
+which leaves pairing (`/api/pair/*`, the two routes with no CORS answer to
+fall back on) failing exactly as if the service were down. A
 paired token goes from the response straight to storage without passing
 through the page's own field — it arrived without anyone reading it, and it
 should not end up somewhere a screenshot catches. Config lives in
@@ -3524,6 +3562,20 @@ Two rules keep the pipeline inspectable rather than merely working:
   and smoke-testing it (§28.4). Its point is the compile, not the
   assertions.
 
+**The one thing the gate does not cover, and says so.** The three §23.4
+print tests are skipped on the runner, by `TURMINDER_NO_CHROMIUM_TESTS`,
+because the chromium GitHub ships is a build that never finishes a headless
+command there — the page navigates and the browser then neither writes its
+output nor exits (§23.4). The skip is spelled as its own switch rather than
+by hiding the binary, because chromium is *present* on that runner and
+answers `--version`; calling it absent would be a lie that costs the next
+reader a day. Two things follow, and both are the point of writing it down:
+the print path has **no coverage on a Linux runner**, and the fix when one
+is wanted is a differently *built* chromium (a distribution's, pointed at
+by `systools.chromium` in G.1) — not a flag, and not a pinned version,
+since the version that works and the version that hangs are the same
+number.
+
 ### 32.2 Release notes are CHANGELOG.md, transcribed
 
 Pushing `vX.Y.Z` is the human act; everything after it is transcription.
@@ -3594,10 +3646,17 @@ credentials — no workflow input decides it:
 
 - **macOS**: with the `APPLE_*` secrets configured, Tauri signs and
   notarizes, and a failure to sign fails the build. Without them the `.dmg`
-  ships **unsigned and labelled**, the notice generated from the absence of
-  the credentials rather than remembered by a human. This is the amendment
-  §28.4 records, and the labelling is the half of it that is not
-  negotiable.
+  ships **ad-hoc signed and labelled** (§28.4), the notice generated from
+  the absence of the credentials rather than remembered by a human. This is
+  the amendment §28.4 records, and the labelling is the half of it that is
+  not negotiable.
+- **The labelled workaround must be one that works.** The notice names
+  *System Settings → Privacy & Security → Open Anyway*, and says so about
+  an app macOS will call damaged. It must not name Control-click → *Open*:
+  Apple removed that override in macOS Sequoia, and a workaround that has
+  stopped working is worse than none — it reads as confirmation that the
+  download really is broken. `xattr -dr com.apple.quarantine` is offered
+  beside it for people who would rather use a terminal.
 - **Linux and Windows** have no gate: a `.deb` has no Gatekeeper equivalent,
   and an unsigned Windows installer costs a SmartScreen click-through.
 
@@ -4184,11 +4243,17 @@ deleted embed → 404.
 extension calls — also answer `OPTIONS` as a CORS preflight (204;
 `Access-Control-Allow-Methods: GET, POST, OPTIONS`,
 `Access-Control-Allow-Headers: authorization, content-type`) and carry
-`Access-Control-Allow-Origin: *` on their responses. Firefox — unlike
-Chromium — subjects extension fetches to CORS even with the host permission
-granted, and a preflight nobody answers kills the request before it is sent
-(observed 2026-08-24 against a live Firefox 151). `*` is the only workable
-origin: extension origins are per-install UUIDs. It concedes nothing —
+`Access-Control-Allow-Origin: *` on their responses. Firefox subjects an
+extension fetch to CORS whenever no *granted* host pattern matches the target,
+and a preflight nobody answers kills the request before it is sent; these two
+answers are what keeps proving a token and sending a capture working when the
+grant is missing or has been handed back. A grant that does match exempts the
+fetch entirely — the same moz-extension origin reaches `/api/pair/*`, which
+answers no preflight at all, on a granted `http://<host>/*` (observed
+2026-08-25 against a live Firefox 151, correcting an earlier reading of the
+same symptom against a grant carrying a port, which §29.5 explains matches
+nothing). `*` is the only workable origin: extension origins are per-install
+UUIDs. It concedes nothing —
 CORS never gated the sending of a request, only the reading of answers, and
 bearer auth still decides both; no other `/api/*` route participates.
 
