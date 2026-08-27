@@ -179,10 +179,14 @@ async function createVersion(uuid) {
     headers,
   });
   // First submission ever: the add-on does not exist yet, so it is created
-  // with this version rather than having one added to it.
+  // with this version rather than having one added to it. `/addons/addon/`,
+  // not `/addons/` — the collection every add-on endpoint hangs off carries
+  // the `addon` segment, and the bare path is a 404 that says only
+  // `{"detail": "Not found."}`, which reads exactly like the add-on being
+  // missing rather than the route being wrong.
   if (res.status === 404) {
     say(`${guid} is new to AMO — creating it`);
-    res = await amo('/addons/', {
+    res = await amo('/addons/addon/', {
       method: 'POST',
       body: JSON.stringify({ version: { upload: uuid } }),
       headers,
