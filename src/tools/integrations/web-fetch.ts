@@ -78,10 +78,18 @@ export function htmlToText(html: string): { title: string | null; text: string }
   return { title: titleMatch ? decodeEntities(titleMatch[1]!).trim() : null, text };
 }
 
+/**
+ * `&amp;` is decoded **last**, and that order is the whole correctness of this
+ * function. Decoded first, a page writing `&amp;lt;` gets `&lt;` from the first
+ * pass and then `<` from the second — one escape too many, and the page has
+ * put a character into the text that it never actually wrote. Nothing is
+ * rendered from here (this text is fenced as data for the model, §14.2), so it
+ * is a fidelity bug rather than an injection one, but "what the page said" is
+ * the only thing this function is for.
+ */
 function decodeEntities(text: string): string {
   return text
     .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
     .replace(/&quot;/gi, '"')
@@ -89,7 +97,8 @@ function decodeEntities(text: string): string {
     .replace(/&#(\d+);/g, (_m, code: string) => String.fromCodePoint(Number(code)))
     .replace(/&#x([0-9a-f]+);/gi, (_m, code: string) =>
       String.fromCodePoint(parseInt(code, 16)),
-    );
+    )
+    .replace(/&amp;/gi, '&');
 }
 
 /** App. A: how long a fetched page stays good enough for the next reader. */

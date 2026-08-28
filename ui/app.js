@@ -166,6 +166,32 @@ function token() {
   return t && t.trim();
 }
 
+/**
+ * An embed URL, or null if it is not one this page will point at.
+ *
+ * Every `url` the UI renders comes from the service — `embed.resolve.result`
+ * builds it from the origin it is serving on plus a scoped token (App. D) —
+ * so today nothing hostile arrives here. That is a fact about the current
+ * server, though, not a property of this function's input, and the two places
+ * it lands are `href` and an iframe `src`, which are exactly where a
+ * `javascript:` URL stops being data and starts being code running in this
+ * origin with this page's token in localStorage. Same-origin http(s) is the
+ * whole of what an embed can legitimately be; anything else is refused here
+ * rather than trusted to have come from a friend.
+ */
+function embedUrl(raw) {
+  if (typeof raw !== 'string' || !raw) return null;
+  let parsed;
+  try {
+    parsed = new URL(raw, location.href);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  if (parsed.origin !== location.origin) return null;
+  return parsed.href;
+}
+
 /* ── asking the user something ────────────────────────────────────────────── */
 
 let askResolve = null;
@@ -1621,7 +1647,10 @@ function fillEmbedSlot(slot, info) {
 
   const open = document.createElement('a');
   open.className = 'embed-open';
-  open.href = info.url;
+  // Refused rather than rendered: a link with no href is a dead affordance,
+  // which is the honest thing to show for an embed we would not open.
+  const href = embedUrl(info.url);
+  if (href) open.href = href;
   open.target = '_blank';
   open.rel = 'noopener noreferrer';
   open.textContent = 'open';
@@ -1633,7 +1662,8 @@ function fillEmbedSlot(slot, info) {
   frame.setAttribute('referrerpolicy', 'no-referrer');
   frame.setAttribute('loading', 'lazy');
   frame.title = info.title || 'embedded view';
-  frame.src = info.url;
+  const src = embedUrl(info.url);
+  if (src) frame.src = src;
 
   slot.append(bar, frame);
 }
@@ -1708,7 +1738,8 @@ function embedRow(info, jumpable) {
   kind.textContent = info.kind === 'persistent' ? 'kept' : '';
   const link = document.createElement('a');
   link.className = 'embed-open';
-  link.href = info.url;
+  const openHref = embedUrl(info.url);
+  if (openHref) link.href = openHref;
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
   link.textContent = 'open';
@@ -2679,12 +2710,20 @@ function showReveal(p) {
   $('reveal-title').textContent = p.label ? `${p.label} (${p.device})` : p.device;
   $('reveal-qr').innerHTML = '';
   if (typeof p.qr_svg === 'string') {
-    const holder = document.createElement('div');
     // Server-rendered SVG from our own qrcode encoder, not page-supplied
-    // markup — and it is dropped into a container of its own so nothing else
-    // in the dialog depends on its shape.
-    holder.innerHTML = p.qr_svg;
-    $('reveal-qr').append(holder);
+    // markup. Parsed inert and re-adopted rather than assigned to innerHTML:
+    // a QR code is paths and rectangles, so the parse costs nothing, and it
+    // means the one place this UI takes markup from a frame cannot become the
+    // place a frame runs script in this origin. Anything that is not an <svg>
+    // root is simply not drawn — a missing QR sends the user to the token
+    // underneath it, which is the same fallback a scan failure gives them.
+    const doc = new DOMParser().parseFromString(p.qr_svg, 'image/svg+xml');
+    const svg = doc.querySelector('parsererror') ? null : doc.documentElement;
+    if (svg && svg.nodeName.toLowerCase() === 'svg') {
+      const holder = document.createElement('div');
+      holder.append(document.importNode(svg, true));
+      $('reveal-qr').append(holder);
+    }
   }
   $('reveal-token').textContent = p.token || '';
   $('reveal-copy').textContent = 'Copy';
