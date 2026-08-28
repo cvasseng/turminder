@@ -75,13 +75,24 @@ function normalise(code: string): string {
 
 /** `XYZ-ABC` — grouped because a code gets read out in two halves. */
 function newCode(): string {
-  const bytes = randomBytes(CODE_CHARS);
+  // Rejection sampling, not modulo. 256 does not divide by 30, so `% 30` would
+  // make the first sixteen letters of the alphabet ~4% likelier than the rest.
+  // That bias is survivable here — the code lives ten minutes behind a pending
+  // cap of eight, and the ticket is the thing that actually has to be
+  // unguessable — but the argument costs more to keep making than the fix does
+  // to write, and "unbiased" is the property a reader expects of a pairing code
+  // without being told.
+  const limit = 256 - (256 % CODE_ALPHABET.length);
   let out = '';
-  for (let i = 0; i < CODE_CHARS; i++) {
-    // Modulo bias over a 30-letter alphabet is ~4% on the first two letters —
-    // irrelevant against a code that lives ten minutes behind a pending cap of
-    // eight, and the ticket is what actually has to be unguessable.
-    out += CODE_ALPHABET[(bytes[i] ?? 0) % CODE_ALPHABET.length];
+  while (out.length < CODE_CHARS) {
+    // A byte at or above the limit falls in the short final run of the
+    // alphabet and is redrawn rather than folded. Drawn a handful at a time,
+    // because the expected number of rejections is well under one per code.
+    for (const byte of randomBytes(CODE_CHARS)) {
+      if (byte >= limit) continue;
+      out += CODE_ALPHABET[byte % CODE_ALPHABET.length];
+      if (out.length === CODE_CHARS) break;
+    }
   }
   return `${out.slice(0, 3)}-${out.slice(3)}`;
 }

@@ -33,7 +33,15 @@ if (!version) die('usage: stamp-version.mjs <semver>');
 // Tauri parses this as semver and the bundlers derive their own formats from
 // it; anything it cannot parse fails deep inside a bundler with a worse
 // message than this one.
-if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/.test(version)) {
+//
+// Prerelease and build spelled out separately, at most one of each, which is
+// what semver actually says. The shorter `(?:[-+][0-9A-Za-z.-]+)*` accepted
+// the same strings but let `-` start a group *and* sit inside one, so a
+// version like `9.9.9+` followed by a run of `--` could be split between the
+// groups in exponentially many ways and the match would hang looking for one
+// that worked. A tag is not hostile input, but neither is it worth a regex
+// that can be made to spin.
+if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
   die(`"${version}" is not a semver version`);
 }
 

@@ -20,6 +20,7 @@ const browserGlobals = {
   performance: 'readonly',
   requestAnimationFrame: 'readonly',
   NodeFilter: 'readonly',
+  DOMParser: 'readonly',
   console: 'readonly',
   marked: 'readonly',
 };

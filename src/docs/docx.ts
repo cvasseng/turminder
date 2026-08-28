@@ -157,8 +157,13 @@ function cellText(cell: DocxRun[]): string {
  * is supposed to be final.
  */
 function tableText(item: DocxTable, index: number): string {
+  // Backslashes first, then pipes — the other order is a lie about the cell.
+  // Escaping only `|` turns a cell ending in a backslash into `…\` followed by
+  // the separator, which reads back as an escaped pipe and silently welds two
+  // columns into one; escaping the backslash first means every `\|` in the
+  // output came from a real pipe.
   const rows = (item.rows ?? []).map((row) =>
-    row.map((cell) => cellText(cell).replace(/\|/g, '\\|')).join(' | '),
+    row.map((cell) => cellText(cell).replace(/\\/g, '\\\\').replace(/\|/g, '\\|')).join(' | '),
   );
   return [`--- table (item ${index}) ---`, ...rows].join('\n');
 }

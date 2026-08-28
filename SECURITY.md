@@ -8,8 +8,10 @@ holds private data, and can act externally.
 
 ## Reporting something
 
-Email **hello@vasseng.com**. Please don't open a public issue for anything
-that looks exploitable — mail first, issue once there's a fix.
+Use GitHub's private reporting: **[Security → Report a vulnerability](https://github.com/cvasseng/turminder/security/advisories/new)**.
+It's enabled on this repo, the thread stays private until there's a fix, and
+it keeps the report attached to the code instead of buried in a mailbox.
+Please don't open a public issue for anything that looks exploitable.
 
 Say what you did, what happened, and which commit (`git rev-parse HEAD`, or
 the nightly's date). A proof of concept is worth more than a description of

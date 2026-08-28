@@ -421,8 +421,14 @@ export class HttpServer {
         }
       }
     } catch (e) {
+      // The reason goes to the log, not down the wire. Anything reaching here
+      // is a bug rather than a refusal — the routes above answer their own
+      // expected failures — and a bug's message is written for whoever reads
+      // the log: it carries store paths, SQL, and whatever a library felt like
+      // saying. The caller gets the fact and the route it happened on, which
+      // is all a client can act on anyway.
       l.warn({ route, err: errMessage(e) }, 'request failed');
-      return this.json(res, 500, { error: errMessage(e) });
+      return this.json(res, 500, { error: 'internal_error', route });
     }
   }
 }
