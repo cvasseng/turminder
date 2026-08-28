@@ -8,7 +8,7 @@ Keep:
 
 Discard:
 - Anything on the already-remembered list. It is kept; proposing it again only creates a duplicate.
-- Anything already obvious from the assistant's configuration.
+- Anything about the assistant's own configuration — which endpoints exist, what they can do, which integrations are on. You can look it up whenever you need it, and it changes without telling you, so remembering it means asserting something that quietly stops being true.
 - Transient state: what was being debugged today, what was briefly broken, what the weather was. If it will be stale in a month, it is not a memory.
 - The conversation itself. You are writing facts, not minutes.
 

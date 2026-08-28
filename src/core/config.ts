@@ -106,6 +106,17 @@ export function interpolateSecrets<T>(value: T, secrets: SecretMap, file: string
   return walk(value) as T;
 }
 
+/**
+ * Replace every `${secret:KEY}` reference with words a person can read. For
+ * text a human is about to be shown — the approval dialog (§7.3, App. D.3) is
+ * the one that matters — where neither the value nor the key name is theirs to
+ * see. It lives beside the resolver so that what a reference *looks like* is
+ * one regex in this system rather than two (§27).
+ */
+export function maskSecretRefs(text: string, mask = '(a stored secret)'): string {
+  return text.replace(SECRET_RE, mask);
+}
+
 export interface LoadOptions {
   secrets?: SecretMap;
 }

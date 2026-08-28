@@ -20,7 +20,69 @@ const row = (over: Partial<ScheduleRow> = {}): ScheduleRow => ({
   created_by_run: null,
   status: 'active',
   last_fired_at: null,
+  on_miss: 'fire_late',
   ...over,
+});
+
+describe('recurrence keeps the wall clock (§6.1)', () => {
+  /**
+   * Measured before it was fixed: `rrulestr` works in absolute time, so a
+   * daily 08:00 created before a spring transition produced 09:00 for every
+   * occurrence after it — permanently, because each fire re-seeds `dtstart`
+   * from the drifted value. The correction has to be exercised in a zone that
+   * actually observes DST, so this test owns the process clock for its
+   * duration and puts it back.
+   */
+  const inZone = (tz: string, body: () => void): void => {
+    const was = process.env.TZ;
+    process.env.TZ = tz;
+    try {
+      body();
+    } finally {
+      if (was === undefined) delete process.env.TZ;
+      else process.env.TZ = was;
+    }
+  };
+
+  const localHour = (iso: string, tz: string): string =>
+    new Date(iso).toLocaleTimeString('en-GB', { timeZone: tz, hour12: false });
+
+  it('holds 08:00 local across a spring transition', () => {
+    inZone('Europe/Oslo', () => {
+      // 2026-03-29 is when Oslo goes UTC+1 → UTC+2.
+      const before = row({ fire_at: '2026-03-28T07:00:00.000Z', rrule: 'FREQ=DAILY' });
+      expect(localHour(before.fire_at, 'Europe/Oslo')).toBe('08:00:00');
+      const next = nextOccurrence(before, new Date('2026-03-28T07:00:00.000Z'))!;
+      expect(next).toBe('2026-03-29T06:00:00.000Z');
+      expect(localHour(next, 'Europe/Oslo')).toBe('08:00:00');
+    });
+  });
+
+  it('holds it across an autumn transition too, and then stops correcting', () => {
+    inZone('Europe/Oslo', () => {
+      // 2026-10-25: UTC+2 → UTC+1.
+      const before = row({ fire_at: '2026-10-24T06:00:00.000Z', rrule: 'FREQ=DAILY' });
+      const next = nextOccurrence(before, new Date('2026-10-24T06:00:00.000Z'))!;
+      expect(localHour(next, 'Europe/Oslo')).toBe('08:00:00');
+      // Self-cancelling: once `fire_at` has moved, the offsets agree again.
+      const after = nextOccurrence(
+        row({ fire_at: next, rrule: 'FREQ=DAILY' }),
+        new Date(next),
+      )!;
+      expect(after).toBe('2026-10-26T07:00:00.000Z');
+      expect(localHour(after, 'Europe/Oslo')).toBe('08:00:00');
+    });
+  });
+
+  it('leaves a zone with no daylight saving alone', () => {
+    inZone('UTC', () => {
+      const next = nextOccurrence(
+        row({ fire_at: '2026-03-28T07:00:00.000Z', rrule: 'FREQ=DAILY' }),
+        new Date('2026-03-28T07:00:00.000Z'),
+      );
+      expect(next).toBe('2026-03-29T07:00:00.000Z');
+    });
+  });
 });
 
 describe('recurrence (§6)', () => {
@@ -63,11 +125,15 @@ describe('scheduler loop (§6)', () => {
     expect(event?.source).toBe('scheduler');
     expect(event?.serialization_key).toBe(created.id);
     expect(event?.idempotency_key).toBe(`${created.id}:${created.fire_at}`);
+    // Exhaustive, so a field cannot creep onto a payload handlers read.
     expect(event?.payload).toEqual({
       schedule_id: created.id,
       note: 'take the bins out',
+      fire_at: created.fire_at,
+      late_by_s: expect.any(Number),
       data: { thing: 'bins' },
     });
+    expect((event?.payload as any).late_by_s).toBeLessThan(5);
     // A one-shot is done once fired.
     expect(h.service.repos.schedules.get(created.id)?.status).toBe('done');
   });
@@ -96,42 +162,54 @@ describe('scheduler loop (§6)', () => {
     ).toHaveLength(1);
   });
 
-  it('fires a schedule missed inside its grace window (restart case)', async () => {
+  it('fires a schedule that is late but inside its grace window', async () => {
     h = await bootService({ onboarded: true, runScheduler: false });
-    // Fired 10 minutes ago, grace an hour: still owed.
+    // Due 10 minutes ago, grace an hour: still owed, and not a miss.
     const created = h.service.repos.schedules.create({
       fireAt: isoPlusSeconds(-600),
       note: 'still owed',
       graceS: 3600,
     });
-    expect(h.service.scheduler.recoverMissed()).toBe(0);
     expect(h.service.scheduler.tick()).toBe(1);
+    const fired = h.service.repos.events
+      .recent({ limit: 5 })
+      .find((e) => e.type === 'timer.fired');
+    expect(fired).toBeTruthy();
+    // Ten minutes late is still late, and the payload says how late (App. B).
+    expect((fired?.payload as any).late_by_s).toBeGreaterThanOrEqual(595);
     expect(
-      h.service.repos.events.recent({ limit: 5 }).some((e) => e.type === 'timer.fired'),
-    ).toBe(true);
+      h.service.repos.events
+        .recent({ limit: 10 })
+        .some((e) => e.type === 'system.schedule_missed'),
+    ).toBe(false);
     expect(h.service.repos.schedules.get(created.id)?.status).toBe('done');
   });
 
-  it('marks a schedule missed past its grace window and says so', async () => {
+  it('still fires a one-shot past its grace window, and says how late it is', async () => {
+    // §6.1: a missed reminder is still worth having, late — which is why
+    // `fire_late` is the default for one-shots.
     h = await bootService({ onboarded: true, runScheduler: false });
     const created = h.service.repos.schedules.create({
       fireAt: isoPlusSeconds(-7200),
-      note: 'meeting in 10 minutes',
+      note: 'take the bins out',
       graceS: 3600,
     });
-    expect(h.service.scheduler.recoverMissed()).toBe(1);
+    expect(h.service.scheduler.tick()).toBe(1);
     expect(h.service.repos.schedules.get(created.id)?.status).toBe('missed');
 
     const report = h.service.repos.events
       .recent({ limit: 10 })
       .find((e) => e.type === 'system.schedule_missed');
-    expect(report).toBeTruthy();
     expect((report?.payload as any).schedule_id).toBe(created.id);
-    expect((report?.payload as any).note).toBe('meeting in 10 minutes');
-    // No timer.fired for a stale reminder.
-    expect(
-      h.service.repos.events.recent({ limit: 10 }).some((e) => e.type === 'timer.fired'),
-    ).toBe(false);
+    expect((report?.payload as any).note).toBe('take the bins out');
+    expect((report?.payload as any).on_miss).toBe('fire_late');
+
+    const fired = h.service.repos.events
+      .recent({ limit: 10 })
+      .find((e) => e.type === 'timer.fired');
+    expect(fired).toBeTruthy();
+    expect((fired?.payload as any).late_by_s).toBeGreaterThan(3600);
+    expect((fired?.payload as any).fire_at).toBe(created.fire_at);
   });
 
   it('skips a missed occurrence of a recurring schedule but keeps the series', async () => {
@@ -142,10 +220,87 @@ describe('scheduler loop (§6)', () => {
       rrule: 'FREQ=DAILY',
       graceS: 60,
     });
-    expect(h.service.scheduler.recoverMissed()).toBe(1);
+    // Recurring defaults to `skip`: yesterday's digest is noise (§6.1).
+    expect(created.on_miss).toBe('skip');
+    expect(h.service.scheduler.tick()).toBe(0);
     const after = h.service.repos.schedules.get(created.id)!;
     expect(after.status).toBe('active');
     expect(Date.parse(after.fire_at)).toBeGreaterThan(Date.now());
+    // The negative half: it said it was missed, and it did not run.
+    expect(
+      h.service.repos.events
+        .recent({ limit: 10 })
+        .some((e) => e.type === 'system.schedule_missed'),
+    ).toBe(true);
+    expect(
+      h.service.repos.events.recent({ limit: 10 }).some((e) => e.type === 'timer.fired'),
+    ).toBe(false);
+  });
+
+  it('takes the same branch on a suspend as on a restart', async () => {
+    // The bug §6.1 exists to close: grace used to be checked only from
+    // `start()`, so a laptop rebooted a day late marked the briefing missed
+    // while a laptop *suspended* a day and resumed fired it at teatime.
+    h = await bootService({ onboarded: true, runScheduler: false });
+    const created = h.service.repos.schedules.create({
+      fireAt: isoPlusSeconds(-60),
+      note: 'briefing',
+      rrule: 'FREQ=DAILY',
+      graceS: 3600,
+    });
+    // The clock jumps past the grace window while the service is running.
+    const resumed = new Date(Date.now() + 4 * 3600 * 1000);
+    expect(h.service.scheduler.tick(resumed)).toBe(0);
+    expect(
+      h.service.repos.events.recent({ limit: 10 }).some((e) => e.type === 'timer.fired'),
+    ).toBe(false);
+    expect(h.service.repos.schedules.get(created.id)?.status).toBe('active');
+  });
+
+  it('fires once for a recurring schedule missed many times, and counts them', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    const created = h.service.repos.schedules.create({
+      fireAt: isoPlusSeconds(-3 * 86_400),
+      note: 'daily digest',
+      rrule: 'FREQ=DAILY',
+      graceS: 3600,
+      onMiss: 'fire_late',
+    });
+    expect(h.service.scheduler.tick()).toBe(1);
+
+    // One fire and one report, for three days away — not three of either.
+    const events = h.service.repos.events.recent({ limit: 20 });
+    expect(events.filter((e) => e.type === 'timer.fired')).toHaveLength(1);
+    const reports = events.filter((e) => e.type === 'system.schedule_missed');
+    expect(reports).toHaveLength(1);
+    expect((reports[0]?.payload as any).skipped).toBe(4);
+    // And the series is standing on its next occurrence, in the future.
+    const after = h.service.repos.schedules.get(created.id)!;
+    expect(after.status).toBe('active');
+    expect(Date.parse(after.fire_at)).toBeGreaterThan(Date.now());
+  });
+
+  it('puts the grace boundary in one place, from both sides', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    const inside = h.service.repos.schedules.create({
+      fireAt: isoPlusSeconds(-100),
+      note: 'inside',
+      graceS: 100,
+    });
+    const outside = h.service.repos.schedules.create({
+      fireAt: isoPlusSeconds(-101),
+      note: 'outside',
+      graceS: 100,
+    });
+    h.service.scheduler.tick();
+    // Exactly at the boundary is inside it: `late > grace` is the test, so a
+    // schedule 100s late with 100s of grace is a normal, punctual-enough fire.
+    const missed = h.service.repos.events
+      .recent({ limit: 20 })
+      .filter((e) => e.type === 'system.schedule_missed')
+      .map((e) => (e.payload as any).schedule_id);
+    expect(missed).toContain(outside.id);
+    expect(missed).not.toContain(inside.id);
   });
 
   it('carries provenance from the run that created the schedule', async () => {

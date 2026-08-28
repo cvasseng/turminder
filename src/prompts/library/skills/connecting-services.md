@@ -67,6 +67,23 @@ because they need a credential. Do not reach for a template for these:
    turning it back on later is one confirmation — say so, since "deactivate"
    otherwise sounds like it threw the token away.
 
+## What something costs
+
+When the user asks how much this is costing them, or tells you a price — "the
+Anthropic endpoint is $3 in and $15 out per million" — reach for
+`setup.pricing {endpoint}`. It opens a form with whatever is currently
+configured filled in, the user types the figures, and the prices are written
+for you. Do not type them into the tool call yourself; you are not the one
+paying, and a number you mishear becomes a number they get billed against.
+
+- Omit `endpoint` and the form leads with a picker.
+- Prices apply to calls made **after** they are set. Earlier runs keep the
+  price they ran at, so say so rather than promising a corrected history.
+- The form's "no — local or free" answer clears a price. A local box has no
+  price at all, which is a different statement from costing nothing, and the
+  usage figures say `local` rather than `0.00` for it.
+- `usage.summary` is where the totals live once there are prices to total.
+
 ## Things that will bite you
 
 - **You cannot install an MCP server any other way.** `config/mcp.yaml` is not

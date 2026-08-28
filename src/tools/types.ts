@@ -45,7 +45,25 @@ export interface ToolDefinition<A = any> {
    * can be read back with another tool.
    */
   bulkArgs?: readonly string[];
+  /**
+   * Say what this call will do, for the person being asked to approve it
+   * (§7.3, App. D.3). The generic humaniser reads this tool's description and
+   * schema and is right for nearly everything — declare this only where that
+   * reads badly, never for symmetry.
+   *
+   * `action` completes the sentence "<who> wants to …"; naming the actor is
+   * not the tool's business, because a handler-gated call has to say *which
+   * handler* is asking. Display text only: never a secret, never a value the
+   * model wrote about itself.
+   */
+  confirmSummary?(args: A): ConfirmLines;
   execute(args: A, ctx: ToolContext): Promise<unknown>;
+}
+
+/** A tool's own words for a confirmation dialog (§7.3). */
+export interface ConfirmLines {
+  action: string;
+  lines: { label: string; value: string }[];
 }
 
 /**
@@ -66,6 +84,8 @@ export interface ToolHandle {
   isEmpty?(result: unknown): boolean;
   /** Content-bearing arg fields to stub after execution (§20.6). */
   bulkArgs?: readonly string[];
+  /** This tool's own words for an approval dialog (§7.3); bundled only. */
+  confirmSummary?(args: unknown): ConfirmLines;
   call(args: unknown, ctx: ToolContext): Promise<ToolCallOutcome>;
 }
 

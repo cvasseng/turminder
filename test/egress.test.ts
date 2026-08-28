@@ -250,6 +250,89 @@ describe('confirm round-trip (§7.3, §11.3)', () => {
     client.close();
   });
 
+  it('describes the call in words, and never leaks a secret reference', async () => {
+    // §7.3/§11.3: the server writes what the human reads. The model here does
+    // what a model legitimately does with a credential — passes the reference
+    // it was handed (§19.2) straight into a call — and the dialog, the stored
+    // delivery and the trace all have to survive that.
+    h = await bootService({ onboarded: true });
+    write(
+      path.join(h.dataDir, 'handlers', 'sender.md'),
+      handler('confirm: [deliver.notify]\n'),
+    );
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['notify.actions']);
+
+    let toolCallsDone = false;
+    h.fake.always((req) => {
+      if (req.body.response_format) {
+        return {
+          text: JSON.stringify({
+            summary: 'something to send',
+            verdicts: [{ handler: 'sender', matched: true, reason: 'needs sending' }],
+          }),
+        };
+      }
+      if (req.body.tools && !toolCallsDone) {
+        toolCallsDone = true;
+        return {
+          toolCalls: [
+            {
+              name: 'deliver.notify',
+              args: { title: 'Sent', body: 'token is ${secret:ASANA_TOKEN}' },
+            },
+          ],
+        };
+      }
+      return { text: 'Sent it after you approved.' };
+    });
+
+    const submitted = h.service.intake.submit({
+      type: 'webhook.send',
+      source: 'http',
+      payload: { what: 'a thing' },
+    });
+
+    const frame = await client.next('delivery', 15000);
+    const payload = frame.payload.payload as any;
+
+    // A sentence naming who is asking and what for — not the tool name with
+    // the dot left in, and not a serialized argument object.
+    expect(payload.title).toMatch(/^Handler sender wants to /);
+    expect(payload.title).not.toContain('deliver.notify');
+    expect(payload.details.map((d: any) => d.label)).toEqual(['Title', 'Body']);
+    expect(`${payload.title}\n${payload.args_summary}`).not.toMatch(/[{}[\]"]/);
+
+    // Gone from what the human reads, and from the row that outlives it.
+    for (const surface of [
+      JSON.stringify(payload),
+      JSON.stringify(h.service.repos.deliveries.recent(10)),
+    ]) {
+      expect(surface).not.toContain('ASANA_TOKEN');
+      expect(surface).not.toContain('$\u007bsecret:');
+    }
+    expect(payload.args_summary).toContain('(a stored secret)');
+
+    client.send('event', {
+      type: 'notification.action',
+      payload: {
+        delivery_id: frame.payload.delivery_id,
+        action: 'deny',
+        run_id: payload.run_id,
+      },
+    });
+    await drain(h);
+
+    // The trace is the other side of the same rule, and it keeps the
+    // reference: `${secret:KEY}` is not a secret (§27, G.6) — it is the name
+    // of one, which is what makes "which credential did this call use" an
+    // answerable question ninety days later. Masking here would delete
+    // forensics to hide something that already lives in `models.yaml`, in git.
+    const traced = JSON.stringify(h.service.repos.trace.forEvent(submitted.event.id));
+    expect(traced).toContain('ASANA_TOKEN');
+    client.close();
+  });
+
   it('denies the call when the user clicks deny, and the run carries on', async () => {
     h = await bootService({ onboarded: true });
     write(

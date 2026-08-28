@@ -231,6 +231,27 @@ export class TestClient {
     });
   }
 
+  /**
+   * The next frame of this type whose payload satisfies `match`. For streams
+   * where a frame of the right type may already be in flight for a different
+   * subject — event status pushes, where a background run's transitions land
+   * between the two you are watching for.
+   */
+  async until(
+    type: string,
+    match: (payload: Record<string, unknown>) => boolean,
+    timeoutMs = 8000,
+  ): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error(`timed out waiting for ${type} to match`);
+      const frame = await this.next(type, remaining);
+      const payload = frame.payload as Record<string, unknown>;
+      if (match(payload)) return payload;
+    }
+  }
+
   /** Resolves with the close code when the server hangs up (§24.1 revocation). */
   closed(timeoutMs = 8000): Promise<number> {
     if (this.closeCode !== null) return Promise.resolve(this.closeCode);

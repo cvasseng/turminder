@@ -783,6 +783,132 @@ describe('setup.rebuild_index (§8.3, F.9)', () => {
   });
 });
 
+describe('setup.pricing (§10.5, F.9)', () => {
+  const askToPrice = (args: Record<string, unknown> = {}) => {
+    let asked = false;
+    h.fake.always((req: any) => {
+      if (req.body.tools && !asked) {
+        asked = true;
+        return { toolCalls: [{ name: 'setup.pricing', args }] };
+      }
+      return { text: 'Done.' };
+    });
+  };
+
+  const models = () =>
+    YAML.parse(fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8'));
+
+  const traced = (eventId: string) =>
+    h.service.repos.trace.forEvent(eventId).find((t) => t.kind === 'tool_call')!.data as any;
+
+  it('prices an endpoint from figures the human typed', async () => {
+    h = await bootService({ onboarded: true });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    askToPrice({ endpoint: 'main' });
+
+    const sent = h.service.chat.send({ text: 'the main endpoint is $3 in and $15 out' });
+    const form = await client.next('form.request', 15000);
+    // One endpoint named, so no picker — and the consequence is stated where
+    // the decision is made (§10.5).
+    const names = form.payload.fields.map((f: any) => f.name);
+    expect(names).not.toContain('endpoint');
+    expect(names).toEqual(['priced', 'in_per_mtok', 'out_per_mtok', 'currency']);
+    expect(form.payload.title).toContain('from now on');
+
+    client.send('form.submit', {
+      form_id: form.payload.form_id,
+      values: {
+        priced: 'yes, it charges',
+        in_per_mtok: '3',
+        out_per_mtok: '15',
+        currency: 'usd',
+      },
+    });
+    await client.next('form.accepted');
+    await drain(h);
+
+    expect(models().endpoints[0].cost).toEqual({
+      in_per_mtok: 3,
+      out_per_mtok: 15,
+      currency: 'USD',
+    });
+    const call = traced(sent.eventId);
+    expect(call.ok).toBe(true);
+    expect(call.result_excerpt).toContain('"committed":true');
+    // The price reaches the router without a restart (camelCase inside the
+    // model layer; the YAML above is the wire form).
+    expect(h.service.modelStack?.router.byName('main')?.cost).toEqual({
+      inPerMtok: 3,
+      outPerMtok: 15,
+      currency: 'USD',
+    });
+  });
+
+  it('offers the way back to costless, and takes it', async () => {
+    h = await bootService({ onboarded: true });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    askToPrice({ endpoint: 'main' });
+
+    h.service.chat.send({ text: 'the main endpoint is free' });
+    const form = await client.next('form.request', 15000);
+    client.send('form.submit', {
+      form_id: form.payload.form_id,
+      values: { priced: 'no — local or free' },
+    });
+    await client.next('form.accepted');
+    await drain(h);
+
+    // Absent, not zeroed: §10.5 draws a line between free and unpriced, and
+    // this is the surface that has to keep it reachable.
+    expect(models().endpoints[0]).not.toHaveProperty('cost');
+  });
+
+  it('refuses an endpoint that does not exist, and writes nothing', async () => {
+    h = await bootService({ onboarded: true });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    askToPrice({ endpoint: 'nowhere' });
+
+    const before = fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8');
+    const sent = h.service.chat.send({ text: 'price the nowhere endpoint' });
+    await drain(h);
+
+    const call = traced(sent.eventId);
+    expect(call.result_excerpt).toContain('unknown_endpoint');
+    // …and it names the set, so the model can correct itself rather than guess.
+    expect(call.result_excerpt).toContain('main');
+    expect(fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8')).toBe(before);
+  });
+
+  it('refuses figures that are not prices, and writes nothing', async () => {
+    h = await bootService({ onboarded: true });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    askToPrice({ endpoint: 'main' });
+
+    const before = fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8');
+    const sent = h.service.chat.send({ text: 'price it' });
+    const form = await client.next('form.request', 15000);
+    client.send('form.submit', {
+      form_id: form.payload.form_id,
+      values: {
+        priced: 'yes, it charges',
+        in_per_mtok: '-3',
+        out_per_mtok: '15',
+        currency: 'dollars',
+      },
+    });
+    await client.next('form.accepted');
+    await drain(h);
+
+    const call = traced(sent.eventId);
+    expect(call.result_excerpt).toContain('bad_price');
+    expect(fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8')).toBe(before);
+  });
+});
+
 /**
  * Every file under the data dir that contains `needle`, data-dir-relative. The
  * walk deliberately includes `.git` and `events.db`: the point of the sentinel

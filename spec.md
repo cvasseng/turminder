@@ -133,6 +133,35 @@ received → matched → processing → done
 - Dead-lettering emits a `system.handler_failed` event (§13.2). There is no
   second failure-reporting mechanism.
 
+#### 4.2.1 The read surface over the lifecycle (normative)
+
+The lifecycle above is state the system already keeps; what §29 and every
+other ingress path lack is a way to *see* it. The activity panel is that
+read surface and **nothing else changes**: no new status, no new table, no
+second notion of "pending". One list frame and one push frame (App. D),
+over rows that were already being written.
+
+- **What it shows** is anything the system owes you an outcome for, and
+  anything that owes the system a click: events in `received`, `matched` or
+  `processing`; events in `failed` with a future `next_attempt_at`, which are
+  visibly retrying rather than lost; `dead_letter` events, which do **not**
+  age out, because a capture that died in silence is precisely the case where
+  silence is the bug; and `queued`/`delivered` deliveries carrying actions,
+  because a `confirm` raised while the reader was in another conversation is
+  otherwise something they have to remember.
+- **It is a live window, not a log browser.** Recent N, recent 24h; terminal
+  rows age out of it. A full event-log browser — search, filters, arbitrary
+  history — is a different and larger feature, and is deliberately not this
+  one. Do not grow this into it.
+- **Payloads never cross the wire.** An event payload is untrusted content
+  (§1.1, H.2). A row carries type, source, the ingress-written `summary`,
+  status, attempts, the next attempt, and — for a dead letter — the error.
+  Anything more is a second decision, taken deliberately, not a field added
+  because it was in the row.
+- **Push, not poll.** Every transition the lifecycle defines emits
+  `event.status` to `chat`-capable devices, and so does arrival: a panel that
+  first shows a row once it is already running cannot show you a queue.
+
 ### 4.3 Sources (v1)
 
 - **Chat** — `chat.message` (§9). Always applicable; skips the gate.
@@ -252,12 +281,54 @@ in three days." The scheduler is a first-class source:
   provenance pointing at the creator).
 - **Tools:** `schedule.create`, `schedule.list`, `schedule.cancel` are
   available to handlers and chat, subject to the usual allowlists.
-- Missed schedules (service was down) fire on startup if still within a
-  per-schedule grace window; otherwise they dead-letter with a
-  `system.schedule_missed` event.
 - A schedule's emitted event type is parameterized (`event_type`,
   `event_payload` — App. C); watchers (§30) ride this: their cadence is
   an ordinary schedule row emitting `watch.due`.
+
+### 6.1 Being late (normative)
+
+The deployment target is a laptop, not a server. A schedule will be found past
+its time — because the lid was shut, because the machine slept, because the
+service was restarted mid-morning — and what happens then is a property of the
+schedule, not of how the service came to notice.
+
+- **Grace is checked in one place: the moment a schedule fires.** Not on
+  startup only. A laptop rebooted a day late and a laptop *suspended* a day
+  and resumed are the same physical situation, and must take the same branch;
+  checking grace only in the startup path gave them opposite answers.
+- **`on_miss` is per schedule** (App. C), because "remind me Friday" and "post
+  the daily digest" want opposite things: a missed reminder is still worth
+  having, late; yesterday's digest is noise.
+  - `fire_late` — fire it anyway, however late. The default for **one-shots**.
+  - `skip` — do not fire; record that it was missed. The default for
+    **recurring** schedules.
+  - A third value (`ask`) is deliberately deferred: it needs a delivery
+    round-trip and a suspended schedule, which is a larger conversation.
+- **Lateness reaches the handler.** `timer.fired` carries `fire_at` and
+  `late_by_s` (App. B). The server knows the event is six hours stale, so the
+  server says so — a digest can open with "this is yesterday's" instead of
+  pretending it is morning, and no handler has to infer it from `time.now`.
+- **A recurring schedule that was missed N times fires once, not N times.**
+  Catch-up advances past every occurrence up to now and emits exactly **one**
+  `system.schedule_missed` naming how many were skipped. A week away is one
+  honest event, not silence and not seven runs.
+- Whatever is skipped or fired late, the miss is announced as
+  `system.schedule_missed` (§13.2). A one-shot that is skipped ends as
+  `missed`; a recurring one stays `active` at its next occurrence.
+- **A schedule keeps the wall clock of the machine it runs on.** "Every day at
+  08:00" means 08:00 after a daylight-saving transition as well as before it,
+  so recurrence is corrected for the change in UTC offset between one
+  occurrence and the next. Without that correction a daily 08:00 becomes a
+  permanent 09:00 the morning the clocks move — measured, not supposed. There
+  is no timezone column: a personal assistant runs on its user's own machine
+  and that machine's clock is the only one in the story. A schedule created in
+  one zone and served from another is out of scope, and would be what a
+  `tz` column is for.
+- **Waking the machine is explicitly not this system's business.** No rtcwake,
+  no systemd timers, no cloud relay: the service is cattle (§1.1) and the box's
+  power state belongs to the OS. "It must run at 08:00 whether or not the lid
+  is open" is a deployment question — a second always-on install with the data
+  dir synced — not code in this repo.
 
 ---
 
@@ -311,7 +382,10 @@ are supported; v1 policy is deliver-to-all, any ack settles.
   the click re-enters the loop, the waiting handler proceeds. One loop,
   one audit trail.
 - Rendering: shell out to the platform notifier (`notify-send` with
-  `--action` on Linux) in v1; polish later.
+  `--action` on Linux) in v1; polish later. A `confirm` reaches that surface as
+  one plain-text block, because it has no DOM to lay out — `args_summary` is
+  the same server-composed lines the chat UI renders from `details` (App. D.3),
+  not a second description written for the notifier.
 - **Auth:** static per-device bearer token on the WS upgrade; the server
   stores only hashes (§24). Cross-machine transport security is delegated to the
   network layer (Tailscale/WireGuard); the service binds to localhost or the
@@ -358,6 +432,16 @@ are supported; v1 policy is deliver-to-all, any ack settles.
   `name` (a short identifier, the exact-dedupe handle and the filename)
   and `project`, validated server-side per §31.5 — one conversation-level
   stamp cannot scope a transcript that mixes island and general talk.
+- **The assistant's own configuration is never a memory.** Which endpoints
+  exist, what capabilities they carry, which integrations are active: all of
+  it is queryable the moment it is needed (`models.list`,
+  `setup.list_integrations`), and all of it changes without telling the
+  memory store. A fact of this shape is true when written and silently false
+  later, and recall will keep asserting it — against the model's own eyes if
+  necessary. Measured: a `no-vision-capable-endpoint` memory distilled
+  2026-08-22 was still being injected on 2026-08-24, and the model believed
+  it over an image it had just been handed (JUDGMENT.md). Queryable state is
+  read, never remembered.
 - **Distillation resolves to the `best` class** (§10.6): it runs a few
   times a day at background priority, nobody waits on it, and
   what-is-worth-keeping is precisely the judgment the fast class kept
@@ -464,6 +548,30 @@ Two further requirements, because they are correctness rather than taste:
   focusable text inputs are at least 16px — below that, mobile Safari zooms
   the page and does not zoom back.
 
+**The visible viewport is what the layout owns**, and the on-screen keyboard is
+what makes that different from `dvh`. A keyboard changes what the reader can
+see *without* changing the layout viewport, so `dvh` alone still measures the
+un-shrunk page and the composer — last in a full-height column — ends up behind
+it. The engines report it differently and both paths are required:
+
+- **Chrome and the Android browsers** implement `interactive-widget` on the
+  viewport meta; `interactive-widget=resizes-content` is normative. Under the
+  default `resizes-visual`, `dvh` does not move for the keyboard and the
+  composer is behind it — which is the whole bug, in one missing attribute.
+- **Safari** implements neither that nor a `dvh` that shrinks for a keyboard.
+  There the UI measures `visualViewport` and publishes two custom properties —
+  the height the shell may occupy, and how much of the layout viewport is
+  occluded at the bottom — recomputed at most once per animation frame, and
+  ignored while the viewport is pinch-zoomed (that shrinks it too, and matching
+  it would fight the reader's own zoom).
+- The shell's height and the composer's ceiling key off the first property. The
+  `safe-area-inset-bottom` allowance is **reduced by** the second rather than
+  added to it: a keyboard covering the home indicator makes that allowance a
+  gap between the strip and the keyboard.
+- Both properties are **absent whenever nothing is occluding**, so a desktop
+  window and a phone with the keyboard down resolve to plain `dvh` exactly as
+  before. Absence is the normal state; pinning them permanently is wrong.
+
 Heights are `dvh`, never `vh`: on a mobile browser `vh` describes the
 viewport with the address bar retracted, which is not the viewport the reader
 is looking at, and the composer ends up below the fold. The
@@ -502,6 +610,17 @@ call, a tool-call round-trip, a tiny embedded test-image round-trip for
 `vision` — §26.3) when an endpoint is added, not self-declared; manual
 overrides in `models.yaml` are allowed but the probe result is the
 default.
+
+**A probe validates its own stimulus, not only the answer.** A capability
+probe makes an assertion about the endpoint, so whatever it sends must be
+known-good independently of the reply — otherwise a broken fixture and a
+missing capability are indistinguishable, and the tag written is a lie
+about the wrong party. The `vision` fixture is the worked example: a PNG
+with a bad IDAT CRC decoded leniently into a smear, the endpoint answered
+what it honestly saw, and a sighted model was tagged blind for two days
+(JUDGMENT.md, 2026-08-24). Fixture bytes are therefore walked by a guard
+test — signature, every chunk CRC, dimensions — which is the honest check
+that needs no decoder in CI.
 
 ### 10.3 Inference scheduler
 
@@ -548,6 +667,15 @@ unpriced are different statements.
 - **The model sees the totals**: the `usage` integration (F.17) —
   ro-tier, and therefore bindable (§23.2): a cost dashboard is an embed
   with a `usage.summary` binding, no new mechanism.
+- **Prices are set through a form**, `setup.pricing` (F.9), not by hand-editing
+  `models.yaml` and not from tool arguments: the human types the figures and
+  deterministic code writes G.2 (§19's round trip, for the reason §14.2 gives).
+  The form says the consequence where the decision is made — a price edit
+  prices the future only — and offers the way back to costless, so the
+  distinction this section draws between *free* and *unpriced* is reachable
+  from the surface that created it. The model selector (§10.6) shows each
+  endpoint's price beside its name, or `local`: a knob nobody can read is half
+  a feature.
 - Usage **caps and fallback hierarchies** (spend limit reached → route to
   a cheaper class) are §16-deferred: the ledger this section builds is
   their foundation, and caps designed before real spend data exist would
@@ -695,6 +823,19 @@ Tools are declared **read-only** or **side-effecting** in their registration
 metadata. Read-only tools may auto-execute. Side-effecting tools require
 either an explicit grant in the calling handler's frontmatter allowlist, or
 a human confirmation round-trip via a `confirm` delivery (§7.3).
+
+**What the human is asked is written by the server, never by the caller**
+(§14.2). The dialog's sentence is built from the instance's own name — or the
+gating handler's — and the tool's own catalog description; its argument lines
+are built from the tool's schema and the values it was called with. A
+`ToolDefinition` may declare `confirmSummary(args) → {action, lines}` (like
+`bulkArgs`, §20.6) for the tools where that generic rendering reads badly;
+`action` completes the sentence and the actor is deliberately not the tool's to
+name, because a handler-gated call has to say which handler is asking. Nothing
+on that dialog is prose the model wrote about its own request: a model that
+garbles a path garbles the sentence describing it identically, and the person
+being asked to authorise something is the least technical reader in the system.
+Payload shape in App. D.3.
 
 ### 11.4 Enforcement point
 
@@ -858,6 +999,13 @@ malware (§17.9).
    via the `confirm` delivery round-trip.
 5. Provenance depth limits prevent injected content from spawning event
    cascades.
+6. **Text a human reads while authorising is written by the server**, never
+   by the party being authorised. A model asking to run a gated tool does not
+   compose the sentence describing that call (§7.3, §11.3); an
+   unauthenticated device asking to be paired picks from a closed enum rather
+   than supplying a name of its own (§24.4). A decision is only as good as
+   the description it is made from, so the description belongs to the one
+   party with nothing to gain from it.
 
 ### 14.3 Daemon containment
 
@@ -978,13 +1126,6 @@ under their own grants.
   token in its own config file on its own machine (§24); giving the
   daemon a vault story of its own is deferred with the rest of daemon
   polish. (§7.3, §24)
-- **Streaming delta retraction** — the §20.8 guard runs after a response
-  completes, so a client watching live can see rejected text stream past
-  before the clean persisted turn replaces it on re-fetch. The fix is a
-  `chat.retract` frame telling the UI to drop the current run's streamed
-  buffer; build it only if live-streamed fabrications prove confusing in
-  practice — today the guard fires rarely and the transcript self-heals.
-  (§20.8, App. D)
 - **Desktop app: Windows and Linux builds** — the §28 shell is
   cross-platform by construction (Tauri); each platform ships when
   someone will actually run it, with its own signing story. (§28)
@@ -1035,6 +1176,19 @@ under their own grants.
 - **Embed tool access** — deliberately ruled out, not deferred: intent
   attribution ("did the user click or did the JS decide") is impossible
   server-side; capability stays in user-authored handlers. (§22.4)
+- **`turminder.local` over mDNS** — deliberately ruled out, not deferred
+  (Christer, 2026-08-28). Advertising is easy; *resolving* `.local` is the
+  client's problem and the clients disagree — macOS yes, Windows mostly, Linux
+  only where nss-mdns or Avahi is installed, **Android not at all**, which
+  deletes the phone case that is the only reason to want a pretty URL. It is
+  also a new dependency and a new listener on the LAN for an install whose
+  threat model (§14) assumes loopback or a tailnet, and it buys nothing
+  functional: an embed's scoped token still rides the query string, so the URL
+  is not tidy either way. If a readable address is genuinely wanted it is
+  **configuration, not code** — a remembered port plus a `hosts` entry, or a
+  tunnel with a real name. Written down here so the next person to think "mDNS
+  would be a nice touch" finds the argument rather than rediscovering it.
+  (§28.2, §24.3)
 
 ## 17. Decisions adopted with a flag
 
@@ -1981,6 +2135,25 @@ These are absolute; each one "simplified" away is a full compromise:
    Deleting the embed 404s everything.
 5. The UI obtains iframe URLs via the `embed.resolve` WS request (App. D)
    — the server computes the scoped URL; the client never sees the secret.
+6. **A browser tab is a supported environment for an embed, not a
+   workaround.** `GET /embed/<id>?t=` is already a standalone document with
+   its own CSP and an opaque sandbox origin, so opening one in a tab needs
+   nothing relaxed — the chat UI's "open" link is an ordinary
+   `target="_blank"` with `rel="noopener noreferrer"`, and it works because
+   the URL is **same-origin by construction**. Written down so nobody later
+   "fixes" the CSP to make a tab work.
+   The UI additionally refuses any embed URL that is not same-origin
+   `http(s)` before it reaches an `href` or an iframe `src`: that value lands
+   in two places where a `javascript:` URL would run in the page's own origin,
+   holding its device token. **That check is not to be widened.** A link
+   composed for another machine on the LAN is cross-origin and the check
+   refuses it, correctly; making a LAN link work is a question about what an
+   embed origin is allowed to be (this section), not a line deleted from a
+   security check. What such a link would need is the bind address as well as
+   the remembered port — `gateway.public_url` (§24.3, G.1) already exists for
+   exactly that guessing problem and is where it would come from, and
+   `/embed-vendor/` and `/embed-print/` are origin-relative and would follow
+   the same answer.
 
 ### 22.4 The runtime API — events and the state pouch
 
@@ -2883,6 +3056,16 @@ page loads leaves a screen that claims to still be working.
   Secret Service specifically: a kernel keyring would forget the token at
   the next reboot, so a box with no secrets daemon gets a refusal on the
   connect screen rather than a connection that quietly does not persist.
+- **The bundled port is remembered, not fixed.** The sidecar binds a free
+  localhost port; the shell writes the number it landed on to its own state
+  file (never the data dir — that is the service's, git-managed) and tries it
+  first next launch, falling back to a fresh one when it is taken. A
+  *preference*, not a requirement: the app must open on a machine where
+  something else got there first. The port is part of the origin, and the
+  origin is what a browser keys `localStorage` to and what an embed link is
+  written against — so without this a bundled window starts with an empty slate
+  every launch and a link copied yesterday is dead by morning (§22.3). Nothing
+  about the bind address changes: still loopback, still `--bind`.
 - **Notifications**: the shell registers over WS with capability
   `notify.actions` — deliberately *not* `chat`, because the window
   already consumes the chat stream and a second consumer would double
@@ -3091,7 +3274,14 @@ notify-send). Untrusted surfaces say; only user-authored handlers do
   gateway URL granted at setup. No standing access to any site: the
   extension cannot read a page until the user invokes it on that page,
   that one time. This is normative — a change that adds broad host
-  permissions is wrong by definition.
+  permissions is wrong by definition. **Declared breadth is not granted
+  breadth:** a gateway may live at any origin, and Chromium refuses to
+  request an origin the manifest never declared, so
+  `optional_host_permissions` is necessarily wide (`http://*/*`,
+  `https://*/*`) while the grant actually *requested* is the one configured
+  origin. What this clause forbids is standing access — `host_permissions`
+  is absent from both manifests, nothing is granted at install, and a test
+  pins both facts.
 - Click → the background worker injects the content script
   (`chrome.scripting.executeScript`) → the matcher engine (29.2) extracts
   → the popup shows the **preview**: the literal extracted text that will
@@ -3807,14 +3997,14 @@ the keys named there; the table above is the shipped default set.
 | Type | Source | Payload (JSON shape) |
 |---|---|---|
 | `chat.message` | `chat` | `{conversation_id, text, attachments?: [{upload_id, name, mime, bytes}]}` — attachment metadata only, never bytes (§26.2) |
-| `timer.fired` | `scheduler` | `{schedule_id, note, data?}` — `data` is the stored payload |
+| `timer.fired` | `scheduler` | `{schedule_id, note, fire_at, late_by_s, data?}` — `data` is the stored payload. `fire_at` is the occurrence this fire is *for* and `late_by_s` how far behind it the fire is: **the server knows the event is six hours stale, so the server says so** rather than leaving a handler to infer it from `time.now` and a hope (§6). Zero on a punctual fire; never negative |
 | `notification.action` | daemon device id | `{delivery_id, action, run_id?}` |
 | `desktop.session_locked` / `desktop.session_unlocked` | daemon device id | `{}` |
 | `desktop.idle` | daemon device id | `{idle_s}` |
 | `email.received` | `imap.<account>` | `{message_id, thread_id, from, to[], subject, date, body_text, attachments[{filename, mime, size}]}` |
 | `system.handler_failed` | `system` | `{event_id, handler, error, attempts}` |
 | `system.loop_suspected` | `system` | `{rejected_type, caused_by, depth}` |
-| `system.schedule_missed` | `system` | `{schedule_id, fire_at, note}` |
+| `system.schedule_missed` | `system` | `{schedule_id, fire_at, late_by_s, note, on_miss, skipped, next_fire_at}` — one per catch-up, never one per occurrence (§6.1): `skipped` says how many went by, so a week away is one honest event rather than seven runs. Emitted whether the policy fired the occurrence late or skipped it — the miss happened either way |
 | `system.conversation_closed` | `system` | `{conversation_id, turn_count, since}` — the user archived it. `since` = the `distilled_at` mark before this trigger claimed it (null on a first pass); the distillation pass reads only turns after it (§8.2) |
 | `system.conversation_idle` | `system` | `{conversation_id, turn_count, since}` — quiet past the idle window; distils without archiving (§9). `since` as above |
 | `webhook.<name>` | `http` | verbatim POST body (App. E.3) |
@@ -3948,11 +4138,17 @@ CREATE TABLE schedules (
   created_by_run TEXT REFERENCES runs(id),
   status         TEXT NOT NULL DEFAULT 'active'
                  CHECK (status IN ('active','done','cancelled','missed')),
-  last_fired_at  TEXT
+  last_fired_at  TEXT,
+  on_miss        TEXT NOT NULL DEFAULT 'fire_late'    -- fire_late | skip (§6)
+                 CHECK (on_miss IN ('fire_late','skip'))
 );
 CREATE INDEX ix_schedules_due ON schedules(status, fire_at);
 -- Recurring schedules stay 'active'; fire_at is advanced to the next
 -- occurrence after each fire. One-shots become 'done'.
+-- `on_miss` is what to do with an occurrence found past its grace window
+-- (§6). The default is `fire_late` because that is what every existing row
+-- has been getting: before the column, a schedule found late on a *running*
+-- service fired regardless.
 
 CREATE TABLE embeds (
   id               TEXT PRIMARY KEY,                 -- ULID
@@ -4158,6 +4354,7 @@ server closes.
 | `embed.list` | `{kind?}` | `embed.list.result {embeds: [{id, title, kind, updated_at, url}]}` — the embeds panel (§22.6) |
 | `embed.promote` | `{embed_id}` | `embed.promoted {embed_id, kind: "persistent"}` — the UI's "keep" action (§22.1). The user holding the device token *is* the confirmation; the `confirm` tier on `embeds.promote` gates the model, not them |
 | `embed.demote` | `{embed_id}` | `embed.demoted {embed_id, kind: "ephemeral"}` — the UI's "unkeep" action (§22.1), the mirror of `embed.promote` and authorised the same way. Not a delete: the view and its scoped link keep working, the file returns to the gitignored `tmp/` (so the commit records a removal), and the row is once again reapable. Idempotent — unkeeping something already ephemeral is a no-op that reports success |
+| `event.list` | `{status?: "pending"\|"dead_letter"\|"all", limit?=50}` | `event.list.result` (D.2) — the activity panel's read over the event lifecycle (§4.2.1). `pending` (the default) is everything unsettled — `received\|matched\|processing\|failed` **and** `dead_letter`, because both are outcomes still owed; `dead_letter` narrows to the bucket that does not clear itself; `all` adds recently settled rows within the window. `chat`-capable devices only. **No event payload crosses this frame** — an event payload is untrusted content (§1.1, H.2) and the row carries the ingress-written `summary` instead |
 
 `capabilities` values (v1): `"notify.actions"`, `"chat"`, `"forms"`.
 `last_seen` is the
@@ -4183,6 +4380,8 @@ expired is marked `expired` at that moment.
 | `form.request` | `{form_id, run_id, conversation_id, title, template?, fields: [FieldSpec]}` — see D.5 |
 | `embed.resolve.result` / `embed.manifest.result` / `embed.list.result` / `embed.promoted` / `embed.demoted` | as in D.1 |
 | `embed.changed` | `{embed_id}` — the embed's content or bound data changed and anything rendering it is a version behind (§22.6); sent to `chat`-capable devices, transient like `files.changed`. Not sent for state-pouch writes |
+| `event.list.result` | `{events: [{id, type, source, summary, status, attempts, next_attempt_at, received_at, last_error}], deliveries: [{delivery_id, intent, title, status, expires_at}]}` — what the system owes you an outcome for, and what owes it a click (§4.2.1). `deliveries` are the `queued\|delivered` rows carrying actions: a `confirm` raised while you were reading another conversation is otherwise a thing you have to remember. `summary` and `last_error` are server-written; **no payload, ever** |
+| `event.status` | `{id, type, source, summary, status, attempts, next_attempt_at, received_at, last_error}` — one event moved (§4.2.1), pushed to `chat`-capable devices as it happens rather than polled, exactly like `chat.activity`. Transient: a client that missed one re-derives with `event.list`. Sent for **every** transition the lifecycle defines, `dead_letter` included, and for arrival — a row that appears only once it is already running cannot show you a queue |
 | `token.list.result` / `token.revoked` | as in D.1 |
 | `files.list.result` / `files.read.result` / `files.saved` | as in D.1 |
 | `models.list.result` / `conversation.model.set` | as in D.1 |
@@ -4196,7 +4395,28 @@ Error codes: `auth_failed`, `not_ready`, `bad_frame`, `unknown_type`,
 
 - `notify`: `{title, body, actions?: [{id, label}], data?}`
 - `confirm`: `{title, body, run_id, tool, args_summary,
+  details: [{label, value}],
   actions: [{id:"approve", label:"Approve"}, {id:"deny", label:"Deny"}]}`
+
+**Every word of a `confirm` is composed by the server** (§14.2, §11.3). `title`
+is a sentence naming who is asking and what they want to do — "Sleeper Service
+wants to delete a file", "Handler `inbox-triage` wants to send the user a
+desktop notification" — built from the instance's own name (or the gating
+handler's) and the tool's catalog description; never the tool name with the dot
+left in, and never a sentence the model supplied. `details` is one line per
+argument in **schema order**, humanised: paths relative to the data dir, long
+values elided, arrays as a count and a sample, booleans as words, `bulkArgs`
+content (§20.6) as its size rather than its text, and a `${secret:KEY}`
+reference as "(a stored secret)" — never the reference and never the value
+(§27), in `details`, in `args_summary`, in the delivery row, or in the trace.
+`args_summary` and `body` are that same content as one plain-text block, for a
+channel with no DOM (`notify-send`, §7.3): a rendering of `details`, never
+`JSON.stringify(args)`.
+
+The **deadline rides the envelope**, not the payload: a `confirm` delivery's
+`expires_at` (App. A: 1h) is the moment silence becomes a deny, and a surface
+that renders the buttons renders that with them. An approval that quietly
+expired is the one outcome nobody chose.
 
 An action click emits a `notification.action` event (App. B) via the
 `event` frame. For `confirm`, the executor correlates on `run_id`.
@@ -4335,8 +4555,8 @@ Every `se` call performs a git commit; commit message =
 
 | tool | tier | args | returns |
 |---|---|---|---|
-| `schedule.create` | se | `{fire_at: iso8601, note: string, rrule?: string, data?: object, grace_s?: int}` | `{schedule_id, fire_at}` |
-| `schedule.list` | ro | `{include_done?: bool=false}` | `{schedules: [{id, fire_at, rrule, note, status}]}` |
+| `schedule.create` | se | `{fire_at: iso8601, note: string, rrule?: string, data?: object, grace_s?: int, on_miss?: "fire_late"\|"skip"}` | `{schedule_id, fire_at, rrule, grace_s, on_miss}` — `on_miss` (§6.1) defaults per kind: `fire_late` for a one-shot, `skip` for a recurrence. It comes back whether or not it was asked for, because "what happens if I close the lid" should be answerable from the reply |
+| `schedule.list` | ro | `{include_done?: bool=false}` | `{schedules: [{id, fire_at, rrule, note, status, grace_s, on_miss, last_fired_at}]}` — next fire and miss policy per row, so the same question is answerable without reading the spec |
 | `schedule.cancel` | se | `{schedule_id: string}` | `{schedule_id, cancelled: true}` |
 
 ### F.3 `deliver` (§7.1)
@@ -4488,6 +4708,7 @@ committing flow (memory, config, embeds).
 | `setup.secrets_backend` | se | `{}` | `{submitted, backend?, migrated?: int}` — probes which §27.1 backends this machine offers (`os` positively identified, gpg binary present, plain always), renders a **choice form** naming each with its honest tradeoff (the §27.1 portability caveat for `os`, the permanent startup warning for `plain`), and on submit runs the same pin-and-migrate path as `turminder secrets migrate`. This is the conversational half §27.1 promised onboarding; the onboarding grant carries it (F.7) |
 | `setup.token_create` | se | `{device: string, label?: string}` | `{device, label, created: true, revealed_to_user: true}` — the value itself goes to the user in a one-time `token.reveal` frame and is **never** in the result, the trace, or any persisted turn (§24.2). `{error: "device_exists"}` on a name collision; `{error: "no_reveal_target"}` (and no row written) when no connected chat-capable device can receive the reveal |
 | `setup.pair_approve` | se | `{code: string, device: string, label?: string}` | `{device, label, approved: true, delivered_to_device: true}` — approves a device that asked to be paired from its own gate (§24.4); the value goes straight to that device and is **never** in the result, the trace, or any persisted turn. `{error: "no_such_request"}` on an unknown or expired code (no row written), `{error: "already_approved"}`, `{error: "device_exists"}` on a name collision or `{error: "bad_device_name"}` on an unusable one (the request survives either, so another name still works). There is deliberately no tool that lists pending requests — the code comes from the human |
+| `setup.pricing` | se | `{endpoint?: string}` | `{submitted: true, endpoint, cost: {in_per_mtok, out_per_mtok, currency}\|null, committed: bool, models_loaded: bool, note}` or `{submitted: false, reason}`; `{error: "unknown_endpoint"\|"no_endpoints"\|"no_conversation"\|"no_run"}`, and `{submitted: true, priced: false, error: "bad_price"}` when the typed figures do not validate — **nothing is written in any error case**. A form round-trip (§19.1), prefilled from the current block so it reads as an edit: three numbers a human types, because three numbers and a currency dictated by a model into a tool call is the anti-telephone problem with money attached. Omitting `endpoint` with more than one configured makes the form lead with a select. Carries an explicit **"no — local or free"** choice that removes the `cost` block, without which a mistyped price is permanent and §10.5's distinction between *free* and *unpriced* is unreachable from the surface that created it. Writes G.2 through the same `writeRaw` + git-commit + `reloadModels()` path the templates use — one writer, not two |
 | `setup.rename` | se | `{name: string, story?: string (a new identity body — the self-description prose; omitted, the old body keeps with whole-word occurrences of the old name swapped for the new)}` | `{name, previous, updated: "config/identity.md", committed: bool, old_name_still_in: [paths], note}` — renames the instance: one validated, committed rewrite of `config/identity.md` (frontmatter `instance_name` + body), then a scan of `config/personality.md` and `memory/*.md` reporting where the old name still appears — the model curates those with its own grants (`memory.update`, prose is judgment) rather than a tool sed-ing curated text. `{error: "not_onboarded"}` before an identity exists; `{error: "same_name"}` when nothing would change. Chat gets it via the default `setup.*` grant — the rename no longer needs onboarding's `config.write`. Connected screens learn the name at `hello`, so they show the new one after their next reconnect |
 
 Suspension per F.7/D.5. Template and activation submissions execute their

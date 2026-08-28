@@ -31,6 +31,7 @@ const ICONS = {
   trash:
     '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M18.5 6 17.6 20a1 1 0 0 1-1 1H7.4a1 1 0 0 1-1-1L5.5 6"/><path d="M10 11v6M14 11v6"/>',
   chevron: '<path d="m9 18 6-6-6-6"/>',
+  activity: '<path d="M3 12h4l3 8 4-16 3 8h4"/>',
   layout:
     '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/>',
   expand:
@@ -75,6 +76,7 @@ const PAIR_POLL_MS = 2000;
 
 /** Frames this page needs the server to understand. */
 const REQUIRED_FRAMES = [
+  'event.list',
   'chat.send',
   'chat.history',
   'conversation.list',
@@ -91,6 +93,8 @@ const REQUIRED_FRAMES = [
 
 /** Frames this page renders and would quietly miss if the server were older. */
 const EXPECTED_FROM_SERVER = [
+  'event.list.result',
+  'event.status',
   'chat.activity',
   'chat.retract',
   'chat.usage',
@@ -108,6 +112,14 @@ const state = {
   // Last settled usage, plus a running estimate while tokens are streaming.
   usage: null,
   streamedChars: 0,
+  /**
+   * Reasoning is billed output the reader never sees stream (§20.1), and on a
+   * thinking model it is most of it — measured at ~68% of billed output tokens
+   * on the install this was written against. Counting only the visible deltas
+   * made the live figure under-report by a factor of three and then jump when
+   * the turn settled, which reads exactly like the counter being wrong.
+   */
+  reasoningChars: 0,
   turnTokensIn: 0,
   turnTokensOut: 0,
   // Cache accounting for the run in flight (§21.1), accumulated only over the
@@ -152,6 +164,12 @@ const state = {
   // shelf. `pending` holds slots awaiting a resolve, keyed by id because one
   // embed may appear in the conversation twice.
   embeds: { open: false, entries: [], inChat: new Map(), pending: new Map() },
+  /**
+   * The activity panel (§4.2.1). `rows` is a live window over the event
+   * lifecycle keyed by event id, filled by `event.list` and kept true by
+   * `event.status` pushes — never the source of truth, always re-derivable.
+   */
+  activity: { open: false, rows: new Map(), deliveries: [] },
   showArchived: localStorage.getItem(ARCHIVED_KEY) === '1',
   devices: [],
   /** Uploads waiting to be sent with the next message (§26.2). */
@@ -436,8 +454,8 @@ const FOLLOW_SLACK_PX = 48;
  */
 const GESTURE_MS = 500;
 
-function atBottom(box) {
-  return box.scrollHeight - box.scrollTop - box.clientHeight <= FOLLOW_SLACK_PX;
+function atBottom(box, slack = FOLLOW_SLACK_PX) {
+  return box.scrollHeight - box.scrollTop - box.clientHeight <= slack;
 }
 
 function readerIsDriving() {
@@ -673,6 +691,7 @@ function clearMessages() {
   if (!state.conversationId) showGreeting();
   state.usage = null;
   state.streamedChars = 0;
+  state.reasoningChars = 0;
   state.turnTokensIn = 0;
   state.turnTokensOut = 0;
   state.runEvaluated = 0;
@@ -784,7 +803,9 @@ function startGroup() {
     steps: 0,
     tools: [],
     reasoningEl: null,
-    reasoningText: '',
+    reasoningNode: null,
+    reasoningTail: '',
+    reasoningPinned: true,
     started: performance.now(),
     tick: null,
   };
@@ -860,13 +881,54 @@ function showActivity(a) {
   scrollMessages();
 }
 
-/** Reasoning arrives delta by delta and accumulates into one line of the block. */
+/**
+ * How much of the reasoning tail is kept as a *string*, and it is kept for the
+ * collapsed header alone. The body is never capped — it lives in the DOM, the
+ * only place it is needed — but re-collapsing whitespace over a quarter of a
+ * million characters once per delta is its own kind of slow. Enough raw
+ * characters that the 96 the header shows survive the collapse.
+ */
+const REASONING_TAIL_CAP = 320;
+
+/**
+ * Close enough to the bottom of the reasoning box to still count as reading the
+ * live end. Much tighter than the transcript's slack: the box is a few hundred
+ * pixels tall, and scrolling up a line inside it is a decision, not a wobble.
+ */
+const REASONING_SLACK_PX = 8;
+
+/**
+ * Reasoning arrives delta by delta and accumulates into one line of the block.
+ *
+ * Appended into a text node rather than reassigned, because reassigning the
+ * whole accumulated string on every delta is quadratic — which is why the text
+ * used to be capped at 8000 characters and the beginning of a long think
+ * scrolled out of existence. Nothing is discarded now: the *box* is bounded
+ * (style.css), not the text, and it holds its own bottom while the model talks
+ * unless the reader has scrolled back into the chain.
+ */
 function showReasoning(text) {
   const group = openGroup();
-  group.reasoningText = (group.reasoningText + text).slice(-8000);
-  if (!group.reasoningEl) group.reasoningEl = groupLine(group, '', 'reasoning');
-  group.reasoningEl.textContent = group.reasoningText;
-  group.summary.textContent = `reasoning: ${tail(group.reasoningText, 96)}`;
+  if (!group.reasoningEl) {
+    group.reasoningEl = groupLine(group, '', 'reasoning');
+    group.reasoningNode = group.reasoningEl.appendChild(document.createTextNode(''));
+    // The box is its own scroller, and `scroll` does not bubble — so reading
+    // back through the chain never reaches the transcript's follow logic, and
+    // `overscroll-behavior: contain` stops a wheel that runs off the end from
+    // chaining into it either. That fight is documented at scrollMessages;
+    // this is it staying won.
+    group.reasoningEl.addEventListener(
+      'scroll',
+      () => {
+        group.reasoningPinned = atBottom(group.reasoningEl, REASONING_SLACK_PX);
+      },
+      { passive: true },
+    );
+  }
+  group.reasoningNode.appendData(text);
+  group.reasoningTail = (group.reasoningTail + text).slice(-REASONING_TAIL_CAP);
+  group.summary.textContent = `reasoning: ${tail(group.reasoningTail, 96)}`;
+  if (group.reasoningPinned) group.reasoningEl.scrollTop = group.reasoningEl.scrollHeight;
   scrollMessages();
 }
 
@@ -907,8 +969,10 @@ function bar(fraction) {
  * run bills the same prompt sixteen times, and showing that against the window
  * makes a healthy conversation look about to burst.
  *
- * While text is streaming the output figure is an estimate from characters seen
- * (~4 per token); the real count replaces it when the turn settles.
+ * While a turn is in flight the output figure is an estimate from characters
+ * seen (~4 per token), reasoning included — it is billed like any other output
+ * and on a thinking model it is most of it. The real count replaces it when the
+ * turn settles.
  */
 function renderUsage() {
   const box = $('usage');
@@ -916,17 +980,22 @@ function renderUsage() {
   const parts = [];
   const part = (key, html) => parts.push({ key, html });
 
-  if (state.streaming || state.turnTokensOut) {
-    const estimating = Boolean(state.streaming);
-    const out = estimating ? Math.round(state.streamedChars / 4) : state.turnTokensOut;
+  // Reasoning counts here even though it never streams into the transcript:
+  // it is billed output, and on a thinking model it is most of it (§20.1).
+  const streamedNow = state.streamedChars + state.reasoningChars;
+  if (state.streaming || state.turnTokensOut || streamedNow) {
+    // An estimate for as long as the figure is derived from characters. A turn
+    // that has settled resets both counters, so this goes false on its own.
+    const estimating = Boolean(state.streaming) || streamedNow > 0;
+    const out = estimating ? Math.round(streamedNow / 4) : state.turnTokensOut;
     const inTokens = state.turnTokensIn || u?.context_used || 0;
     const ctx = u?.context_size ?? null;
-    if (ctx) {
-      part(
-        'context',
-        `context ${bar((inTokens + out) / ctx)} ${compact(inTokens + out)}/${compact(ctx)}`,
-      );
-    }
+    // Pressure, never billing (§21.1): the peak single prompt is what has to
+    // fit in the window. The output in flight is not in any prompt yet, and
+    // adding it here re-counted every earlier turn's output — already inside
+    // that peak — which is what made an ordinary run look near the ceiling.
+    if (ctx)
+      part('context', `context ${bar(inTokens / ctx)} ${compact(inTokens)}/${compact(ctx)}`);
     const live = cacheHit({
       prompt_evaluated: state.runEvaluated,
       billed_with_timings: state.runBilledTimed,
@@ -938,8 +1007,11 @@ function renderUsage() {
         `${estimating ? '~' : ''}${compact(out)} out${estimating ? ' …' : ''}</span>`,
     );
   } else if (u) {
-    // Peak prompt plus this run's output: what had to fit at once.
-    const used = (u.context_used ?? u.tokens_in) + u.tokens_out;
+    // The peak single prompt, and nothing added to it (§21.1). This line used
+    // to add the run's cumulative output, which is already inside that peak
+    // from turn two onwards: measured at +97% on a 16-call run — 19,325 real
+    // tokens reported as 38,105 against a 98k window.
+    const used = u.context_used ?? u.tokens_in;
     if (u.context_size) {
       part(
         'context',
@@ -1207,6 +1279,10 @@ function handle(frame) {
       // The panel can be remembered open from a previous visit, in which case
       // its boot-time files.list went out before this socket existed.
       if (state.files.open) send('files.list', {});
+      // Same for the activity panel — and on a reconnect the list is how it
+      // re-derives, because `event.status` is transient and missed pushes are
+      // not replayed (§4.2.1).
+      if (state.activity.open) send('event.list', {});
       // Cheap, and it is what tells the views toggle whether there is a kept
       // shelf to reach when the current conversation has no views of its own.
       send('embed.list', { kind: 'persistent' });
@@ -1270,7 +1346,9 @@ function handle(frame) {
       if (activity.kind === 'reasoning') {
         // Live reasoning from a thinking model. Never persisted, never re-fed
         // to the model (§20.1) — the activity block is where it appears.
+        state.reasoningChars += (activity.text || '').length;
         showReasoning(activity.text);
+        renderUsage();
         break;
       }
       if (activity.kind === 'usage') {
@@ -1278,6 +1356,7 @@ function handle(frame) {
         state.turnTokensIn = activity.tokens_in;
         state.turnTokensOut += activity.tokens_out;
         state.streamedChars = 0;
+        state.reasoningChars = 0;
         if (typeof activity.prompt_evaluated === 'number') {
           state.runEvaluated += activity.prompt_evaluated;
           state.runBilledTimed += activity.tokens_in;
@@ -1312,6 +1391,7 @@ function handle(frame) {
       state.turnTokensIn = 0;
       state.turnTokensOut = 0;
       state.streamedChars = 0;
+      state.reasoningChars = 0;
       state.runEvaluated = 0;
       state.runBilledTimed = 0;
       renderUsage();
@@ -1423,6 +1503,19 @@ function handle(frame) {
       // URL and kind both come from the server.
       remountEmbed(p.embed_id);
       if (state.embeds.open) send('embed.list', { kind: 'persistent' });
+      break;
+
+    // The activity panel's read and its live half (§4.2.1). The list is the
+    // truth on arrival; every push after it moves one row.
+    case 'event.list.result':
+      state.activity.rows.clear();
+      for (const row of p.events || []) state.activity.rows.set(row.id, row);
+      state.activity.deliveries = p.deliveries || [];
+      renderActivity();
+      break;
+
+    case 'event.status':
+      applyEventStatus(p);
       break;
 
     // The assistant iterated on a view that is on screen (§22.6). Everything
@@ -1884,6 +1977,155 @@ function setEmbedsOpen(open, persist = true) {
   applySheets();
 }
 
+/* ── the activity panel (§4.2.1) ─────────────────────────────────────────── */
+
+const ACTIVITY_KEY = 'turminder.activity';
+
+/**
+ * How a lifecycle status reads to somebody who did not write the lifecycle,
+ * and which of three moods the row is in. `waiting` is the one that earns its
+ * own colour: an event retrying on a backoff is not broken, and an event
+ * nobody has picked up yet is not running.
+ */
+const ACTIVITY_STATES = {
+  received: { label: 'queued', mood: 'waiting' },
+  matched: { label: 'matched', mood: 'waiting' },
+  processing: { label: 'running', mood: 'running' },
+  failed: { label: 'retrying', mood: 'waiting' },
+  dead_letter: { label: 'gave up', mood: 'dead' },
+  done: { label: 'done', mood: '' },
+  rejected: { label: 'refused', mood: 'dead' },
+};
+
+function setActivityOpen(open, persist = true) {
+  state.activity.open = open;
+  document.body.classList.toggle('activity-open', open);
+  $('activity-toggle').setAttribute('aria-pressed', open ? 'true' : 'false');
+  if (persist) localStorage.setItem(ACTIVITY_KEY, open ? '1' : '0');
+  if (open) {
+    soloPane('activity');
+    send('event.list', {});
+  }
+  renderActivity();
+  applySheets();
+}
+
+/** Absolute where it is far away, relative where the distance is the point. */
+function whenText(iso) {
+  const at = iso ? new Date(iso) : null;
+  if (!at || Number.isNaN(at.getTime())) return '';
+  const seconds = Math.round((Date.now() - at.getTime()) / 1000);
+  if (Math.abs(seconds) < 60) return seconds >= 0 ? 'just now' : 'in a moment';
+  if (Math.abs(seconds) < 3600) {
+    const m = Math.round(Math.abs(seconds) / 60);
+    return seconds >= 0 ? `${m}m ago` : `in ${m}m`;
+  }
+  return at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function activityRow(row) {
+  const el = document.createElement('div');
+  const state_ = ACTIVITY_STATES[row.status] ?? { label: row.status, mood: '' };
+  el.className = `act-row${state_.mood ? ` ${state_.mood}` : ''}`;
+
+  const what = document.createElement('div');
+  what.className = 'what';
+  // The ingress-written summary if there is one, the type if there is not.
+  // Never the payload: that is untrusted content (§1.1) and is not sent here.
+  what.textContent = row.summary || row.type;
+  el.append(what);
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const badge = document.createElement('span');
+  badge.className = 'state';
+  badge.textContent = state_.label;
+  meta.append(badge);
+  const where = document.createElement('span');
+  where.textContent = `${row.type} · ${row.source}`;
+  meta.append(where);
+  const when = document.createElement('span');
+  // A retry says when it will next try; everything else says when it arrived.
+  when.textContent =
+    row.status === 'failed' && row.next_attempt_at
+      ? `retry ${whenText(row.next_attempt_at)}`
+      : whenText(row.received_at);
+  meta.append(when);
+  if (row.attempts > 0) {
+    const tries = document.createElement('span');
+    tries.textContent = `attempt ${row.attempts}`;
+    meta.append(tries);
+  }
+  el.append(meta);
+
+  // A dead letter that does not say why is the silence this panel exists to
+  // break (§4.2.1).
+  if (row.status === 'dead_letter' && row.last_error) {
+    const why = document.createElement('div');
+    why.className = 'why';
+    why.textContent = row.last_error;
+    el.append(why);
+  }
+  return el;
+}
+
+function deliveryRow(delivery) {
+  const el = document.createElement('div');
+  el.className = 'act-row waiting';
+  const what = document.createElement('div');
+  what.className = 'what';
+  what.textContent = delivery.title;
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const badge = document.createElement('span');
+  badge.className = 'state';
+  badge.textContent = delivery.intent === 'confirm' ? 'your say-so' : 'unread';
+  const when = document.createElement('span');
+  when.textContent = expiryNote(delivery.expires_at);
+  meta.append(badge, when);
+  el.append(what, meta);
+  return el;
+}
+
+/**
+ * Newest first, with what owes *you* something at the top: an approval waiting
+ * on a click outranks a handler quietly getting on with its work.
+ */
+function renderActivity() {
+  const list = $('activity-list');
+  list.textContent = '';
+  const rows = [...state.activity.rows.values()].sort((a, b) => (a.id < b.id ? 1 : -1));
+  for (const delivery of state.activity.deliveries) list.append(deliveryRow(delivery));
+  for (const row of rows) list.append(activityRow(row));
+  if (!rows.length && !state.activity.deliveries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'Nothing in flight.';
+    list.append(empty);
+  }
+}
+
+/**
+ * A push moved one event. Terminal rows leave the window — this is a live view
+ * of what is outstanding, not a log — except a dead letter, which stays until
+ * the reader has seen it, because a capture that died in silence is exactly
+ * the case where silence is the bug (§4.2.1).
+ */
+function applyEventStatus(row) {
+  const settled = row.status === 'done' || row.status === 'rejected';
+  if (settled) state.activity.rows.delete(row.id);
+  else state.activity.rows.set(row.id, row);
+  if (state.activity.open) renderActivity();
+}
+
+/** When an unanswered approval turns into a deny, said in the reader's clock. */
+function expiryNote(iso) {
+  const at = iso ? new Date(iso) : null;
+  if (!at || Number.isNaN(at.getTime())) return 'No answer counts as Deny.';
+  const time = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return `No answer by ${time} counts as Deny.`;
+}
+
 /**
  * A delivery, rendered inline: a notification to read, or an approve/deny
  * request gating a tool call (§7.3). Clicking sends the action back as an
@@ -1902,11 +2144,38 @@ function showDelivery(frame) {
   title.className = 'delivery-title';
   title.textContent = payload.title || '(untitled)';
 
-  const body = document.createElement('div');
-  body.className = 'body';
-  body.textContent = payload.body || '';
+  el.append(who, title);
 
-  el.append(who, title, body);
+  // A confirm carries the argument lines the server composed (App. D.3); its
+  // `body` is the same content flattened for a notifier with no DOM, so
+  // rendering both would say everything twice.
+  const details = Array.isArray(payload.details) ? payload.details : [];
+  if (details.length) {
+    const list = document.createElement('dl');
+    list.className = 'delivery-details';
+    for (const detail of details) {
+      const label = document.createElement('dt');
+      label.textContent = String(detail.label ?? '');
+      const value = document.createElement('dd');
+      value.textContent = String(detail.value ?? '');
+      list.append(label, value);
+    }
+    el.append(list);
+  } else {
+    const body = document.createElement('div');
+    body.className = 'body';
+    body.textContent = payload.body || '';
+    el.append(body);
+  }
+
+  // Silence is an answer here, and nothing on screen used to say so: an
+  // unanswered confirm becomes a deny when the delivery expires (App. A).
+  if (frame.intent === 'confirm') {
+    const deadline = document.createElement('div');
+    deadline.className = 'delivery-deadline';
+    deadline.textContent = expiryNote(frame.expires_at);
+    el.append(deadline);
+  }
 
   const actions = payload.actions || [];
   if (actions.length) {
@@ -2260,6 +2529,7 @@ $('composer').onsubmit = (e) => {
   sizeInput();
   $('send').disabled = true;
   state.streamedChars = 0;
+  state.reasoningChars = 0;
   state.turnTokensIn = 0;
   state.turnTokensOut = 0;
   showActivity({ kind: 'thinking', turn: 1 });
@@ -2327,7 +2597,10 @@ const ONE_PANEL = window.matchMedia('(max-width: 1399.98px)');
 function anyPaneOpen() {
   const c = document.body.classList;
   return (
-    !c.contains('sidebar-collapsed') || c.contains('files-open') || c.contains('embeds-open')
+    !c.contains('sidebar-collapsed') ||
+    c.contains('files-open') ||
+    c.contains('embeds-open') ||
+    c.contains('activity-open')
   );
 }
 
@@ -2347,17 +2620,23 @@ function soloPane(which) {
     if (which !== 'sidebar') setCollapsed(true, false);
     if (which !== 'files' && state.files.open) setFilesOpen(false, false);
     if (which !== 'embeds' && state.embeds.open) setEmbedsOpen(false, false);
+    if (which !== 'activity' && state.activity.open) setActivityOpen(false, false);
     return;
   }
-  if (!ONE_PANEL.matches) return;
-  if (which === 'files' && state.embeds.open) setEmbedsOpen(false, false);
-  if (which === 'embeds' && state.files.open) setFilesOpen(false, false);
+  if (!ONE_PANEL.matches || which === 'sidebar') return;
+  // Three side panes now, and only one of them may be a column in this band —
+  // whichever was just asked for. The sidebar is a column of its own here and
+  // displaces nothing, which is why it returns above.
+  if (which !== 'files' && state.files.open) setFilesOpen(false, false);
+  if (which !== 'embeds' && state.embeds.open) setEmbedsOpen(false, false);
+  if (which !== 'activity' && state.activity.open) setActivityOpen(false, false);
 }
 
 function closeAllPanes() {
   setCollapsed(true, false);
   if (state.files.open) setFilesOpen(false, false);
   if (state.embeds.open) setEmbedsOpen(false, false);
+  if (state.activity.open) setActivityOpen(false, false);
 }
 
 /**
@@ -2373,10 +2652,11 @@ function dismissSheets() {
   if (SHEET_MODE.matches) closeAllPanes();
 }
 
-/* Views before files: below 1400 only one of them can be a column, and files
-   is the one worth the space. */
+/* Activity, then views, then files: below 1400 only one of them can be a
+   column, and the later call wins — files is the one worth the space. */
 function restorePanes() {
   setCollapsed(localStorage.getItem(COLLAPSED_KEY) === '1', false);
+  setActivityOpen(localStorage.getItem(ACTIVITY_KEY) === '1', false);
   setEmbedsOpen(localStorage.getItem(EMBEDS_KEY) === '1', false);
   setFilesOpen(localStorage.getItem(FILES_KEY) === '1', false);
 }
@@ -2413,7 +2693,9 @@ function sizeInput() {
   const el = $('input');
   // An empty textarea still reports its *placeholder* in scrollHeight, so
   // measuring one would boot the composer three lines tall on a phone.
-  const cap = Math.round(window.innerHeight * 0.4);
+  // Measured against what is visible, not `innerHeight`: with a keyboard open
+  // those are different numbers, and the layout one grows the box behind it.
+  const cap = Math.round(visibleHeight() * 0.4);
   if (!el.value) {
     el.style.height = `${INPUT_MIN_H}px`;
     el.style.overflowY = 'hidden';
@@ -2994,6 +3276,73 @@ $('messages').addEventListener(
 // A window resize changes what is below the fold without any scrolling.
 window.addEventListener('resize', () => refreshJump());
 
+/**
+ * Below this, the gap between the layout viewport and the visible one is a
+ * scrollbar, a rounding error or a browser chrome animation — not a keyboard.
+ */
+const KEYBOARD_MIN_PX = 60;
+
+/** What the reader can actually see, which is what the layout gets to own. */
+function visibleHeight() {
+  const vv = window.visualViewport;
+  return vv && vv.scale <= 1.01 ? vv.height : window.innerHeight;
+}
+
+/**
+ * The on-screen keyboard is the one thing that changes the viewport without
+ * changing the *layout* viewport (§9.1). `interactive-widget=resizes-content`
+ * (index.html) makes Chrome shrink `dvh` for it and needs nothing else; Safari
+ * implements neither that nor a `dvh` that moves, so on iOS the composer — the
+ * last thing in a full-height column — sits behind the keyboard unless
+ * something measures. `visualViewport` is that something.
+ *
+ * Two properties come out of it: the height the shell may occupy, and how much
+ * of the layout viewport is occluded at the bottom. The second is what stops
+ * the home-indicator allowance being added on top of a keyboard that already
+ * covers the indicator.
+ *
+ * Both are **removed** when nothing is occluding, so every other screen — and
+ * every desktop window — resolves to the `100dvh` the stylesheet had before.
+ */
+function trackVisibleViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const root = document.documentElement;
+  let tick = null;
+  const measure = () => {
+    tick = null;
+    // Pinch-zoom shrinks the visual viewport too, and shrinking the shell to
+    // match would fight the reader's own zoom. Only an unzoomed viewport
+    // describes the layout; while zoomed, the last honest measurement stands.
+    if (vv.scale > 1.01) return;
+    const occluded = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+    if (occluded < KEYBOARD_MIN_PX) {
+      root.style.removeProperty('--visible-height');
+      root.style.removeProperty('--keyboard-inset');
+    } else {
+      root.style.setProperty('--visible-height', `${Math.round(vv.height)}px`);
+      root.style.setProperty('--keyboard-inset', `${occluded}px`);
+      // iOS scrolls the layout viewport to reveal a focused field before it
+      // tells us the viewport moved. The shell has just been shortened to sit
+      // on the keyboard, so that scroll is a gap at the top and nothing else.
+      if (window.scrollY !== 0) window.scrollTo(0, 0);
+    }
+    // The composer's ceiling is a fraction of a number that just changed, and
+    // the transcript's bottom moved with it. Follow mode decides whether we
+    // chase it — the keyboard opening is not the reader asking to leave.
+    sizeInput();
+    scrollMessages();
+  };
+  // One measurement per frame: `scroll` fires continuously while a keyboard
+  // animates in, and each one writes two properties that relayout the shell.
+  const schedule = () => {
+    if (tick === null) tick = requestAnimationFrame(measure);
+  };
+  vv.addEventListener('resize', schedule);
+  vv.addEventListener('scroll', schedule);
+  measure();
+}
+
 $('jump').onclick = () => {
   // Back to the bottom, and following again — which is the whole point of the
   // badge: one press to stop reading history and rejoin the live output.
@@ -3001,6 +3350,9 @@ $('jump').onclick = () => {
   $('jump').hidden = true;
 };
 
+$('activity-toggle').onclick = () => setActivityOpen(!state.activity.open);
+$('activity-close').onclick = () => setActivityOpen(false);
+$('activity-refresh').onclick = () => send('event.list', {});
 $('embeds-toggle').onclick = () => setEmbedsOpen(!state.embeds.open);
 $('embeds-close').onclick = () => setEmbedsOpen(false);
 $('embeds-refresh').onclick = () => send('embed.list', { kind: 'persistent' });
@@ -3027,6 +3379,7 @@ $('file-save').onclick = () => {
 
 paintIcons();
 applyLayout();
+trackVisibleViewport();
 applyPlaceholder();
 sizeInput();
 setFileViewing(false);

@@ -122,6 +122,51 @@ fn free_port() -> Result<u16, String> {
         .map_err(|e| e.to_string())
 }
 
+/// The file holding the port this install used last (§28.2).
+fn port_file() -> Result<PathBuf, String> {
+    Ok(crate::platform::state_dir()?.join("sidecar-port"))
+}
+
+/// Is this port ours to take right now?
+fn port_is_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// The port to run on: the one we used last if it is still free, otherwise a
+/// fresh one.
+///
+/// A new port every launch is a new *origin*, and an origin is what a browser
+/// keys localStorage to and what an embed link is written against — so a
+/// bundled window used to start with an empty slate every time, and yesterday's
+/// copied embed link was dead by morning. Remembering the number costs a file
+/// with one line in it. Falling back to `0` when it is taken is what keeps this
+/// a preference rather than a requirement: the app must still open on a machine
+/// where something else got there first.
+fn choose_port() -> Result<u16, String> {
+    let remembered = port_file()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|raw| raw.trim().parse::<u16>().ok())
+        // Never a privileged port, whatever the file says: this is state we
+        // wrote, but it is state on disk and a bad number should be ignored
+        // rather than attempted.
+        .filter(|port| *port >= 1024 && port_is_free(*port));
+    match remembered {
+        Some(port) => Ok(port),
+        None => free_port(),
+    }
+}
+
+/// Best-effort: an install that cannot write this simply gets a fresh port next
+/// time, which is exactly where it was before.
+fn remember_port(port: u16) {
+    let Ok(path) = port_file() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, format!("{port}\n"));
+}
+
 struct Inner {
     layout: Layout,
     data_dir: PathBuf,
@@ -132,8 +177,10 @@ struct Inner {
 }
 
 pub struct Sidecar {
-    /// Fixed for the life of the app: a restart reuses the port so the window's
-    /// URL — and the token fragment already handed to it — stay valid.
+    /// Fixed for the life of the app, and remembered across launches when it
+    /// can be: a restart reuses the port so the window's URL — and the token
+    /// fragment already handed to it — stay valid, and so does a link to an
+    /// embed somebody opened in a browser tab yesterday (§28.2).
     pub port: u16,
     pub token: String,
     pub data_dir: PathBuf,
@@ -180,7 +227,8 @@ pub fn start(app: &AppHandle) -> Result<Sidecar, String> {
         }
     };
 
-    let port = free_port()?;
+    let port = choose_port()?;
+    remember_port(port);
     let inner = Arc::new(Inner {
         layout,
         data_dir: data_dir.clone(),

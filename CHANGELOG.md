@@ -1,5 +1,100 @@
  # Next
 
+ * The desktop app remembers which port it ran on and takes it again next
+   launch, so a link to a chart or dashboard you opened in a browser tab still
+   works tomorrow — and the window stops forgetting anything it remembered,
+   since a new port meant a new origin and a fresh slate every time. If
+   something else has taken the port it quietly picks another, as before.
+
+ * Schedules now cope with a machine that is not always on. A reminder and a
+   daily digest want opposite things when the laptop was shut, so each schedule
+   says which it is: a missed reminder still arrives, late, and a missed digest
+   is skipped rather than posted at teatime as though it were morning. Anything
+   that does fire late says how late it is, so the assistant can open with
+   "this is yesterday's" instead of pretending. Being away for a week produces
+   one catch-up and one note saying how many occurrences went by — not seven
+   runs, and not silence.
+
+ * Fixed: whether a late schedule fired at all depended on how the service came
+   to notice it. Restarting the machine marked yesterday's briefing missed;
+   suspending and resuming fired the same briefing hours later as though
+   nothing had happened. Both take the same route now.
+
+ * Fixed: a daily schedule drifted by an hour when the clocks changed, and
+   stayed there. "Every day at 08:00" became 08:00 for good on one side of a
+   daylight-saving change and 09:00 for good on the other; it now keeps the
+   time you asked for, on either side.
+
+ * Tell the assistant what an endpoint charges and it can now write it down:
+   "the Anthropic endpoint is $3 in and $15 out per million" brings up a small
+   form with whatever is already configured filled in, you type the figures,
+   and the cost estimates beside your conversations start working. Setting a
+   price used to mean hand-editing `config/models.yaml`, so on most installs
+   the cost ledger was simply empty. The form says the one thing that matters
+   about a price change — it applies from now on, and past runs keep what they
+   ran at — and offers a way back to no price at all, which is not the same as
+   a price of zero: a local box says `local`, never `0.00`.
+
+ * A new **Activity** panel shows what the assistant is working on. Anything
+   that arrives — a page captured from the browser extension, a scheduled job,
+   a webhook — appears there the moment it lands and moves through queued,
+   running and done while you watch, without a refresh and from whatever
+   conversation you happen to be reading. Something retrying says when it will
+   try again; something that gave up stays on the list and says why, instead of
+   disappearing into a silence you have to go looking for. An approval waiting
+   on you shows there too, so one raised while you were elsewhere is not
+   something you have to remember. It is a live window on what is outstanding,
+   not a log browser, and the contents of what arrived are never shown there —
+   only what the assistant itself wrote about it.
+
+ * Fixed: on a phone, the box you type in could end up behind the on-screen
+   keyboard. The page was still being laid out against the full height of the
+   screen, keyboard or no keyboard, so the composer — the last thing in the
+   column — went under it, sporadically enough to depend on the browser, the
+   orientation, and whether the address bar had already slid away. Both halves
+   are handled now: Chrome and the Android browsers are told to shrink the page
+   for the keyboard, and Safari, which has no such setting, gets the visible
+   height measured and handed to the layout. The home-indicator allowance no
+   longer stacks on top of a keyboard that already covers the indicator, the
+   transcript still scrolls to its real bottom once the keyboard is up, and a
+   grown composer stays inside the space that is actually left.
+
+ * Fixed: the token counter over-reported, and the longer you talked the worse
+   it got. The figure beside the context bar is meant to be the largest single
+   prompt of the run — what has to fit at once — and it was adding the run's
+   own output on top, which every turn after the first already contains. On a
+   long tool-using run that nearly doubled it: 19,325 tokens shown as 38,105
+   against a 98k window, which is the difference between a quarter full and
+   half full. The live figure was wrong the other way on a thinking model,
+   because it counted only the words you can see stream and reasoning is about
+   two thirds of what gets billed — so it crept up and then jumped. Both now
+   count what they say they count. Work done, and what it cost, are unchanged
+   and still beside it.
+
+ * Fixed: tokens spent by a run that crashed or was interrupted by a restart
+   vanished from the conversation total. They were always in the trace; the run
+   itself recorded them only when it finished cleanly.
+
+ * Approval requests are written in words now. Being asked to allow something
+   used to mean reading the call as it goes over the wire —
+   `{"path":"notes/2026/august.md","recursive":false}` — at the one moment the
+   assistant most needs to be understood. It is a sentence instead: who is
+   asking and what they want to do, then a line per detail. Files appear as the
+   path you recognise, lists as a count and a few, an attached document as its
+   size rather than its text, and a stored credential as "a stored secret" —
+   never the reference, and never on the notification either. The dialog also
+   says when it expires, because an unanswered approval quietly becomes a No
+   after an hour and nothing on screen used to admit that. Every word of it is
+   written by the service, never by the assistant asking for permission.
+
+ * Fixed: on a long think, the start of the assistant's reasoning vanished
+   while you were reading it. The block kept only the last few thousand
+   characters, so a model reasoning for a minute wrote its own opening out of
+   existence. The whole chain is kept now, in a box that scrolls rather than
+   growing until it owns the transcript — scroll back through it mid-run and
+   the transcript stays where you left it. Reasoning is still never saved:
+   reload and it is gone, as before.
+
  * Fixed: the browser extension could never pair on Firefox. **Connect this
    browser** said it could not reach the gateway and asked whether the service
    was running, about a service that was running and answering — it had asked
@@ -51,6 +146,13 @@
    than a zip Firefox will only hold onto until you restart it — signed for
    self-distribution, so it is not listed on addons.mozilla.org and updates
    come from here.
+
+ * The assistant no longer files away facts about its own setup — which
+   endpoints it has, what they can do, which integrations are switched on. It
+   looks those up when it needs them, so a note written weeks ago cannot
+   outlive the thing it described. This is why an assistant that had just been
+   given a vision model could still insist it had none, about a picture you
+   had handed it.
 
  * Fixed: the built service (`npm run build` + `npm start`, and the systemd
    unit over it) served no interface — the chat page, setup page, styles and

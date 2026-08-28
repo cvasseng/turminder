@@ -181,6 +181,72 @@ describe('llama.cpp cache visibility (§21.1)', () => {
     expect(last.promptEvaluated).toBe(1100);
     expect(last.billedWithTimings).toBe(2100);
   });
+
+  it('keeps the headline at the peak across five turns, however the sum grows', async () => {
+    // The fixture is arithmetic you can do by hand, which is the point: the
+    // strip was adding cumulative output to the peak, and on a long run that
+    // reported nearly double the tokens that ever had to fit at once.
+    h = await bootService({ onboarded: true, watchFiles: false });
+    const prompts = [1000, 2000, 3000, 5000, 4000];
+    let turn = 0;
+    h.fake.always(() => {
+      const prompt = prompts[Math.min(turn, prompts.length - 1)]!;
+      turn += 1;
+      const usage = { prompt, completion: 100 };
+      return turn < prompts.length
+        ? { toolCalls: [{ name: 'time.now', args: {} }], usage }
+        : { text: 'Friday.', usage };
+    });
+
+    const usage: any[] = [];
+    const stop = h.service.stream.subscribe({ usage: (e) => usage.push(e) });
+    h.service.chat.send({ text: 'what day is it?' });
+    await drain(h);
+    stop();
+
+    const last = usage.at(-1)!;
+    expect(last.turns).toBe(5);
+    // Pressure is the largest single prompt — 5000, not the last one and not
+    // the total. Billing is every prompt counted once per turn, plus output.
+    expect(last.contextUsed).toBe(5000);
+    expect(last.tokensIn).toBe(15000);
+    expect(last.tokensOut).toBe(500);
+    // The two are different questions, and the gap is the whole reason §21.1
+    // insists on the distinction: three times the window, on one ordinary run.
+    expect(last.tokensIn / last.contextUsed).toBe(3);
+  });
+
+  it('counts cache stats only over the turns that reported timings', async () => {
+    // A run that crosses endpoints — or one llama.cpp turn among several from
+    // a provider that sends no `timings` — must not have its cache figure
+    // computed against prompts nobody measured.
+    h = await bootService({ onboarded: true, watchFiles: false });
+    let turn = 0;
+    h.fake.always(() => {
+      turn += 1;
+      if (turn === 1)
+        return {
+          toolCalls: [{ name: 'time.now', args: {} }],
+          usage: { prompt: 1000, completion: 10 },
+          promptEvaluated: 400,
+        };
+      // No `timings`: an ordinary OpenAI-compatible endpoint (§21.1).
+      return { text: 'Friday.', usage: { prompt: 1200, completion: 5 } };
+    });
+
+    const usage: any[] = [];
+    const stop = h.service.stream.subscribe({ usage: (e) => usage.push(e) });
+    h.service.chat.send({ text: 'what day is it?' });
+    await drain(h);
+    stop();
+
+    const last = usage.at(-1)!;
+    expect(last.tokensIn).toBe(2200);
+    // Only the first turn's 1000 prompt tokens were ever measured, so only
+    // those are the denominator: 60% cached, not 82% of a number nobody knows.
+    expect(last.promptEvaluated).toBe(400);
+    expect(last.billedWithTimings).toBe(1000);
+  });
 });
 
 /* ── §21.2 tool paging ────────────────────────────────────────────────────── */
@@ -202,7 +268,7 @@ describe('tool paging (§21.2)', () => {
 
     const prompt = system(h);
     expect(prompt).toMatch(/^- config: 2 tools — .+ \(closed; open with tools\.open\)$/m);
-    expect(prompt).toContain('- setup: 9 tools —');
+    expect(prompt).toContain('- setup: 10 tools —');
     // A description from the integration manifest, not a list of tool names.
     expect(prompt).toContain('Reading and writing the assistant’s own configuration.');
   });
@@ -844,7 +910,11 @@ describe('prompt and schema economics (§21.3, §21.4)', () => {
       // not prose creep, which is what this ceiling exists to stop.
       'setup.form': 1150,
       'setup.request_access': 700,
-      'schedule.create': 780,
+      // Raised 780 → 860 when `on_miss` landed (§6.1, App. F.2): an enum of
+      // two values and eight words saying what they default to, for a machine
+      // that is not always on. Capability, not prose — the *why* of each value
+      // is in the skill, which is the split this ceiling exists to enforce.
+      'schedule.create': 860,
       'deliver.notify': 800,
       'config.write': 600,
     };

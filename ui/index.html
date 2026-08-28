@@ -2,7 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- `interactive-widget=resizes-content` is the whole fix on Chrome and
+         Android: without it the default `resizes-visual` leaves the layout
+         viewport at full height when the on-screen keyboard opens, so `dvh`
+         still means the un-shrunk viewport and the composer — the last thing
+         in a full-height column — sits behind the keyboard. Safari implements
+         neither this nor a `dvh` that moves; app.js measures for it (§9.1). -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, interactive-widget=resizes-content"
+    />
     <title>Turminder</title>
     <link rel="stylesheet" href="/style.css" />
   </head>
@@ -193,6 +202,14 @@
           aria-pressed="false"
         ></button>
         <button
+          id="activity-toggle"
+          class="icon"
+          data-icon="activity"
+          title="What the assistant is working on"
+          aria-label="What the assistant is working on"
+          aria-pressed="false"
+        ></button>
+        <button
           id="devices-toggle"
           class="icon"
           data-icon="key"
@@ -330,6 +347,30 @@
         ></button>
       </header>
       <div id="embed-list"></div>
+    </section>
+    <!-- A read surface over the event lifecycle (§4.2.1): what the system still
+         owes you an outcome for, and what owes it a click. No payloads reach
+         here — a row is what the server wrote about an event, never the event.
+         A live window, deliberately not a log browser. -->
+    <section id="activity">
+      <header>
+        <h2>Activity</h2>
+        <button
+          id="activity-refresh"
+          class="icon"
+          data-icon="refresh"
+          title="Reload the list"
+          aria-label="Reload the list"
+        ></button>
+        <button
+          id="activity-close"
+          class="icon"
+          data-icon="x"
+          title="Hide the activity panel"
+          aria-label="Hide the activity panel"
+        ></button>
+      </header>
+      <div id="activity-list"></div>
     </section>
     <script src="/vendor/marked.umd.js"></script>
     <script src="/connect.js"></script>

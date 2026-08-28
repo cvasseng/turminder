@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DB_VERSION, dbVersion, migrate, openDb, setMeta } from '../src/db/index.js';
+import { createRepos } from '../src/db/repos/index.js';
 import { UserFacingError } from '../src/core/errors.js';
 import { tmpDir } from './helpers.js';
 
@@ -50,11 +51,13 @@ describe('database bootstrap', () => {
   it('adds open_namespaces to a database that already has conversations', () => {
     // Build the v2 shape by hand — a real installed database, mid-upgrade.
     const db = openDb(dbFile());
-    // A real v2 database has none of the later tables either.
+    // A real v2 database has none of the later tables either — and none of the
+    // later columns on the tables it does have.
     db.exec(
       `DROP TABLE watchers; DROP TABLE turns; DROP TABLE conversations; ` +
         `DROP TABLE embeds; DROP TABLE uploads`,
     );
+    db.exec(`ALTER TABLE schedules DROP COLUMN on_miss`);
     db.exec(`CREATE TABLE conversations (
       id TEXT PRIMARY KEY, title TEXT, mode TEXT NOT NULL DEFAULT 'normal',
       status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL,
@@ -83,6 +86,7 @@ describe('database bootstrap', () => {
     db.exec(`ALTER TABLE conversations DROP COLUMN model_override`);
     db.exec(`ALTER TABLE conversations DROP COLUMN effort_override`);
     db.exec(`ALTER TABLE conversations DROP COLUMN loaded_projects`);
+    db.exec(`ALTER TABLE schedules DROP COLUMN on_miss`);
     db.exec(`CREATE TABLE embeds (
       id TEXT PRIMARY KEY, title TEXT NOT NULL,
       kind TEXT NOT NULL DEFAULT 'ephemeral',
@@ -126,6 +130,54 @@ describe('database bootstrap', () => {
     );
     insert.run('01AAA', 'received');
     expect(() => insert.run('01BBB', 'nonsense')).toThrow();
+    db.close();
+  });
+
+  it('keeps what a run spent when it ends without carrying the totals', () => {
+    // §21.1's conversation figure sums `runs`, and only the success path was
+    // passing totals to `finish`. An exception out of the agent loop therefore
+    // zeroed tokens that had been spent and traced — measured on the live
+    // install as 28 failed runs and 522k input tokens gone missing.
+    const db = openDb(dbFile());
+    const repos = createRepos(db);
+    const runId = repos.runs.create({ kind: 'chat' });
+    const trace = repos.trace.sink({ runId });
+    trace.append('llm_call', { model: 'main', tokens_in: 900, tokens_out: 40 });
+    trace.append('llm_call', { model: 'main', tokens_in: 1100, tokens_out: 60 });
+
+    repos.runs.finish(runId, { status: 'failed', error: 'boom' });
+
+    const row = repos.runs.get(runId)!;
+    expect(row.status).toBe('failed');
+    expect(row.tokens_in).toBe(2000);
+    expect(row.tokens_out).toBe(100);
+    db.close();
+  });
+
+  it('prefers the totals a caller does supply, including a real zero', () => {
+    const db = openDb(dbFile());
+    const repos = createRepos(db);
+    const runId = repos.runs.create({ kind: 'chat' });
+    repos.trace.sink({ runId }).append('llm_call', { tokens_in: 900, tokens_out: 40 });
+
+    // The agent loop's own count wins: it knows about turns the trace does
+    // not, and a caller passing 0 means 0 rather than "work it out".
+    repos.runs.finish(runId, { status: 'done', turns: 1, tokensIn: 0, tokensOut: 0 });
+    expect(repos.runs.get(runId)!.tokens_in).toBe(0);
+    db.close();
+  });
+
+  it('gives an orphaned run its spending back on restart', () => {
+    const db = openDb(dbFile());
+    const repos = createRepos(db);
+    const runId = repos.runs.create({ kind: 'chat' });
+    repos.trace.sink({ runId }).append('llm_call', { tokens_in: 700, tokens_out: 25 });
+
+    expect(repos.runs.failOrphaned()).toBe(1);
+    const row = repos.runs.get(runId)!;
+    expect(row.status).toBe('failed');
+    expect(row.tokens_in).toBe(700);
+    expect(row.tokens_out).toBe(25);
     db.close();
   });
 

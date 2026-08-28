@@ -54,6 +54,30 @@ export class EventsRepo {
   constructor(private readonly db: Db) {}
 
   /**
+   * Told about every arrival and every status change, for the read surface
+   * over the lifecycle (§4.2.1). One door on purpose: the transitions are
+   * written from three places today — intake's `rejected`, the pipeline's
+   * `matched`/`processing`, the queue's `done`/`failed`/`dead_letter` — and a
+   * panel that shows some of them is worse than none. Set by the service; the
+   * repo knows only that it is a function.
+   */
+  private observer: ((event: EventRecord) => void) | null = null;
+
+  observe(fn: (event: EventRecord) => void): void {
+    this.observer = fn;
+  }
+
+  /** Never let a watcher's failure become the writer's problem. */
+  private announce(event: EventRecord | null): void {
+    if (!this.observer || !event) return;
+    try {
+      this.observer(event);
+    } catch {
+      // A display surface is not worth failing an event over.
+    }
+  }
+
+  /**
    * Insert an event. Duplicate (source, idempotency_key) is not an error: the
    * existing event is returned and the caller is told it was a duplicate (§4.1).
    */
@@ -98,7 +122,9 @@ export class EventsRepo {
       }
       throw e;
     }
-    return { event: toRecord(row), duplicate: false };
+    const event = toRecord(row);
+    this.announce(event);
+    return { event, duplicate: false };
   }
 
   get(id: string): EventRecord | null {
@@ -134,6 +160,10 @@ export class EventsRepo {
       next_attempt_at: extra.next_attempt_at ?? null,
       last_error: extra.last_error ?? null,
     });
+    // Re-read rather than reconstruct: `extra` carries only the fields this
+    // caller changed, and a row assembled from a partial update is a row that
+    // reports stale attempt counts to the panel.
+    if (this.observer) this.announce(this.get(id));
   }
 
   setSummary(id: string, summary: string): void {
@@ -217,6 +247,29 @@ export class EventsRepo {
           ORDER BY id DESC LIMIT ?`,
       )
       .all(...args, opts.limit ?? 20) as EventRow[];
+    return rows.map(toRecord);
+  }
+
+  /**
+   * The activity panel's read (§4.2.1): what the system still owes an outcome
+   * for. `pending` is everything unsettled, dead letters included — both are
+   * outcomes still owed, and a dead letter is exactly the row that must not
+   * quietly vanish. `all` widens to recently settled ones, which is a live
+   * window and deliberately not a log browser.
+   */
+  unsettled(
+    opts: { scope?: 'pending' | 'dead_letter' | 'all'; limit?: number } = {},
+  ): EventRecord[] {
+    const scope = opts.scope ?? 'pending';
+    const where =
+      scope === 'dead_letter'
+        ? `status = 'dead_letter'`
+        : scope === 'all'
+          ? `1 = 1`
+          : `status IN ('received','matched','processing','failed','dead_letter')`;
+    const rows = this.db
+      .prepare(`SELECT * FROM events WHERE ${where} ORDER BY id DESC LIMIT ?`)
+      .all(opts.limit ?? 50) as EventRow[];
     return rows.map(toRecord);
   }
 

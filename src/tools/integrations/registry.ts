@@ -129,6 +129,7 @@ export const MANIFESTS: IntegrationManifest[] = [
       'setup.token_create',
       'setup.pair_approve',
       'setup.rename',
+      'setup.pricing',
     ],
   ),
   {

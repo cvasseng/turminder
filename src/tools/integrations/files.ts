@@ -164,6 +164,22 @@ export function filesTools(deps: FilesDeps): ToolDefinition[] {
         "Delete a file from the shared workspace. Git makes it recoverable, but it is still the user's file — say what you are deleting and why in the message.",
       tier: 'se',
       args: z.object({ path: pathArg, message: messageArg }),
+      /**
+       * The one tool gated by default whose generic rendering reads wrong
+       * (§7.3): `message` is the commit message, and a dialog that labels it
+       * "Message" invites the reader to think somebody is writing to *them*.
+       * Naming it what it is — the reason, which git keeps — is the difference
+       * between a line that explains the deletion and a line that confuses it.
+       */
+      confirmSummary(args: { path: string; message: string }) {
+        return {
+          action: 'delete a file',
+          lines: [
+            { label: 'File', value: args.path },
+            { label: 'Reason (kept in the file history)', value: args.message },
+          ],
+        };
+      },
       async execute(args: { path: string; message: string }) {
         try {
           return store.delete(args.path, args.message);
