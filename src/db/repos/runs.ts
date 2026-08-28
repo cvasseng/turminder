@@ -55,10 +55,24 @@ export class RunsRepo {
     return id;
   }
 
+  /**
+   * What a run spent, summed off its own trace rows. The fallback for every
+   * path that ends a run without carrying the totals in hand — an exception
+   * out of the agent loop, a restart orphaning a run mid-turn. Those tokens
+   * were spent and traced; leaving the row at zero makes them disappear from
+   * `tokensForConversation`, which is the strip's conversation figure.
+   * Measured on the live install: 28 failed runs, 522k input tokens missing.
+   */
+  private static readonly TRACED = (col: 'tokens_in' | 'tokens_out'): string =>
+    `(SELECT COALESCE(SUM(json_extract(t.data, '$.${col}')), 0)
+        FROM trace t WHERE t.run_id = runs.id AND t.kind = 'llm_call')`;
+
   finish(id: string, f: FinishRun): void {
     this.db
       .prepare(
-        `UPDATE runs SET status = ?, finished_at = ?, turns = ?, tokens_in = ?, tokens_out = ?,
+        `UPDATE runs SET status = ?, finished_at = ?, turns = ?,
+           tokens_in = COALESCE(?, ${RunsRepo.TRACED('tokens_in')}),
+           tokens_out = COALESCE(?, ${RunsRepo.TRACED('tokens_out')}),
            model = COALESCE(?, model), error = ?
          WHERE id = ?`,
       )
@@ -66,8 +80,8 @@ export class RunsRepo {
         f.status,
         nowIso(),
         f.turns ?? 0,
-        f.tokensIn ?? 0,
-        f.tokensOut ?? 0,
+        f.tokensIn ?? null,
+        f.tokensOut ?? null,
         f.model ?? null,
         f.error ?? null,
         id,
@@ -111,11 +125,17 @@ export class RunsRepo {
     return rows.map((r) => r.id);
   }
 
-  /** Runs still marked running after a restart are orphans; fail them honestly. */
+  /**
+   * Runs still marked running after a restart are orphans; fail them honestly —
+   * and honestly includes what they spent before the lights went out, which
+   * only the trace still knows.
+   */
   failOrphaned(reason = 'interrupted by restart'): number {
     return this.db
       .prepare(
-        `UPDATE runs SET status = 'failed', finished_at = ?, error = COALESCE(error, ?)
+        `UPDATE runs SET status = 'failed', finished_at = ?, error = COALESCE(error, ?),
+           tokens_in = ${RunsRepo.TRACED('tokens_in')},
+           tokens_out = ${RunsRepo.TRACED('tokens_out')}
          WHERE status = 'running'`,
       )
       .run(nowIso(), reason).changes;

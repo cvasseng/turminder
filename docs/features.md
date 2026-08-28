@@ -32,12 +32,30 @@ Type `@turminder do X` in any file and the change becomes an event once the
 file has been quiet for 30 seconds. Images and PDFs preview in the side
 panel.
 
+## Activity
+
+A panel of everything in flight. Whatever arrives — a page captured from the
+browser, a scheduled job, a webhook — shows up the moment it lands and moves
+through queued, running and done while you watch, from whichever conversation
+you happen to be reading. Something retrying says when it will try again;
+something that gave up stays there and says why, rather than vanishing into a
+silence you have to go looking for. Approvals waiting on you appear there too.
+It shows what the assistant wrote about each arrival, never the contents of
+the arrival itself.
+
 ## Schedules
 
 Reminders and recurring work over RRULE, delivered as desktop notifications
 through a bundled or remote daemon. A delivery can carry approve/deny
 buttons for actions that need a human, and an unanswered confirmation counts
 as a deny after an hour.
+
+Because the machine is a laptop rather than a server, each schedule says what
+to do when it comes due while nothing is running: a missed reminder still
+arrives, late and saying how late, while a missed daily digest is skipped
+rather than posted in the afternoon as though it were morning. A week away
+produces one catch-up and one note saying how many occurrences went by. A daily
+time stays the time you asked for when the clocks change.
 
 ## Watchers
 
@@ -86,7 +104,9 @@ conversation gets the whole screen, and the panels slide over it on request.
 ## Desktop app
 
 The same UI in its own window, with a tray icon and reminders that arrive as
-native notifications while the window is closed. On first run it asks where
+native notifications while the window is closed. It keeps the port it ran on,
+so a chart you opened in a browser tab is still there tomorrow and the window
+remembers what you left it showing. On first run it asks where
 the assistant should run: on this computer, where the app carries its own
 Node runtime and supervises the service, or on a machine you already run it
 on, reached with a connect link. Its key lives in your keyring.

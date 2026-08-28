@@ -9,6 +9,7 @@ import { migration as m007 } from './007-watchers.js';
 import { migration as m008 } from './008-conversation-model-override.js';
 import { migration as m009 } from './009-conversation-effort-override.js';
 import { migration as m010 } from './010-conversation-loaded-projects.js';
+import { migration as m011 } from './011-schedule-on-miss.js';
 
 /** Numbered migrations, applied in order. Add new ones here; never edit old ones. */
 export const MIGRATIONS: Migration[] = [
@@ -22,6 +23,7 @@ export const MIGRATIONS: Migration[] = [
   m008,
   m009,
   m010,
+  m011,
 ];
 
 export const DB_VERSION = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

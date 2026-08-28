@@ -47,7 +47,7 @@ export interface ConnectorTemplate {
  * file through the normal loader would expand them and write the expansion
  * back — i.e. commit the credential. So the editing path never uses it.
  */
-function readRaw(file: string): Record<string, unknown> {
+export function readRaw(file: string): Record<string, unknown> {
   if (!fs.existsSync(file)) return {};
   const parsed = YAML.parse(fs.readFileSync(file, 'utf8')) as unknown;
   return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
@@ -55,13 +55,13 @@ function readRaw(file: string): Record<string, unknown> {
     : {};
 }
 
-function writeRaw(home: DataHome, rel: string, doc: unknown, message: string): boolean {
+export function writeRaw(home: DataHome, rel: string, doc: unknown, message: string): boolean {
   fs.writeFileSync(home.path(rel), YAML.stringify(doc), 'utf8');
   return home.git.commit(message, [rel]);
 }
 
 /** Replace the entry with this `name`, or append it. Order is otherwise kept. */
-function upsertByName<T extends { name: string }>(list: T[], entry: T): T[] {
+export function upsertByName<T extends { name: string }>(list: T[], entry: T): T[] {
   const i = list.findIndex((e) => e.name === entry.name);
   if (i < 0) return [...list, entry];
   const next = [...list];

@@ -1,5 +1,6 @@
 import { log } from '../core/logger.js';
 import type { Config } from '../core/config.js';
+import { describeConfirm } from './confirm-summary.js';
 import type { EventRecord } from '../db/repos/events.js';
 import type { ToolHandle } from '../tools/types.js';
 import type { DispatchCall } from '../model/dispatcher.js';
@@ -37,6 +38,18 @@ export class ConfirmBroker {
     return this.pending.size;
   }
 
+  /**
+   * Who is asking. A handler-gated call names the handler, because "the
+   * assistant wants to send email" is not what happened when `inbox-triage`
+   * asked for it — and the instance answers to its own name (§12.1), which is
+   * the name on every other thing it says.
+   */
+  private actor(handlerName?: string | null): string {
+    if (handlerName) return `Handler ${handlerName}`;
+    const name = this.config.identity()?.frontmatter.instance_name;
+    return name ?? 'The assistant';
+  }
+
   /** Ask the human. Resolves false on deny, and on timeout (App. A). */
   request(
     call: DispatchCall,
@@ -49,16 +62,19 @@ export class ConfirmBroker {
       return Promise.resolve(false);
     }
 
+    const described = describeConfirm(handle, call.args, {
+      actor: this.actor(ctx.handlerName),
+      dataDir: this.config.home.root,
+    });
     const delivery = this.outbox.queue({
       intent: 'confirm',
       payload: {
-        title: `Approve ${call.name}?`,
-        body:
-          `${ctx.handlerName ? `Handler ${ctx.handlerName}` : 'The assistant'} wants to call ` +
-          `${call.name}.\n\n${argsSummary(call.args)}`,
+        title: described.title,
+        body: described.text,
         run_id: runId,
         tool: call.name,
-        args_summary: argsSummary(call.args),
+        args_summary: described.text,
+        details: described.details,
         actions: [
           { id: 'approve', label: 'Approve' },
           { id: 'deny', label: 'Deny' },
@@ -126,10 +142,4 @@ export class ConfirmBroker {
     if (count) l.warn({ count, reason }, 'denied pending confirmations');
     return count;
   }
-}
-
-function argsSummary(args: unknown): string {
-  if (args === null || args === undefined) return '(no arguments)';
-  const text = typeof args === 'string' ? args : JSON.stringify(args);
-  return text.length > 400 ? `${text.slice(0, 400)}…` : text;
 }

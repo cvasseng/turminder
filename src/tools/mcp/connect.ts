@@ -6,7 +6,13 @@ import { globMatchAny } from '../../core/glob.js';
 import { errMessage } from '../../core/errors.js';
 import { log } from '../../core/logger.js';
 import type { McpYaml } from '../../core/config-schemas.js';
-import { META_KEY, type ToolContext, type ToolDefinition, type ToolHandle } from '../types.js';
+import {
+  META_KEY,
+  type ConfirmLines,
+  type ToolContext,
+  type ToolDefinition,
+  type ToolHandle,
+} from '../types.js';
 import { TOOL_CALL_TIMEOUT_MS } from '../timeouts.js';
 import { buildIntegrationServer } from './serve.js';
 
@@ -31,6 +37,15 @@ export class McpConnection {
      * ("an `{error}` counts, nothing else") is all they ever get.
      */
     private readonly emptiness: ReadonlyMap<string, (result: unknown) => boolean> = new Map(),
+    /**
+     * Per-tool confirmation wording (§7.3). Bundled integrations only, for the
+     * same reason as `emptiness`: an external server writes for a model, and
+     * text a human authorises from is not text a stranger supplies (§14.2).
+     */
+    private readonly summaries: ReadonlyMap<
+      string,
+      (args: unknown) => ConfirmLines
+    > = new Map(),
   ) {}
 
   /** A bundled integration over the in-memory transport (§11.1). */
@@ -52,7 +67,15 @@ export class McpConnection {
         .filter((d) => d.isEmpty)
         .map((d) => [d.name, d.isEmpty!.bind(d) as (r: unknown) => boolean] as const),
     );
-    return new McpConnection(name, client, [], 'se', budgets, bulkArgs, emptiness);
+    const summaries = new Map(
+      defs
+        .filter((d) => d.confirmSummary)
+        .map(
+          (d) =>
+            [d.name, d.confirmSummary!.bind(d) as (args: unknown) => ConfirmLines] as const,
+        ),
+    );
+    return new McpConnection(name, client, [], 'se', budgets, bulkArgs, emptiness, summaries);
   }
 
   /** An external MCP server from config/mcp.yaml (App. G.5). */
@@ -103,6 +126,7 @@ export class McpConnection {
         ...(this.budgets.has(t.name) ? { maxResultChars: this.budgets.get(t.name)! } : {}),
         ...(this.bulkArgs.has(t.name) ? { bulkArgs: this.bulkArgs.get(t.name)! } : {}),
         ...(this.emptiness.has(t.name) ? { isEmpty: this.emptiness.get(t.name)! } : {}),
+        ...(this.summaries.has(t.name) ? { confirmSummary: this.summaries.get(t.name)! } : {}),
         call: (args: unknown, ctx: ToolContext) => this.call(t.name, args, ctx),
       } satisfies ToolHandle;
     });

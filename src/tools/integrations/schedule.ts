@@ -33,6 +33,12 @@ export function scheduleTools(repos: Repos, defaultGraceS: number): ToolDefiniti
           .nonnegative()
           .optional()
           .describe('how late it may still fire'),
+        // The *why* of each value is a skill's job, not a per-request cost
+        // (§21.4). This says what the knob does and what it defaults to.
+        on_miss: z
+          .enum(['fire_late', 'skip'])
+          .optional()
+          .describe('past grace; default fire_late one-shot, skip repeats'),
       }),
       async execute(
         args: {
@@ -41,6 +47,7 @@ export function scheduleTools(repos: Repos, defaultGraceS: number): ToolDefiniti
           rrule?: string;
           data?: Record<string, unknown>;
           grace_s?: number;
+          on_miss?: 'fire_late' | 'skip';
         },
         ctx: ToolContext,
       ) {
@@ -61,13 +68,24 @@ export function scheduleTools(repos: Repos, defaultGraceS: number): ToolDefiniti
           graceS: args.grace_s ?? defaultGraceS,
           eventPayload: args.data ?? {},
           createdByRun: ctx.runId,
+          ...(args.on_miss ? { onMiss: args.on_miss } : {}),
         });
-        return { schedule_id: row.id, fire_at: row.fire_at, rrule: row.rrule };
+        // `on_miss` comes back whether or not it was asked for: "what happens
+        // if I close the lid" should be answerable from the reply (§6.1).
+        return {
+          schedule_id: row.id,
+          fire_at: row.fire_at,
+          rrule: row.rrule,
+          grace_s: row.grace_s,
+          on_miss: row.on_miss,
+        };
       },
     },
     {
       name: 'schedule.list',
-      description: 'List schedules you have created.',
+      description:
+        'List schedules you have created, with when each next fires and what happens if ' +
+        'the machine is off when it does.',
       tier: 'ro',
       args: z.object({ include_done: z.boolean().optional() }),
       async execute(args: { include_done?: boolean }) {
@@ -80,6 +98,9 @@ export function scheduleTools(repos: Repos, defaultGraceS: number): ToolDefiniti
               rrule: s.rrule,
               note: s.note,
               status: s.status,
+              grace_s: s.grace_s,
+              on_miss: s.on_miss,
+              last_fired_at: s.last_fired_at,
             })),
         };
       },

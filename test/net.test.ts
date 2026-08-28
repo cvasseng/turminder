@@ -757,6 +757,182 @@ describe('websocket protocol (App. D)', () => {
   });
 });
 
+/**
+ * The activity panel's two frames (§4.2.1, App. D). The panel is a read
+ * surface: nothing about the event loop changes because somebody is watching,
+ * and the one rule with teeth is that an event *payload* never crosses.
+ */
+describe('the read surface over the lifecycle (§4.2.1)', () => {
+  it('lists what is still owed an outcome, and never a payload', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat']);
+
+    // Inserted rather than submitted: the ingress loop is running, and a test
+    // about what a row *looks like* should not race it to a status.
+    const { event } = h.service.repos.events.insert({
+      type: 'webhook.secret',
+      source: 'http',
+      payload: { card_number: 'sentinel-4111-1111', note: 'do not show me' },
+      status: 'processing',
+    });
+    h.service.repos.events.setSummary(event.id, 'a webhook arrived');
+
+    client.send('event.list', {});
+    const result = (await client.next('event.list.result')).payload;
+    const row = result.events.find((e: { id: string }) => e.id === event.id);
+    expect(row).toMatchObject({
+      id: event.id,
+      type: 'webhook.secret',
+      source: 'http',
+      summary: 'a webhook arrived',
+      status: 'processing',
+      attempts: 0,
+    });
+    // The negative that matters: an event payload is untrusted content
+    // (§1.1, H.2) and has no business on a screen.
+    expect(Object.keys(row)).not.toContain('payload');
+    expect(JSON.stringify(result)).not.toContain('sentinel-4111-1111');
+    expect(JSON.stringify(result)).not.toContain('do not show me');
+    client.close();
+  });
+
+  it('filters to the bucket that does not clear itself', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat']);
+
+    const events = h.service.repos.events;
+    const alive = events.insert({
+      type: 'a.b',
+      source: 'http',
+      payload: {},
+      status: 'processing',
+    }).event;
+    const dead = events.insert({ type: 'c.d', source: 'http', payload: {} }).event;
+    events.setStatus(dead.id, 'dead_letter', { last_error: 'the handler threw' });
+
+    client.send('event.list', { status: 'dead_letter' });
+    const only = (await client.next('event.list.result')).payload.events;
+    expect(only.map((e: { id: string }) => e.id)).toEqual([dead.id]);
+    expect(only[0].last_error).toBe('the handler threw');
+
+    // …and the default carries both: a dead letter is an outcome still owed.
+    client.send('event.list', {});
+    const pending = (await client.next('event.list.result')).payload.events;
+    expect(pending.map((e: { id: string }) => e.id)).toEqual(
+      expect.arrayContaining([alive.id, dead.id]),
+    );
+    client.close();
+  });
+
+  it('refuses a device that does not render chat', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['notify.actions']);
+    client.send('event.list', {});
+    expect((await client.next('error')).payload.code).toBe('bad_frame');
+    client.close();
+  });
+
+  it('pushes every transition the lifecycle defines, dead letters included', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat']);
+
+    // Arrival is a transition too: a row that first appears once it is already
+    // running cannot show you a queue.
+    const events = h.service.repos.events;
+    const { event } = events.insert({ type: 'panel.probe', source: 'http', payload: {} });
+    const arrival = await client.until('event.status', (p) => p.id === event.id);
+    expect(arrival.status).toBe('received');
+
+    for (const [status, extra] of [
+      ['matched', {}],
+      ['processing', {}],
+      ['failed', { attempts: 1, next_attempt_at: '2099-01-01T00:00:00.000Z' }],
+      ['dead_letter', { last_error: 'gave up' }],
+    ] as const) {
+      events.setStatus(event.id, status, extra);
+      const push = await client.until('event.status', (p) => p.status === status);
+      expect(push.id).toBe(event.id);
+    }
+    client.close();
+  });
+
+  it('walks a real event from arrival to done, live', async () => {
+    // The acceptance test from the todo, minus the browser: something arrives,
+    // a handler picks it up, and the panel sees each move as it happens rather
+    // than learning about it on the next refresh.
+    h = await bootService({ onboarded: true, watchFiles: false });
+    fs.writeFileSync(
+      path.join(h.dataDir, 'handlers', 'reader.md'),
+      '---\nname: reader\ndescription: Use for captured pages.\n---\n\nRead it.\n',
+    );
+    h.fake.always((req) =>
+      req.body.response_format
+        ? {
+            text: JSON.stringify({
+              summary: 'a page was captured',
+              verdicts: [{ handler: 'reader', matched: true, reason: 'a page' }],
+            }),
+          }
+        : { text: 'Read it.' },
+    );
+
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat']);
+    const submitted = h.service.intake.submit({
+      type: 'page.captured',
+      source: 'extension',
+      payload: { url: 'https://example.test/a' },
+    });
+
+    const seen: string[] = [];
+    for (const want of ['received', 'processing', 'done']) {
+      const push = await client.until(
+        'event.status',
+        (payload) => payload.id === submitted.event.id && payload.status === want,
+        15000,
+      );
+      seen.push(String(push.status));
+      // The summary the ingress wrote reaches the panel; the payload does not.
+      expect(JSON.stringify(push)).not.toContain('example.test');
+    }
+    expect(seen).toEqual(['received', 'processing', 'done']);
+    client.close();
+  });
+
+  it('shows an approval raised while you were reading something else', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat']);
+
+    h.service.outbox.queue({
+      intent: 'confirm',
+      payload: {
+        title: 'Sleeper Service wants to delete a file',
+        body: 'File: notes/a.md',
+        actions: [
+          { id: 'approve', label: 'Approve' },
+          { id: 'deny', label: 'Deny' },
+        ],
+      },
+    });
+    // A notification with nothing to press is something you read and move past.
+    h.service.outbox.queue({ intent: 'notify', payload: { title: 'FYI', body: 'hello' } });
+
+    client.send('event.list', {});
+    const deliveries = (await client.next('event.list.result')).payload.deliveries;
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]).toMatchObject({
+      intent: 'confirm',
+      title: 'Sleeper Service wants to delete a file',
+    });
+    client.close();
+  });
+});
+
 describe('protocol version skew (App. D)', () => {
   it('advertises the frames it handles in welcome', async () => {
     h = await bootService({ onboarded: true });

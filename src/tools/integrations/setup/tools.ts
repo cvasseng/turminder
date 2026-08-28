@@ -35,11 +35,35 @@ import {
   TEMPLATES,
   TEMPLATE_NAMES,
   effectFailure,
+  readRaw,
+  upsertByName,
+  writeRaw,
   type TemplateContext,
   type TemplateName,
 } from './templates.js';
 
 const l = log('tool:setup');
+
+/**
+ * The two answers to "does this endpoint charge". A mistyped price must be
+ * reversible, and §10.5's distinction between *free* and *unpriced* has to be
+ * reachable from the surface that created it — otherwise the first number
+ * anyone types is permanent.
+ */
+const PRICED_YES = 'yes, it charges';
+const PRICED_NO = 'no — local or free';
+
+/** G.2's cost block, validated where a human's typing enters (§10.5). */
+const PriceSchema = z.strictObject({
+  in_per_mtok: z.number().nonnegative().finite(),
+  out_per_mtok: z.number().nonnegative().finite(),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+});
+
+interface PricedEndpoint {
+  name: string;
+  cost?: { in_per_mtok: number; out_per_mtok: number; currency: string };
+}
 
 export interface SetupDeps extends TemplateContext, ActivationContext {
   forms: FormBroker;
@@ -571,6 +595,161 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
         // the model asked, the user clicked, the code rebuilds.
         const stats = await deps.rebuildIndexes();
         return { submitted: true, rebuilt: true, indexes: stats };
+      },
+    },
+    {
+      name: 'setup.pricing',
+      description:
+        'Set or clear what an endpoint charges, so cost estimates and the usage summary ' +
+        'have numbers to work from. Opens a form with the current prices filled in — the ' +
+        'user types the figures, not you. Use when asked what something costs, or told a ' +
+        'price. Prices apply to calls made from now on; past runs keep what they ran at.',
+      tier: 'se',
+      args: z.strictObject({
+        endpoint: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Which endpoint to price. Omit it and the form offers the choice.'),
+      }),
+      async execute(args: { endpoint?: string }, ctx: ToolContext) {
+        if (!ctx.conversationId) {
+          return {
+            error: 'no_conversation',
+            message: 'the pricing form renders in a chat conversation; this run has none',
+          };
+        }
+        if (!ctx.runId) return { error: 'no_run', message: 'no run to suspend' };
+
+        const file = deps.home.path('config', 'models.yaml');
+        const doc = readRaw(file);
+        const endpoints = Array.isArray(doc.endpoints)
+          ? (doc.endpoints as PricedEndpoint[])
+          : [];
+        if (!endpoints.length) {
+          return {
+            error: 'no_endpoints',
+            message: 'config/models.yaml has no endpoints to price yet',
+          };
+        }
+        const names = endpoints.map((e) => e.name);
+        if (args.endpoint && !names.includes(args.endpoint)) {
+          // Named and wrong is a different answer from not named: say which
+          // exist rather than opening a form about the wrong thing.
+          return {
+            error: 'unknown_endpoint',
+            message: `no endpoint named "${args.endpoint}"; configured: ${names.join(', ')}`,
+          };
+        }
+        const chosen = args.endpoint ?? (names.length === 1 ? names[0]! : null);
+        const current = endpoints.find((e) => e.name === chosen)?.cost;
+
+        const outcome = await deps.forms.request({
+          runId: ctx.runId,
+          conversationId: ctx.conversationId,
+          // The consequence belongs where the decision is made (§10.5): cost is
+          // stamped at call time, so this prices the future and nothing else.
+          title:
+            'What does this endpoint charge? Prices are per million tokens and apply ' +
+            'to calls made from now on — past runs keep what they ran at.',
+          fields: [
+            ...(chosen
+              ? []
+              : [
+                  {
+                    name: 'endpoint',
+                    label: 'Endpoint',
+                    type: 'select' as const,
+                    options: names,
+                    value: names[0]!,
+                  },
+                ]),
+            {
+              name: 'priced',
+              label: 'Does this endpoint charge?',
+              type: 'select',
+              options: [PRICED_YES, PRICED_NO],
+              value: current ? PRICED_YES : PRICED_NO,
+            },
+            {
+              name: 'in_per_mtok',
+              label: 'Input, per million tokens',
+              type: 'number',
+              required: false,
+              ...(current ? { value: String(current.in_per_mtok) } : {}),
+            },
+            {
+              name: 'out_per_mtok',
+              label: 'Output, per million tokens',
+              type: 'number',
+              required: false,
+              ...(current ? { value: String(current.out_per_mtok) } : {}),
+            },
+            {
+              name: 'currency',
+              label: 'Currency, three letters',
+              type: 'text',
+              required: false,
+              value: current?.currency ?? 'USD',
+            },
+          ],
+        });
+
+        if (!outcome.submitted) return { submitted: false, reason: outcome.reason };
+        const name = chosen ?? String(outcome.values.endpoint ?? '');
+        const target = endpoints.find((e) => e.name === name);
+        if (!target) {
+          return {
+            error: 'unknown_endpoint',
+            message: `no endpoint named "${name}"; configured: ${names.join(', ')}`,
+          };
+        }
+
+        // Deterministic effect after the human typed the numbers (§19.3): the
+        // model asked, the user answered, this code writes G.2.
+        const priced = outcome.values.priced !== PRICED_NO;
+        let cost: PricedEndpoint['cost'];
+        if (priced) {
+          const parsed = PriceSchema.safeParse({
+            in_per_mtok: Number(outcome.values.in_per_mtok),
+            out_per_mtok: Number(outcome.values.out_per_mtok),
+            currency: String(outcome.values.currency ?? '').toUpperCase(),
+          });
+          if (!parsed.success) {
+            return {
+              submitted: true,
+              priced: false,
+              error: 'bad_price',
+              message:
+                'prices must be numbers of zero or more and the currency three letters, ' +
+                'e.g. 3 in, 15 out, USD',
+            };
+          }
+          cost = parsed.data;
+        }
+
+        const next = { ...target, ...(cost ? { cost } : {}) };
+        if (!cost) delete (next as { cost?: unknown }).cost;
+        const committed = writeRaw(
+          deps.home,
+          'config/models.yaml',
+          { ...doc, endpoints: upsertByName(endpoints, next) },
+          cost
+            ? `setup: price ${name} at ${cost.in_per_mtok}/${cost.out_per_mtok} ${cost.currency} per Mtok`
+            : `setup: clear pricing for ${name}`,
+        );
+        const loaded = deps.reloadModels();
+        l.info({ endpoint: name, priced: Boolean(cost), loaded }, 'endpoint pricing written');
+        return {
+          submitted: true,
+          endpoint: name,
+          ...(cost ? { cost } : { cost: null }),
+          committed,
+          models_loaded: loaded,
+          note: cost
+            ? 'applies to calls from now on; earlier runs keep the price they ran at'
+            : 'this endpoint is costless by declaration again, reported as local rather than 0.00',
+        };
       },
     },
     {

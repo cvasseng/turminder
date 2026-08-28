@@ -175,6 +175,26 @@ export class DeliveriesRepo {
     ).map(toDelivery);
   }
 
+  /**
+   * Deliveries still waiting on a person (§4.2.1): unsettled, unexpired, and
+   * carrying at least one action to click. A notification with nothing to
+   * press is something you read and move past; a `confirm` is a run suspended
+   * until somebody answers it, and that is the row the activity panel exists
+   * for.
+   */
+  awaitingAction(now = nowIso(), limit = 50): Delivery[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM deliveries
+            WHERE status IN ('queued','delivered') AND expires_at > ?
+              AND json_array_length(json_extract(payload, '$.actions')) > 0
+            ORDER BY seq DESC LIMIT ?`,
+        )
+        .all(now, limit) as DeliveryRow[]
+    ).map(toDelivery);
+  }
+
   recent(limit = 20): Delivery[] {
     return (
       this.db

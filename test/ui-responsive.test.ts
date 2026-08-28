@@ -18,6 +18,7 @@ const read = (rel: string): string => fs.readFileSync(path.join(root, rel), 'utf
 
 const css = read('ui/style.css');
 const js = read('ui/app.js');
+const html = read('ui/index.html');
 const spec = read('spec.md');
 
 /** The App. A row for a constant, as a number of px. */
@@ -166,5 +167,73 @@ describe('an action inside a sheet dismisses it (§9.1)', () => {
     const fn = js.slice(js.indexOf('function dismissSheets'));
     expect(fn.slice(0, 200)).toContain('SHEET_MODE.matches');
     expect(fn.slice(0, 200)).toContain('closeAllPanes()');
+  });
+});
+
+/**
+ * The keyboard half of §9.1. A vitest suite cannot open a keyboard, so what it
+ * pins is the pair of mechanisms and the fact that the CSS and the JS agree on
+ * the names — one deletion here silently puts the composer back behind the
+ * keyboard on a device nobody in CI is holding.
+ */
+describe('the visible viewport is what the layout owns (§9.1)', () => {
+  const viewport =
+    /<meta[^>]*name="viewport"[^>]*>/s.exec(html.replace(/\s+/g, ' '))?.[0] ?? '';
+
+  it('asks Chrome to shrink the layout for the keyboard', () => {
+    // The default is `resizes-visual`, under which `dvh` does not move and the
+    // composer is behind the keyboard. That is the entire Android bug.
+    expect(viewport).toContain('interactive-widget=resizes-content');
+    expect(viewport).toContain('width=device-width');
+    // 16px inputs are the no-zoom rule (§9.1); an explicit maximum-scale would
+    // be the other way of stopping zoom, and it stops pinch-zoom too.
+    expect(viewport).not.toContain('maximum-scale');
+    expect(viewport).not.toContain('user-scalable');
+  });
+
+  it('measures for Safari, which implements neither', () => {
+    expect(js).toContain('window.visualViewport');
+    expect(js).toMatch(/setProperty\('--visible-height'/);
+    expect(js).toMatch(/setProperty\('--keyboard-inset'/);
+    // Once per frame: `scroll` fires continuously while a keyboard animates.
+    expect(js).toMatch(/requestAnimationFrame\(measure\)/);
+  });
+
+  it('agrees with the stylesheet about what the properties are called', () => {
+    for (const prop of ['--visible-height', '--keyboard-inset']) {
+      expect(css).toContain(prop);
+      expect(js).toContain(prop);
+    }
+    // The shell keeps its `vh`/`dvh` declarations *before* the measured one, so
+    // a browser with no `visualViewport` lands exactly where it did before.
+    const body = css.slice(css.indexOf('body {'), css.indexOf('\n}', css.indexOf('body {')));
+    const heights = [...body.matchAll(/height:\s*([^;]+);/g)].map((m) => m[1]);
+    expect(heights).toEqual(['100vh', '100dvh', 'var(--visible-height, 100dvh)']);
+  });
+
+  it('subtracts the keyboard from the safe-area allowance instead of adding it', () => {
+    // A keyboard covering the home indicator makes that allowance a gap
+    // between the usage strip and the keyboard.
+    const usage = css.slice(
+      css.indexOf('#usage {'),
+      css.indexOf('\n}', css.indexOf('#usage {')),
+    );
+    expect(usage).toMatch(/env\(safe-area-inset-bottom\)\s*-\s*var\(--keyboard-inset/);
+    expect(usage).not.toMatch(/env\(safe-area-inset-bottom\)\s*\+/);
+  });
+
+  it('leaves the properties unset when nothing is occluding', () => {
+    // Absence is the normal state: a desktop window must resolve to plain
+    // `dvh`, byte for byte what it was before any of this existed.
+    expect(js).toMatch(/removeProperty\('--visible-height'\)/);
+    expect(js).toMatch(/removeProperty\('--keyboard-inset'\)/);
+    expect(js).toContain('KEYBOARD_MIN_PX');
+  });
+
+  it('keeps the composer ceiling on the same fraction in both languages', () => {
+    // 40% of what the reader can see. The CSS caps the box and `sizeInput`
+    // caps the height it writes; a disagreement grows one past the other.
+    expect(css).toContain('calc(0.4 * var(--visible-height, 100dvh))');
+    expect(js).toContain('Math.round(visibleHeight() * 0.4)');
   });
 });

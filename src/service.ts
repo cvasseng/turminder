@@ -37,6 +37,7 @@ import { WatcherEngine } from './watchers/engine.js';
 import { MemoryWatcher } from './rag/watcher.js';
 import { FileStore } from './files/store.js';
 import { FileEvents } from './files/events.js';
+import { EventFeed } from './ingress/feed.js';
 import { SnapshotStore } from './files/snapshots.js';
 import { FileWatcher } from './files/watcher.js';
 import { filesTools } from './tools/integrations/files.js';
@@ -135,6 +136,8 @@ export class Service {
   readonly binder: EmbedBinder;
   /** "What you are looking at is out of date" (§22.6), for open chat pages. */
   readonly embedEvents = new EmbedEvents();
+  /** Where every event is in its lifecycle, for the activity panel (§4.2.1). */
+  readonly eventFeed = new EventFeed();
   /** Print-only documents, alive for one chromium navigation (§23.4). */
   readonly transient = new TransientDocs();
   /** Chat attachments (§26.1). Eager: the HTTP routes serve them. */
@@ -173,6 +176,10 @@ export class Service {
     private readonly opts: ServiceOptions = {},
   ) {
     this.repos = createRepos(app.db);
+    // Every arrival and every transition, from the one place they are written
+    // (§4.2.1). The panel is a read surface over state the loop already keeps;
+    // nothing about the loop changes because somebody is watching.
+    this.repos.events.observe((event) => this.eventFeed.moved(event));
     const settings = app.config.settings;
     this.intake = new EventIntake(this.repos, settings);
     this.skills = new SkillLoader(app.home);

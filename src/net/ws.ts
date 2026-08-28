@@ -112,6 +112,11 @@ export class WsGateway {
     const unsubscribeEmbeds = this.service.embedEvents.subscribe((e) =>
       this.broadcast('chat', 'embed.changed', { embed_id: e.embedId }),
     );
+    // Where each event is in its lifecycle (§4.2.1) — push, like chat.activity,
+    // because a panel that has to be refreshed to be true is not a live window.
+    const unsubscribeEvents = this.service.eventFeed.subscribe((row) =>
+      this.broadcast('chat', 'event.status', { ...row }),
+    );
     // Revocation bites now, not at the next reconnect (§24.1).
     const unsubscribeTokens = this.service.app.tokens.onChanged(() => this.dropRevoked());
     const unsubscribeChat = this.unsubscribe;
@@ -119,6 +124,7 @@ export class WsGateway {
       unsubscribeChat?.();
       unsubscribeFiles();
       unsubscribeEmbeds();
+      unsubscribeEvents();
       unsubscribeTokens();
     };
 

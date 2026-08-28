@@ -2,6 +2,7 @@ import { newId } from '../core/ids.js';
 import { log } from '../core/logger.js';
 import { errMessage } from '../core/errors.js';
 import { nowIso } from '../core/time.js';
+import { toStatusRow } from '../ingress/feed.js';
 import type { Service } from '../service.js';
 import type { ResolvedEndpoint } from '../model/types.js';
 
@@ -42,6 +43,7 @@ export const SUPPORTED_FRAMES = [
   'embed.list',
   'embed.promote',
   'embed.demote',
+  'event.list',
   'token.list',
   'token.create',
   'token.revoke',
@@ -82,6 +84,8 @@ export const EMITTED_FRAMES = [
   'embed.promoted',
   'embed.demoted',
   'embed.changed',
+  'event.list.result',
+  'event.status',
   'token.list.result',
   'token.revoked',
   'token.reveal',
@@ -546,6 +550,39 @@ export class ChannelSession {
             kind: row.kind,
             updated_at: row.updated_at,
             url: this.service.embeds.url(row),
+          })),
+        });
+        return;
+      }
+
+      /**
+       * The activity panel's read (§4.2.1). A live window over state the loop
+       * already keeps: what is still owed an outcome, and what is owed a click.
+       *
+       * The row is assembled here rather than sent as the event, because an
+       * event payload is untrusted content (§1.1, H.2) and this frame goes to
+       * a screen. `toStatusRow` is the same builder the push uses, so the two
+       * cannot drift into showing different things about the same event.
+       */
+      case 'event.list': {
+        if (!this.capabilities.includes('chat')) {
+          this.fail('bad_frame', 'event.list is for chat-capable devices', frame.id);
+          return;
+        }
+        const scope =
+          p.status === 'dead_letter' || p.status === 'all' ? p.status : ('pending' as const);
+        const limit =
+          typeof p.limit === 'number' && p.limit > 0 ? Math.min(Math.floor(p.limit), 200) : 50;
+        this.send('event.list.result', {
+          events: this.service.repos.events.unsettled({ scope, limit }).map(toStatusRow),
+          // A `confirm` raised while the reader was in another conversation is
+          // otherwise something they have to remember (§4.2.1).
+          deliveries: this.service.repos.deliveries.awaitingAction().map((d) => ({
+            delivery_id: d.id,
+            intent: d.intent,
+            title: String((d.payload as { title?: unknown }).title ?? d.intent),
+            status: d.status,
+            expires_at: d.expires_at,
           })),
         });
         return;

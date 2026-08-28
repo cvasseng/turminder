@@ -4,6 +4,9 @@ import { nowIso } from '../../core/time.js';
 
 export type ScheduleStatus = 'active' | 'done' | 'cancelled' | 'missed';
 
+/** What to do with an occurrence found past its grace window (§6.1). */
+export type OnMiss = 'fire_late' | 'skip';
+
 export interface ScheduleRow {
   id: string;
   fire_at: string;
@@ -15,6 +18,7 @@ export interface ScheduleRow {
   created_by_run: string | null;
   status: ScheduleStatus;
   last_fired_at: string | null;
+  on_miss: OnMiss;
 }
 
 export interface NewSchedule {
@@ -25,6 +29,11 @@ export interface NewSchedule {
   eventType?: string;
   eventPayload?: unknown;
   createdByRun?: string | null;
+  /**
+   * Defaults per kind, because the two kinds want opposite things (§6.1): a
+   * missed reminder is still worth having, late; yesterday's digest is noise.
+   */
+  onMiss?: OnMiss;
 }
 
 export class SchedulesRepo {
@@ -42,13 +51,14 @@ export class SchedulesRepo {
       created_by_run: input.createdByRun ?? null,
       status: 'active',
       last_fired_at: null,
+      on_miss: input.onMiss ?? (input.rrule ? 'skip' : 'fire_late'),
     };
     this.db
       .prepare(
         `INSERT INTO schedules (id, fire_at, rrule, grace_s, note, event_type, event_payload,
-           created_by_run, status, last_fired_at)
+           created_by_run, status, last_fired_at, on_miss)
          VALUES (@id, @fire_at, @rrule, @grace_s, @note, @event_type, @event_payload,
-           @created_by_run, @status, @last_fired_at)`,
+           @created_by_run, @status, @last_fired_at, @on_miss)`,
       )
       .run(row);
     return row;

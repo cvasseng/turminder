@@ -53,6 +53,40 @@ pub fn data_dir() -> Result<PathBuf, String> {
     }
 }
 
+/// Where the shell keeps state that is its own rather than the assistant's.
+///
+/// Deliberately not `data_dir()`: that directory is the service's, git-managed
+/// and portable (§12.1), and a file the shell dropped in it would show up in
+/// `git status` forever. This holds one number — the port the sidecar landed
+/// on last time (§28.2) — and nothing that matters if it is lost.
+pub fn state_dir() -> Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_STATE_HOME") {
+            let path = PathBuf::from(xdg);
+            if path.is_absolute() {
+                return Ok(path.join("turminder-app"));
+            }
+        }
+        Ok(home()?.join(".local").join("state").join("turminder-app"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Ok(home()?
+            .join("Library")
+            .join("Application Support")
+            .join("Turminder")
+            .join("shell"))
+    }
+    #[cfg(windows)]
+    {
+        // Local, not Roaming: a port number is about this machine and should
+        // not follow a user to another one.
+        let local = std::env::var_os("LOCALAPPDATA").ok_or("no LOCALAPPDATA in the environment")?;
+        Ok(PathBuf::from(local).join("Turminder"))
+    }
+}
+
 #[cfg(unix)]
 fn home() -> Result<PathBuf, String> {
     std::env::var_os("HOME")
