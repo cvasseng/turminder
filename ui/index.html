@@ -141,237 +141,253 @@
         <p id="reveal-hint" class="device-hint"></p>
       </div>
     </dialog>
-    <!-- Below the sheet threshold (App. A) the side panes overlay the
-         transcript; this is what you tap to dismiss them. Inert and invisible
-         at wider widths, where the panes are columns again. -->
-    <button id="scrim" type="button" tabindex="-1" aria-hidden="true"></button>
-    <aside id="sidebar">
-      <header>
-        <h1>Turminder</h1>
-        <button
-          id="collapse"
-          class="icon"
-          data-icon="panel-close"
-          title="Collapse the sidebar"
-          aria-label="Collapse the sidebar"
-        ></button>
-        <div id="whoami">
-          <div id="instance">…</div>
-          <button
-            id="forget-token"
-            class="icon"
-            data-icon="logout"
-            title="Sign out — this browser will need the device token again"
-            aria-label="Sign out"
-          ></button>
-        </div>
-      </header>
-      <div id="conversations"></div>
-      <footer>
-        <button
-          id="new"
-          class="icon"
-          data-icon="plus"
-          title="New conversation"
-          aria-label="New conversation"
-        ></button>
-        <button
-          id="show-archived"
-          class="icon"
-          data-icon="eye-off"
-          title="Show archived conversations"
-          aria-label="Show archived conversations"
-          aria-pressed="false"
-        ></button>
-        <span class="spacer"></span>
-        <button
-          id="embeds-toggle"
-          class="icon"
-          data-icon="layout"
-          title="No views yet"
-          aria-label="Show the views in this conversation"
-          aria-pressed="false"
-          disabled
-        ></button>
-        <button
-          id="files-toggle"
-          class="icon"
-          data-icon="folder"
-          title="Show the shared workspace"
-          aria-label="Show the shared workspace"
-          aria-pressed="false"
-        ></button>
-        <button
-          id="activity-toggle"
-          class="icon"
-          data-icon="activity"
-          title="What the assistant is working on"
-          aria-label="What the assistant is working on"
-          aria-pressed="false"
-        ></button>
-        <button
-          id="devices-toggle"
-          class="icon"
-          data-icon="key"
-          title="Devices and access tokens"
-          aria-label="Devices and access tokens"
-        ></button>
-      </footer>
-    </aside>
-    <section id="files">
-      <header>
-        <h2>Files</h2>
-        <button
-          id="files-refresh"
-          class="icon"
-          data-icon="refresh"
-          title="Reload the file list"
-          aria-label="Reload the file list"
-        ></button>
-        <button
-          id="files-close"
-          class="icon"
-          data-icon="x"
-          title="Hide the file panel"
-          aria-label="Hide the file panel"
-        ></button>
-      </header>
-      <div id="file-list"></div>
-      <div id="file-view">
-        <div id="file-bar">
-          <button
-            id="file-back"
-            class="icon"
-            data-icon="arrow-left"
-            title="Back to the file list"
-            aria-label="Back to the file list"
-          ></button>
-          <span id="file-name"></span>
-          <span id="file-status"></span>
-          <span id="file-actions">
-            <button
-              id="file-edit"
-              class="icon"
-              data-icon="pencil"
-              title="Edit this file"
-              aria-label="Edit this file"
-            ></button>
-            <button
-              id="file-save"
-              class="icon"
-              data-icon="check"
-              title="Save changes"
-              aria-label="Save changes"
-            ></button>
-            <button
-              id="file-cancel"
-              class="icon"
-              data-icon="x"
-              title="Discard changes"
-              aria-label="Discard changes"
-            ></button>
-          </span>
-        </div>
-        <div id="file-body"></div>
-        <textarea id="file-editor" spellcheck="false"></textarea>
-      </div>
-    </section>
-    <main>
-      <div id="status">
-        <button
-          id="expand"
-          class="icon"
-          data-icon="panel-open"
-          title="Show the sidebar"
-          aria-label="Show the sidebar"
-        ></button>
-        <span class="badge" id="badge"></span>
-        <span class="spacer"></span>
-        <!-- The model selector (§10.6): only rendered with a choice to make. -->
-        <span id="model-selector" hidden></span>
-        <span id="status-text"></span>
-        <span class="dot" id="status-dot"></span>
-      </div>
-      <div id="messages"></div>
-      <!-- Zero-height on purpose: the button inside it floats over the bottom of
-           the transcript without the layout depending on how tall the composer
-           happens to be. -->
-      <div id="jump-anchor">
-        <button id="jump" type="button" hidden></button>
-      </div>
-      <!-- Pending attachments (§26.2): thumbnails of what the next message
-           will carry, removable until it is sent. -->
-      <div id="attachments" hidden></div>
-      <form id="composer">
-        <input id="attach-input" type="file" accept="image/*" multiple hidden />
+    <!-- The status strip spans the page rather than the transcript, because it
+         is where the drawer's tab rail lives (§9.1) and a rail that stopped at
+         the transcript's right edge would sit an inch to the left of the thing
+         it opens. It is also the one toolbar both layouts render, which is what
+         puts the panels one tap from a phone instead of hamburger-then-icon. -->
+    <div id="status">
+      <button
+        id="expand"
+        class="icon"
+        data-icon="panel-open"
+        title="Show the sidebar"
+        aria-label="Show the sidebar"
+      ></button>
+      <span class="badge" id="badge"></span>
+      <span class="spacer"></span>
+      <!-- The model selector (§10.6): only rendered with a choice to make. -->
+      <span id="model-selector" hidden></span>
+      <span id="status-text"></span>
+      <span class="dot" id="status-dot"></span>
+      <!-- One drawer, three tabs. A tablist rather than three toggles because
+           that is what the layout already was: below `ui_sheet_max` only one
+           pane could ever be open, so three `aria-pressed` buttons described a
+           state nothing would honour. Pressing the selected tab again closes
+           the drawer — "no tab" is a legal state here, which is the one place
+           this departs from a plain tablist. -->
+      <div id="drawer-tabs" role="tablist" aria-label="Side panels">
         <button
           type="button"
-          id="attach"
+          id="tab-files"
           class="icon"
-          data-icon="paperclip"
-          title="Attach an image"
-          aria-label="Attach an image"
-        ></button>
-        <textarea
-          id="input"
-          placeholder="Say something. Enter sends, shift+enter for a newline."
-          autofocus
-        ></textarea>
-        <button
-          type="submit"
-          id="send"
-          class="icon send"
-          data-icon="send"
-          title="Send (Enter)"
-          aria-label="Send"
-        ></button>
-      </form>
-      <div id="usage" title="Context use and cost of the last turn"></div>
-    </main>
-    <section id="embeds">
-      <header>
-        <h2>Views</h2>
-        <button
-          id="embeds-refresh"
-          class="icon"
-          data-icon="refresh"
-          title="Reload the list"
-          aria-label="Reload the list"
+          role="tab"
+          data-tab="files"
+          data-icon="folder"
+          aria-selected="false"
+          aria-controls="panel-files"
+          tabindex="0"
+          title="Show the shared workspace"
+          aria-label="Show the shared workspace"
         ></button>
         <button
-          id="embeds-close"
+          type="button"
+          id="tab-embeds"
           class="icon"
-          data-icon="x"
-          title="Hide the views panel"
-          aria-label="Hide the views panel"
+          role="tab"
+          data-tab="embeds"
+          data-icon="layout"
+          aria-selected="false"
+          aria-controls="panel-embeds"
+          tabindex="-1"
+          title="No views yet"
+          aria-label="Show the views in this conversation"
+          disabled
         ></button>
-      </header>
-      <div id="embed-list"></div>
-    </section>
-    <!-- A read surface over the event lifecycle (§4.2.1): what the system still
-         owes you an outcome for, and what owes it a click. No payloads reach
-         here — a row is what the server wrote about an event, never the event.
-         A live window, deliberately not a log browser. -->
-    <section id="activity">
-      <header>
-        <h2>Activity</h2>
+        <!-- The count is a `::after` on `data-count`, not a child element:
+             `paintIcon` owns this button's innerHTML and would wipe a span. -->
         <button
-          id="activity-refresh"
+          type="button"
+          id="tab-activity"
           class="icon"
-          data-icon="refresh"
-          title="Reload the list"
-          aria-label="Reload the list"
+          role="tab"
+          data-tab="activity"
+          data-icon="activity"
+          aria-selected="false"
+          aria-controls="panel-activity"
+          tabindex="-1"
+          title="What the assistant is working on"
+          aria-label="What the assistant is working on"
         ></button>
-        <button
-          id="activity-close"
-          class="icon"
-          data-icon="x"
-          title="Hide the activity panel"
-          aria-label="Hide the activity panel"
-        ></button>
-      </header>
-      <div id="activity-list"></div>
-    </section>
+      </div>
+    </div>
+    <div id="shell">
+      <!-- Below the sheet threshold (App. A) the side panes overlay the
+           transcript; this is what you tap to dismiss them. It covers the
+           shell and not the status strip on purpose — the tab rail stays live
+           under an open sheet, so switching panels is one tap rather than
+           dismiss-then-open. Inert and invisible at wider widths, where the
+           panes are columns again. -->
+      <button id="scrim" type="button" tabindex="-1" aria-hidden="true"></button>
+      <aside id="sidebar">
+        <header>
+          <h1>Turminder</h1>
+          <button
+            id="collapse"
+            class="icon"
+            data-icon="panel-close"
+            title="Collapse the sidebar"
+            aria-label="Collapse the sidebar"
+          ></button>
+          <div id="whoami">
+            <div id="instance">…</div>
+            <button
+              id="forget-token"
+              class="icon"
+              data-icon="logout"
+              title="Sign out — this browser will need the device token again"
+              aria-label="Sign out"
+            ></button>
+          </div>
+        </header>
+        <div id="conversations"></div>
+        <footer>
+          <button
+            id="new"
+            class="icon"
+            data-icon="plus"
+            title="New conversation"
+            aria-label="New conversation"
+          ></button>
+          <button
+            id="show-archived"
+            class="icon"
+            data-icon="eye-off"
+            title="Show archived conversations"
+            aria-label="Show archived conversations"
+            aria-pressed="false"
+          ></button>
+          <span class="spacer"></span>
+          <button
+            id="devices-toggle"
+            class="icon"
+            data-icon="key"
+            title="Devices and access tokens"
+            aria-label="Devices and access tokens"
+          ></button>
+        </footer>
+      </aside>
+      <main>
+        <div id="messages"></div>
+        <!-- Zero-height on purpose: the button inside it floats over the bottom
+             of the transcript without the layout depending on how tall the
+             composer happens to be. -->
+        <div id="jump-anchor">
+          <button id="jump" type="button" hidden></button>
+        </div>
+        <!-- Pending attachments (§26.2): thumbnails of what the next message
+             will carry, removable until it is sent. -->
+        <div id="attachments" hidden></div>
+        <form id="composer">
+          <input id="attach-input" type="file" accept="image/*" multiple hidden />
+          <button
+            type="button"
+            id="attach"
+            class="icon"
+            data-icon="paperclip"
+            title="Attach an image"
+            aria-label="Attach an image"
+          ></button>
+          <textarea
+            id="input"
+            placeholder="Say something. Enter sends, shift+enter for a newline."
+            autofocus
+          ></textarea>
+          <button
+            type="submit"
+            id="send"
+            class="icon send"
+            data-icon="send"
+            title="Send (Enter)"
+            aria-label="Send"
+          ></button>
+        </form>
+        <div id="usage" title="Context use and cost of the last turn"></div>
+      </main>
+      <!-- One drawer for what used to be three panels (§9.1). They were never
+           all reachable at once — below `ui_sheet_max` the layout allowed
+           exactly one — so this is the arithmetic made honest rather than a
+           capability taken away. The header is shared: the active tab's name,
+           its refresh, and one close. The file bar below it is not part of that
+           header, because it belongs to the open file rather than the panel. -->
+      <aside id="drawer">
+        <header id="drawer-head">
+          <h2 id="drawer-title">Files</h2>
+          <button
+            id="drawer-refresh"
+            class="icon"
+            data-icon="refresh"
+            title="Reload the list"
+            aria-label="Reload the list"
+          ></button>
+          <button
+            id="drawer-close"
+            class="icon"
+            data-icon="x"
+            title="Hide the panel"
+            aria-label="Hide the panel"
+          ></button>
+        </header>
+        <div id="panel-files" role="tabpanel" aria-labelledby="tab-files" tabindex="0" hidden>
+          <div id="file-list"></div>
+          <div id="file-view">
+            <div id="file-bar">
+              <button
+                id="file-back"
+                class="icon"
+                data-icon="arrow-left"
+                title="Back to the file list"
+                aria-label="Back to the file list"
+              ></button>
+              <span id="file-name"></span>
+              <span id="file-status"></span>
+              <span id="file-actions">
+                <button
+                  id="file-edit"
+                  class="icon"
+                  data-icon="pencil"
+                  title="Edit this file"
+                  aria-label="Edit this file"
+                ></button>
+                <button
+                  id="file-save"
+                  class="icon"
+                  data-icon="check"
+                  title="Save changes"
+                  aria-label="Save changes"
+                ></button>
+                <button
+                  id="file-cancel"
+                  class="icon"
+                  data-icon="x"
+                  title="Discard changes"
+                  aria-label="Discard changes"
+                ></button>
+              </span>
+            </div>
+            <div id="file-body"></div>
+            <textarea id="file-editor" spellcheck="false"></textarea>
+          </div>
+        </div>
+        <div id="panel-embeds" role="tabpanel" aria-labelledby="tab-embeds" tabindex="0" hidden>
+          <div id="embed-list"></div>
+        </div>
+        <!-- A read surface over the event lifecycle (§4.2.1): what the system
+             still owes you an outcome for, and what owes it a click. No
+             payloads reach here — a row is what the server wrote about an
+             event, never the event. A live window, deliberately not a log
+             browser. -->
+        <div
+          id="panel-activity"
+          role="tabpanel"
+          aria-labelledby="tab-activity"
+          tabindex="0"
+          hidden
+        >
+          <div id="activity-list"></div>
+        </div>
+      </aside>
+    </div>
     <script src="/vendor/marked.umd.js"></script>
     <script src="/connect.js"></script>
     <script src="/greeting.js"></script>

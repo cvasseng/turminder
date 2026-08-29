@@ -68,8 +68,8 @@ function paintIcons() {
 const CONV_KEY = 'turminder.conversation';
 const COLLAPSED_KEY = 'turminder.sidebarCollapsed';
 const ARCHIVED_KEY = 'turminder.showArchived';
-const FILES_KEY = 'turminder.filesOpen';
-const EMBEDS_KEY = 'turminder.embedsOpen';
+/** Which of the drawer's tabs is showing (§9.1); '' is closed. */
+const DRAWER_KEY = 'turminder.drawer';
 
 /** App. A `pair_poll_interval_s` — the waiting gate's claim poll (§24.4). */
 const PAIR_POLL_MS = 2000;
@@ -157,19 +157,25 @@ const state = {
   conversations: [],
   // form_id -> the rendered element, so a re-sent form replaces rather than stacks.
   forms: new Map(),
-  files: { open: false, entries: [], path: null, content: null, editing: false },
+  files: { entries: [], path: null, content: null, editing: false },
   // Embeds (§22.6): `inChat` is what *this* transcript references, in the order
   // the markers appear — built from the embed.resolve round-trips the slots
   // already make, so the panel needs no list of its own. `entries` is the kept
   // shelf. `pending` holds slots awaiting a resolve, keyed by id because one
   // embed may appear in the conversation twice.
-  embeds: { open: false, entries: [], inChat: new Map(), pending: new Map() },
+  embeds: { entries: [], inChat: new Map(), pending: new Map() },
   /**
    * The activity panel (§4.2.1). `rows` is a live window over the event
    * lifecycle keyed by event id, filled by `event.list` and kept true by
    * `event.status` pushes — never the source of truth, always re-derivable.
    */
-  activity: { open: false, rows: new Map(), deliveries: [] },
+  activity: { rows: new Map(), deliveries: [] },
+  /**
+   * Which of the drawer's three tabs is showing (§9.1), or null for closed —
+   * one value where there used to be three booleans, because the layout only
+   * ever honoured one of them at a time anyway.
+   */
+  drawer: null,
   showArchived: localStorage.getItem(ARCHIVED_KEY) === '1',
   devices: [],
   /** Uploads waiting to be sent with the next message (§26.2). */
@@ -683,7 +689,7 @@ function clearMessages() {
   // the resolves for the newly mounted markers fill it again.
   state.embeds.inChat.clear();
   renderEmbedList();
-  refreshEmbedsToggle();
+  refreshEmbedsTab();
   if (state.group) clearInterval(state.group.tick);
   state.group = null;
   // A conversation with no id is one that does not exist yet — the New button,
@@ -1276,14 +1282,17 @@ function handle(frame) {
       refreshConversations();
       // The selector is only worth showing when there is a choice (§10.6).
       send('models.list', { conversation_id: state.conversationId });
-      // The panel can be remembered open from a previous visit, in which case
-      // its boot-time files.list went out before this socket existed.
-      if (state.files.open) send('files.list', {});
-      // Same for the activity panel — and on a reconnect the list is how it
-      // re-derives, because `event.status` is transient and missed pushes are
-      // not replayed (§4.2.1).
-      if (state.activity.open) send('event.list', {});
-      // Cheap, and it is what tells the views toggle whether there is a kept
+      // The drawer can be remembered open from a previous visit, in which case
+      // its boot-time list went out before this socket existed.
+      if (state.drawer === 'files') send('files.list', {});
+      // Unconditional, unlike the file tree: this list is what the activity
+      // tab's count is made of, and a count that only became true once you
+      // opened the panel would answer the question after you had given up
+      // asking it. On a reconnect it is also how the panel re-derives, because
+      // `event.status` is transient and missed pushes are not replayed
+      // (§4.2.1).
+      send('event.list', {});
+      // Cheap, and it is what tells the views tab whether there is a kept
       // shelf to reach when the current conversation has no views of its own.
       send('embed.list', { kind: 'persistent' });
       if (state.conversationId) selectConversation(state.conversationId);
@@ -1477,7 +1486,7 @@ function handle(frame) {
         // mount. A second marker for the same embed updates rather than repeats.
         state.embeds.inChat.set(p.embed_id, p);
         renderEmbedList();
-        refreshEmbedsToggle();
+        refreshEmbedsTab();
       }
       // Where the numbers came from (§23.2). Asked for after the frame is up,
       // because most embeds have no bindings and the answer decides whether
@@ -1494,7 +1503,7 @@ function handle(frame) {
     case 'embed.list.result':
       state.embeds.entries = p.embeds || [];
       renderEmbedList();
-      refreshEmbedsToggle();
+      refreshEmbedsTab();
       break;
 
     case 'embed.promoted':
@@ -1502,7 +1511,7 @@ function handle(frame) {
       // Re-resolve rather than patch: either move relocates the file, and the
       // URL and kind both come from the server.
       remountEmbed(p.embed_id);
-      if (state.embeds.open) send('embed.list', { kind: 'persistent' });
+      if (state.drawer === 'embeds') send('embed.list', { kind: 'persistent' });
       break;
 
     // The activity panel's read and its live half (§4.2.1). The list is the
@@ -1512,6 +1521,7 @@ function handle(frame) {
       for (const row of p.events || []) state.activity.rows.set(row.id, row);
       state.activity.deliveries = p.deliveries || [];
       renderActivity();
+      refreshActivityTab();
       break;
 
     case 'event.status':
@@ -1544,7 +1554,7 @@ function handle(frame) {
 
     case 'files.changed':
       // Somebody else moved the file under us: the assistant, or another editor.
-      if (state.files.open) send('files.list', {});
+      if (state.drawer === 'files') send('files.list', {});
       if (state.files.path === p.path && !state.files.editing) {
         if (p.change === 'deleted') closeFile();
         else send('files.read', { path: p.path });
@@ -1940,17 +1950,12 @@ function embedsAvailable() {
  * before the new transcript's markers have resolved: turning the preference off
  * there would mean the panel shuts on every switch and never comes back.
  */
-function applyEmbedsPanel() {
-  document.body.classList.toggle('embeds-open', state.embeds.open && embedsAvailable());
-  applySheets();
-}
-
 /**
- * The toggle is only reachable when there is something behind it. Nothing to
- * show is a disabled button rather than an empty panel.
+ * The tab is only reachable when there is something behind it. Nothing to show
+ * is a disabled tab rather than an empty panel.
  */
-function refreshEmbedsToggle() {
-  const button = $('embeds-toggle');
+function refreshEmbedsTab() {
+  const button = $('tab-embeds');
   const count = state.embeds.inChat.size;
   button.disabled = !embedsAvailable();
   const label = count
@@ -1960,26 +1965,10 @@ function refreshEmbedsToggle() {
       : 'No views yet';
   button.title = label;
   button.setAttribute('aria-label', label);
-  applyEmbedsPanel();
-}
-
-function setEmbedsOpen(open, persist = true) {
-  state.embeds.open = open;
-  applyEmbedsPanel();
-  $('embeds-toggle').setAttribute('aria-pressed', open ? 'true' : 'false');
-  if (persist) localStorage.setItem(EMBEDS_KEY, open ? '1' : '0');
-  // The kept half is server state; the conversation half is already in hand.
-  if (open) {
-    soloPane('embeds');
-    send('embed.list', { kind: 'persistent' });
-  }
-  renderEmbedList();
-  applySheets();
+  applyDrawer();
 }
 
 /* ── the activity panel (§4.2.1) ─────────────────────────────────────────── */
-
-const ACTIVITY_KEY = 'turminder.activity';
 
 /**
  * How a lifecycle status reads to somebody who did not write the lifecycle,
@@ -1997,17 +1986,37 @@ const ACTIVITY_STATES = {
   rejected: { label: 'refused', mood: 'dead' },
 };
 
-function setActivityOpen(open, persist = true) {
-  state.activity.open = open;
-  document.body.classList.toggle('activity-open', open);
-  $('activity-toggle').setAttribute('aria-pressed', open ? 'true' : 'false');
-  if (persist) localStorage.setItem(ACTIVITY_KEY, open ? '1' : '0');
-  if (open) {
-    soloPane('activity');
-    send('event.list', {});
+/**
+ * How many outcomes the system still owes, on the tab itself.
+ *
+ * The point of the badge is that "is it doing the thing I asked" is answerable
+ * without opening anything — which is the question a phone asks most and the
+ * one the panel used to be furthest from. A pending approval counts too: it is
+ * the row that owes *you* something rather than the other way round.
+ */
+function refreshActivityTab() {
+  const rows = [...state.activity.rows.values()];
+  const owed = state.activity.deliveries.length;
+  const count = rows.length + owed;
+  const button = $('tab-activity');
+  if (!count) {
+    delete button.dataset.count;
+    delete button.dataset.mood;
+  } else {
+    // Capped in the badge, not in the count: three digits in a 14px circle is
+    // a badge nobody can read, and past a handful the number is not the point.
+    button.dataset.count = count > 9 ? '9+' : String(count);
+    button.dataset.mood = rows.some((row) => row.status === 'dead_letter')
+      ? 'dead'
+      : owed || rows.some((row) => row.status === 'failed')
+        ? 'waiting'
+        : '';
   }
-  renderActivity();
-  applySheets();
+  const label = count
+    ? `What the assistant is working on — ${count} outstanding`
+    : 'What the assistant is working on';
+  button.title = label;
+  button.setAttribute('aria-label', label);
 }
 
 /** Absolute where it is far away, relative where the distance is the point. */
@@ -2115,7 +2124,8 @@ function applyEventStatus(row) {
   const settled = row.status === 'done' || row.status === 'rejected';
   if (settled) state.activity.rows.delete(row.id);
   else state.activity.rows.set(row.id, row);
-  if (state.activity.open) renderActivity();
+  refreshActivityTab();
+  if (state.drawer === 'activity') renderActivity();
 }
 
 /** When an unanswered approval turns into a deny, said in the reader's clock. */
@@ -2580,28 +2590,89 @@ $('show-archived').onclick = () => {
   refreshConversations();
 };
 
+/* ── the drawer (§9.1) ─────────────────────────────────────────────────────
+   Files (§18.5), views (§22.6) and activity (§4.2.1) are one pane on the right
+   with three tabs, and `state.drawer` — a tab key, or null for closed — is the
+   whole of its state. They were never simultaneously reachable: below
+   `ui_sheet_max` the layout allowed exactly one, so three toggles were
+   describing a state nothing honoured. The rail is a `tablist` for the same
+   reason it is one control: what it selects is one of three, and the arrow
+   keys that come with the role are what make it a single tab stop.
+
+   Each tab's `refresh` is the frame that re-derives it, which is also what the
+   shared header's refresh button sends and what a reconnect replays. */
+
+const DRAWER_TABS = {
+  files: { title: 'Files', refresh: () => send('files.list', {}) },
+  embeds: { title: 'Views', refresh: () => send('embed.list', { kind: 'persistent' }) },
+  activity: { title: 'Activity', refresh: () => send('event.list', {}) },
+};
+
+/**
+ * The tab the drawer is actually showing, which is not always the one chosen.
+ *
+ * `embeds` stays *selected* while it has nothing to show rather than being
+ * deselected: switching conversation empties the shelf before the new
+ * transcript's markers have resolved, and dropping the choice there would shut
+ * the panel on every switch and never bring it back.
+ */
+function drawerTab() {
+  if (state.drawer === 'embeds' && !embedsAvailable()) return null;
+  return state.drawer;
+}
+
+function applyDrawer() {
+  const showing = drawerTab();
+  document.body.classList.toggle('drawer-open', showing !== null);
+  for (const key of Object.keys(DRAWER_TABS)) {
+    // Selected is what is *showing*, not what is chosen: `state.drawer` keeps
+    // the preference through a momentarily empty shelf, but announcing a tab
+    // as selected while its panel is not on screen is a lie to a reader who
+    // cannot see either.
+    $(`tab-${key}`).setAttribute('aria-selected', showing === key ? 'true' : 'false');
+    $(`tab-${key}`).tabIndex = -1;
+    $(`panel-${key}`).hidden = showing !== key;
+  }
+  // Roving tabindex: the rail is one stop on the Tab order and the arrows move
+  // inside it. The stop is the showing tab, or — with none showing, or a
+  // selection that went disabled underneath it — the first that can take it.
+  const stop =
+    (showing && !$(`tab-${showing}`).disabled && $(`tab-${showing}`)) ||
+    document.querySelector('#drawer-tabs [role="tab"]:not([disabled])');
+  if (stop) stop.tabIndex = 0;
+  if (showing) $('drawer-title').textContent = DRAWER_TABS[showing].title;
+  applySheets();
+}
+
+/** `persist: false` moves the drawer without overwriting the wide preference. */
+function setDrawer(tab, persist = true) {
+  const next = tab && Object.hasOwn(DRAWER_TABS, tab) ? tab : null;
+  state.drawer = next;
+  if (persist) localStorage.setItem(DRAWER_KEY, next ?? '');
+  applyDrawer();
+  if (!next) return;
+  soloPane('drawer');
+  DRAWER_TABS[next].refresh();
+  // The server half is on its way; the half already in hand draws now.
+  if (next === 'embeds') renderEmbedList();
+  if (next === 'activity') renderActivity();
+}
+
 /* ── the shell on a narrow screen (§9.1, App. A) ──────────────────────────
    Below the sheet threshold the side panes stop being columns and overlay the
-   transcript instead. The three body classes stay the single source of state;
-   what this code does is decide, on every crossing, whether the saved
-   preference applies (wide) or whether everything starts closed (sheets), and
-   keep two panes from ever landing on top of each other.
+   transcript instead. The body classes stay the single source of state; what
+   this code does is decide, on every crossing, whether the saved preference
+   applies (wide) or whether everything starts closed (sheets), and keep the
+   sidebar and the drawer from ever landing on top of each other.
 
    The stored values are the *wide* preference. Sheet mode moves the same
    classes with `persist: false`, so narrowing the window does not quietly
    rewrite what you chose for the big screen. */
 
 const SHEET_MODE = window.matchMedia('(max-width: 1099.98px)');
-const ONE_PANEL = window.matchMedia('(max-width: 1399.98px)');
 
 function anyPaneOpen() {
-  const c = document.body.classList;
-  return (
-    !c.contains('sidebar-collapsed') ||
-    c.contains('files-open') ||
-    c.contains('embeds-open') ||
-    c.contains('activity-open')
-  );
+  return !document.body.classList.contains('sidebar-collapsed') || drawerTab() !== null;
 }
 
 /** The scrim exists exactly when a sheet is over the transcript. */
@@ -2610,33 +2681,19 @@ function applySheets() {
 }
 
 /**
- * Opening a pane closes the ones it would otherwise cover. In sheet mode that
- * is all of them; between 1100 and 1400 the sidebar may stay but the two side
- * panels may not both be columns — 260 + 340 + 300 leaves a transcript too
- * narrow to read at the bottom of that band.
+ * Opening a pane closes the one it would otherwise cover. Only sheet mode has
+ * that problem now: as columns the sidebar and the drawer leave 500px of
+ * transcript at `ui_sheet_max`, which is the width the layout is built around.
  */
 function soloPane(which) {
-  if (SHEET_MODE.matches) {
-    if (which !== 'sidebar') setCollapsed(true, false);
-    if (which !== 'files' && state.files.open) setFilesOpen(false, false);
-    if (which !== 'embeds' && state.embeds.open) setEmbedsOpen(false, false);
-    if (which !== 'activity' && state.activity.open) setActivityOpen(false, false);
-    return;
-  }
-  if (!ONE_PANEL.matches || which === 'sidebar') return;
-  // Three side panes now, and only one of them may be a column in this band —
-  // whichever was just asked for. The sidebar is a column of its own here and
-  // displaces nothing, which is why it returns above.
-  if (which !== 'files' && state.files.open) setFilesOpen(false, false);
-  if (which !== 'embeds' && state.embeds.open) setEmbedsOpen(false, false);
-  if (which !== 'activity' && state.activity.open) setActivityOpen(false, false);
+  if (!SHEET_MODE.matches) return;
+  if (which !== 'sidebar') setCollapsed(true, false);
+  if (which !== 'drawer' && state.drawer) setDrawer(null, false);
 }
 
 function closeAllPanes() {
   setCollapsed(true, false);
-  if (state.files.open) setFilesOpen(false, false);
-  if (state.embeds.open) setEmbedsOpen(false, false);
-  if (state.activity.open) setActivityOpen(false, false);
+  setDrawer(null, false);
 }
 
 /**
@@ -2652,13 +2709,11 @@ function dismissSheets() {
   if (SHEET_MODE.matches) closeAllPanes();
 }
 
-/* Activity, then views, then files: below 1400 only one of them can be a
-   column, and the later call wins — files is the one worth the space. */
 function restorePanes() {
   setCollapsed(localStorage.getItem(COLLAPSED_KEY) === '1', false);
-  setActivityOpen(localStorage.getItem(ACTIVITY_KEY) === '1', false);
-  setEmbedsOpen(localStorage.getItem(EMBEDS_KEY) === '1', false);
-  setFilesOpen(localStorage.getItem(FILES_KEY) === '1', false);
+  // An unknown key — a stale preference, a hand-edited store — reads as closed
+  // rather than putting the drawer in a state with no tab to leave it by.
+  setDrawer(localStorage.getItem(DRAWER_KEY), false);
 }
 
 function applyLayout() {
@@ -2668,7 +2723,6 @@ function applyLayout() {
 }
 
 SHEET_MODE.addEventListener('change', applyLayout);
-ONE_PANEL.addEventListener('change', applyLayout);
 
 $('scrim').onclick = closeAllPanes;
 
@@ -3020,18 +3074,6 @@ function showReveal(p) {
 
 /* ── the file panel (§18.5): a tree, rendered markdown, and a textarea ─────── */
 
-function setFilesOpen(open, persist = true) {
-  state.files.open = open;
-  document.body.classList.toggle('files-open', open);
-  $('files-toggle').setAttribute('aria-pressed', open ? 'true' : 'false');
-  if (persist) localStorage.setItem(FILES_KEY, open ? '1' : '0');
-  if (open) {
-    soloPane('files');
-    send('files.list', {});
-  }
-  applySheets();
-}
-
 function setFileStatus(text) {
   $('file-status').textContent = text || '';
 }
@@ -3042,7 +3084,7 @@ function setFileStatus(text) {
  * anyone, and there has to be a way back out of a file.
  */
 function setFileViewing(viewing) {
-  $('files').classList.toggle('viewing', viewing);
+  $('panel-files').classList.toggle('viewing', viewing);
 }
 
 function closeFile() {
@@ -3350,16 +3392,44 @@ $('jump').onclick = () => {
   $('jump').hidden = true;
 };
 
-$('activity-toggle').onclick = () => setActivityOpen(!state.activity.open);
-$('activity-close').onclick = () => setActivityOpen(false);
-$('activity-refresh').onclick = () => send('event.list', {});
-$('embeds-toggle').onclick = () => setEmbedsOpen(!state.embeds.open);
-$('embeds-close').onclick = () => setEmbedsOpen(false);
-$('embeds-refresh').onclick = () => send('embed.list', { kind: 'persistent' });
-$('files-toggle').onclick = () => setFilesOpen(!state.files.open);
-$('files-close').onclick = () => setFilesOpen(false);
+/* Pressing the selected tab again closes the drawer. A tablist normally always
+   has a selection; this one may have none, because the rail is the opener too
+   and a drawer with no way to shut it would cover the transcript on a phone
+   until you found the scrim. */
+for (const tab of document.querySelectorAll('#drawer-tabs [role="tab"]')) {
+  tab.onclick = () => setDrawer(state.drawer === tab.dataset.tab ? null : tab.dataset.tab);
+}
+
+/* Arrows move within the rail, which is what makes three buttons one stop on
+   the Tab order. Activation follows focus — the ARIA pattern's expensive case
+   is a panel that has to be fetched, and each of these is one small list frame
+   over a socket that is already open. */
+$('drawer-tabs').addEventListener('keydown', (e) => {
+  const steps = { ArrowLeft: -1, ArrowRight: 1, Home: 'first', End: 'last' };
+  if (!Object.hasOwn(steps, e.key)) return;
+  const tabs = [...document.querySelectorAll('#drawer-tabs [role="tab"]:not([disabled])')];
+  if (!tabs.length) return;
+  const step = steps[e.key];
+  const at = Math.max(tabs.indexOf(document.activeElement), 0);
+  const next =
+    step === 'first'
+      ? tabs[0]
+      : step === 'last'
+        ? tabs[tabs.length - 1]
+        : tabs[(at + step + tabs.length) % tabs.length];
+  e.preventDefault();
+  next.focus();
+  setDrawer(next.dataset.tab);
+});
+
+$('drawer-close').onclick = () => setDrawer(null);
+/* One refresh for three panels: what it re-derives is whatever tab is showing,
+   which is the same frame the tab sends when you select it. */
+$('drawer-refresh').onclick = () => {
+  const showing = drawerTab();
+  if (showing) DRAWER_TABS[showing].refresh();
+};
 $('file-back').onclick = () => closeFile();
-$('files-refresh').onclick = () => send('files.list', {});
 $('file-edit').onclick = () => {
   state.files.editing = true;
   renderFileActions(true);

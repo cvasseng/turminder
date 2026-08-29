@@ -39,7 +39,6 @@ const mediaConditions = [...css.matchAll(/@media ([^{]+)\{/g)].map((m) => (m[1] 
 describe('the shell at any width (§9.1)', () => {
   it('uses the breakpoints App. A publishes, and no others', () => {
     const sheetMax = specConstant('ui_sheet_max');
-    const bothMin = specConstant('ui_both_panels_min');
     const compactMax = specConstant('ui_compact_max');
     const shortMax = specConstant('ui_short_max');
 
@@ -50,7 +49,7 @@ describe('the shell at any width (§9.1)', () => {
         .map((m) => Math.ceil(Number(m[1] ?? NaN))),
     );
     expect([...widths].sort((a, b) => a - b)).toEqual(
-      [compactMax, sheetMax, bothMin].sort((a, b) => a - b),
+      [compactMax, sheetMax].sort((a, b) => a - b),
     );
 
     const heights = new Set(
@@ -71,17 +70,30 @@ describe('the shell at any width (§9.1)', () => {
     expect(jsWidths.sort((a, b) => a - b)).toEqual([
       specConstant('ui_compact_max'),
       specConstant('ui_sheet_max'),
-      specConstant('ui_both_panels_min'),
     ]);
   });
 
-  it('turns all three side panes into sheets below the threshold', () => {
+  it('has no band App. A no longer publishes', () => {
+    // `ui_both_panels_min` existed to say when *both* side panels could be
+    // columns. There is one drawer now, so the constant is gone from App. A
+    // and neither file may quietly keep the band it named.
+    expect(spec).not.toContain('ui_both_panels_min');
+    expect(css).not.toContain('1399.98');
+    expect(js).not.toContain('1399.98');
+  });
+
+  it('turns both side panes into sheets below the threshold', () => {
     const sheetBlock = css.slice(css.indexOf('@media (max-width: 1099.98px)'));
     const body = sheetBlock.slice(0, sheetBlock.indexOf('\n}\n'));
-    for (const pane of ['#sidebar', '#files', '#embeds']) {
+    for (const pane of ['#sidebar', '#drawer']) {
       expect(body, `${pane} should become a sheet below ui_sheet_max`).toContain(pane);
     }
-    expect(body).toContain('position: fixed');
+    // Absolute against `#shell`, not fixed against the viewport: the shell
+    // starts below the status strip, and that is the whole reason the tab rail
+    // stays reachable under an open sheet (§9.1). Both halves or neither.
+    expect(body).toContain('position: absolute');
+    expect(body).not.toContain('position: fixed');
+    expect(css).toMatch(/#shell\s*\{[^}]*position:\s*relative/s);
     // A sheet the transcript still makes room for is not a sheet.
     expect(body).toMatch(/main\s*\{[^}]*width:\s*100%/);
   });
@@ -127,6 +139,93 @@ describe('the shell at any width (§9.1)', () => {
     // `display: flex` on the element beats the `hidden` attribute the markup
     // sets, and the empty strip keeps its padding on every screen.
     expect(css).toMatch(/#attachments\[hidden\]\s*\{\s*display:\s*none/);
+  });
+});
+
+/**
+ * One drawer, three tabs (§9.1).
+ *
+ * The failure this guards is the one that produced the drawer in the first
+ * place: a fourth panel arriving as a fourth independent toggle, each with its
+ * own body class, storage key and `aria-pressed`, describing a state the
+ * layout never honoured. There is one selection here and it has one home.
+ */
+describe('the side panels are one drawer (§9.1)', () => {
+  const TABS = ['files', 'embeds', 'activity'];
+
+  /** The markup between a tag with this id and the element that follows it. */
+  const at = (needle: string): number => {
+    const i = html.indexOf(needle);
+    expect(i, `index.html should contain ${needle}`).toBeGreaterThan(-1);
+    return i;
+  };
+
+  it('puts the rail in a status strip that spans the page', () => {
+    // Outside `<main>`: a rail that stopped at the transcript's right edge
+    // would sit an inch to the left of the drawer it opens, and on a phone a
+    // rail in the sidebar footer is behind a closed sidebar — the two taps
+    // this whole change exists to remove.
+    const main = html.slice(at('<main>'), at('</main>'));
+    expect(main).not.toContain('id="status"');
+    expect(main).not.toContain('id="drawer-tabs"');
+    expect(at('id="status"')).toBeLessThan(at('id="shell"'));
+    expect(at('id="drawer-tabs"')).toBeGreaterThan(at('id="status"'));
+    expect(at('id="drawer-tabs"')).toBeLessThan(at('id="shell"'));
+  });
+
+  it('is a tablist, not three toggles', () => {
+    const rail = html.slice(at('id="drawer-tabs"'), at('<div id="shell">'));
+    expect(rail).toContain('role="tablist"');
+    expect([...rail.matchAll(/role="tab"/g)]).toHaveLength(TABS.length);
+    // `aria-pressed` is the toggle model this replaced. One of them surviving
+    // means one panel still thinks it is independent of the others.
+    expect(rail).not.toContain('aria-pressed');
+    for (const tab of TABS) {
+      expect(rail).toContain(`data-tab="${tab}"`);
+      expect(rail).toContain(`aria-controls="panel-${tab}"`);
+      expect(html).toContain(`id="panel-${tab}"`);
+    }
+    // Exactly the three panels, all inside the one drawer.
+    const drawer = html.slice(at('<aside id="drawer">'), at('</aside>\n    </div>'));
+    expect([...drawer.matchAll(/role="tabpanel"/g)]).toHaveLength(TABS.length);
+  });
+
+  it('keeps the tab keys the same in the markup and the JS', () => {
+    const table = js.slice(js.indexOf('const DRAWER_TABS = {'));
+    const keys = [...table.slice(0, table.indexOf('\n};')).matchAll(/^ {2}(\w+): \{/gm)].map(
+      (m) => m[1],
+    );
+    expect(keys).toEqual(TABS);
+    // One storage key and one body class, where there were three of each.
+    expect(js).toContain("const DRAWER_KEY = 'turminder.drawer'");
+    for (const gone of ['filesOpen', 'embedsOpen', 'turminder.activity']) {
+      expect(js).not.toContain(gone);
+    }
+    for (const gone of ['files-open', 'embeds-open', 'activity-open']) {
+      expect(css).not.toContain(gone);
+      expect(js).not.toContain(gone);
+    }
+  });
+
+  it('leaves the rail reachable from under an open sheet', () => {
+    // The scrim lives inside the shell, and the shell starts below the strip.
+    // A scrim over the whole viewport would make switching panels on a phone
+    // dismiss-then-open — two taps again, by a different route.
+    expect(at('id="scrim"')).toBeGreaterThan(at('<div id="shell">'));
+    expect(css).toMatch(/#scrim\s*\{[^}]*position:\s*absolute/s);
+  });
+
+  it('reads the activity list before the panel is opened', () => {
+    // The tab carries the count of outstanding work, and a count that only
+    // became true once you opened the panel would answer the question after
+    // you had stopped asking it (§9.1). Unconditional on `welcome`, unlike the
+    // file tree, which is only worth fetching for a drawer that is showing it.
+    const welcome = js.slice(
+      js.indexOf("case 'welcome'"),
+      js.indexOf("case 'conversation.list.result'"),
+    );
+    expect(welcome).toMatch(/^\s*send\('event\.list', \{\}\);/m);
+    expect(welcome).toMatch(/if \(state\.drawer === 'files'\) send\('files\.list'/);
   });
 });
 
