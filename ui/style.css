@@ -35,11 +35,28 @@ body {
      actually occluding the bottom, and removes it otherwise — so on every
      other screen this line resolves to the `100dvh` above it. */
   height: var(--visible-height, 100dvh);
+  /* A column now: the status strip spans the page above the shell, because
+     that is where the drawer's tab rail lives (§9.1). The shell below it is
+     the row that used to be `body`. */
   display: flex;
+  flex-direction: column;
   /* The shell is columns; nothing in it may produce a sideways page scroll.
      `clip` rather than `hidden` so it does not create a scroll container and
      break `position: sticky` inside the panes. */
   overflow-x: clip;
+}
+/* The containing block for the sheets and the scrim. Anchoring them here
+   rather than to the viewport is what keeps them below the status strip, so
+   the tab rail stays live and lit while a sheet covers the transcript. It can
+   never be wider than the viewport — `main` is the only flex child that grows
+   and it carries `min-width: 0` — so this measures exactly what `fixed` used
+   to, minus the strip. */
+#shell {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
 }
 a {
   color: var(--accent);
@@ -256,6 +273,9 @@ main {
   flex-direction: column;
   min-width: 0;
 }
+/* The page's top row, not the transcript's (§9.1) — it spans the sidebar and
+   the drawer too, because the tab rail at its right end belongs at the edge
+   the drawer opens from. */
 #status {
   padding: 4px 14px 4px 10px;
   font-size: 12px;
@@ -265,6 +285,7 @@ main {
   gap: 8px;
   align-items: center;
   min-height: 37px;
+  flex: 0 0 auto;
 }
 #status .dot {
   width: 8px;
@@ -800,32 +821,31 @@ main {
   background: var(--panel);
 }
 
-/* embeds: panel and in-transcript frames (§22.6) */
-/* On the right of the transcript, unlike the file panel: it is a reference
-   shelf for the conversation being read, not a place you work. */
-/* The activity panel (§4.2.1) shares the views panel's geometry and its place
-   in the column order: one more pane through the same solo/sheet machinery,
-   not a second kind of thing. */
-#activity {
+/* ── the drawer (§9.1) ─────────────────────────────────────────────────────
+   Files (§18.5), views (§22.6) and activity (§4.2.1) are one pane on the right
+   with three tabs. 340px is the file panel's old width and the widest of the
+   three: paths and an editor need it, and a drawer that changed width when you
+   changed tab would move the transcript under the reader's eyes. */
+#drawer {
   display: none;
-  width: 300px;
-  min-width: 300px;
+  width: 340px;
+  min-width: 340px;
   border-left: 1px solid var(--line);
   background: var(--panel);
   flex-direction: column;
   overflow: hidden;
 }
-body.activity-open #activity {
+body.drawer-open #drawer {
   display: flex;
 }
-#activity > header {
+#drawer-head {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
 }
-#activity h2 {
+#drawer-title {
   font-size: 13px;
   margin: 0;
   flex: 1;
@@ -833,6 +853,75 @@ body.activity-open #activity {
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
+/* One tab's contents at a time. The panels are columns rather than blocks
+   because the files one is a list, a viewer and an editor stacked, and the
+   other two are a single scroller that has to reach the bottom of the drawer. */
+#drawer > [role='tabpanel'] {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+#drawer > [role='tabpanel']:not([hidden]) {
+  display: flex;
+}
+/* A tabpanel is focusable so the list can be scrolled from the keyboard; that
+   should not draw a box around the whole drawer on a mouse click. */
+#drawer > [role='tabpanel']:focus {
+  outline: none;
+}
+#drawer > [role='tabpanel']:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* ── the tab rail (§9.1) ───────────────────────────────────────────────────
+   Right-justified in the status strip, so it is at the edge the drawer opens
+   from and reachable at every width. */
+#drawer-tabs {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
+  margin-left: 4px;
+}
+button.icon[role='tab'] {
+  position: relative;
+}
+button.icon[aria-selected='true'] {
+  color: var(--accent);
+  background: #20252a;
+  border-color: var(--accent);
+}
+/* The unsettled-event count, so the answer to "is it doing the thing I asked"
+   is readable without opening anything. A `::after` and not a child element:
+   `paintIcon` owns this button's innerHTML. */
+/* Inside the button's box, not overhanging it: the rail is the last thing in
+   the strip and the strip is the first thing on the page, so a badge that hung
+   off the corner would sit a pixel and a half from the top of the viewport at
+   desktop density and less than that on a phone. */
+#tab-activity[data-count]::after {
+  content: attr(data-count);
+  position: absolute;
+  top: 0;
+  right: 0;
+  min-width: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--dim);
+  color: var(--panel);
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+  font-weight: 700;
+}
+#tab-activity[data-count][data-mood='waiting']::after {
+  background: var(--warn);
+}
+#tab-activity[data-count][data-mood='dead']::after {
+  background: var(--bad);
+}
+
 #activity-list {
   flex: 1;
   overflow-y: auto;
@@ -903,33 +992,6 @@ body.activity-open #activity {
   font-size: 12px;
 }
 
-#embeds {
-  display: none;
-  width: 300px;
-  min-width: 300px;
-  border-left: 1px solid var(--line);
-  background: var(--panel);
-  flex-direction: column;
-  overflow: hidden;
-}
-body.embeds-open #embeds {
-  display: flex;
-}
-#embeds > header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--line);
-}
-#embeds h2 {
-  font-size: 13px;
-  margin: 0;
-  flex: 1;
-  color: var(--dim);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
 #embed-list {
   flex: 1;
   overflow-y: auto;
@@ -1071,39 +1133,12 @@ body.embeds-open #embeds {
 }
 
 /* file panel (§18.5) */
-#files {
-  display: none;
-  width: 340px;
-  min-width: 340px;
-  border-right: 1px solid var(--line);
-  background: var(--panel);
-  flex-direction: column;
-  overflow: hidden;
-}
-body.files-open #files {
-  display: flex;
-}
-#files > header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--line);
-}
-#files h2 {
-  font-size: 13px;
-  margin: 0;
-  flex: 1;
-  color: var(--dim);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
 #file-list {
   flex: 1;
   overflow-y: auto;
   padding: 4px 0;
 }
-#files.viewing #file-list {
+#panel-files.viewing #file-list {
   display: none;
 }
 .file-entry {
@@ -1142,7 +1177,7 @@ body.files-open #files {
   flex-direction: column;
   overflow: hidden;
 }
-#files.viewing #file-view {
+#panel-files.viewing #file-view {
   display: flex;
 }
 #file-bar {
@@ -1764,32 +1799,21 @@ body.locked #gate {
 
    The fix is not "smaller columns". It is that below the threshold the side
    panes stop being columns at all and become sheets over the transcript. The
-   body classes are unchanged (`sidebar-collapsed`, `files-open`,
-   `embeds-open`); what changes is what "open" is allowed to mean. app.js
-   closes the panes when it crosses into sheet mode and restores the saved
-   preference on the way back, so there is still exactly one source of state.
+   body classes are unchanged (`sidebar-collapsed`, `drawer-open`); what
+   changes is what "open" is allowed to mean. app.js closes the panes when it
+   crosses into sheet mode and restores the saved preference on the way back,
+   so there is still exactly one source of state.
 
-   Thresholds (App. A): 1400 both panels · 1100 sheets · 640 phone density. */
-
-@media (max-width: 1399.98px) {
-  /* Between 1100 and 1400 both panels still fit as columns arithmetically —
-     260 + 340 + 300 leaves 200px of transcript at the low end, which is not a
-     transcript. app.js keeps it to one; this is the belt for a stale class. */
-  body.files-open #embeds,
-  body.files-open #activity,
-  body.embeds-open #activity {
-    display: none;
-  }
-}
+   Thresholds (App. A): 1100 sheets · 640 phone density. */
 
 @media (max-width: 1099.98px) {
-  /* Sheets, not columns. Fixed rather than absolute so the pane is measured
-     against the viewport and cannot be pushed sideways by a wide transcript. */
+  /* Sheets, not columns. Absolute against `#shell` rather than fixed against
+     the viewport: the shell starts below the status strip, which is what keeps
+     the tab rail uncovered and tappable while a sheet is open. The shell is
+     viewport-width by construction, so this measures what `fixed` did. */
   #sidebar,
-  #files,
-  #embeds,
-  #activity {
-    position: fixed;
+  #drawer {
+    position: absolute;
     z-index: 20;
     top: 0;
     bottom: 0;
@@ -1801,13 +1825,11 @@ body.locked #gate {
     box-shadow: 0 0 28px rgb(0 0 0 / 70%);
     background: #1d2126;
   }
-  #sidebar,
-  #files {
+  #sidebar {
     left: 0;
     border-right: 1px solid var(--line);
   }
-  #embeds,
-  #activity {
+  #drawer {
     right: 0;
     border-left: 1px solid var(--line);
   }
@@ -1826,10 +1848,12 @@ body.locked #gate {
 }
 
 /* The scrim is markup, not a pseudo-element: it needs to be a click target,
-   and a pseudo-element on `body` sits behind body's positioned children. */
+   and a pseudo-element on `body` sits behind body's positioned children. It
+   covers the shell and stops at the status strip, so switching panels from
+   under an open sheet is one tap on the rail rather than dismiss-then-open. */
 #scrim {
   display: none;
-  position: fixed;
+  position: absolute;
   inset: 0;
   z-index: 15;
   background: rgb(0 0 0 / 62%);
