@@ -488,6 +488,14 @@ are supported; v1 policy is deliver-to-all, any ack settles.
   in a new message below the block rather than growing the one above it. What
   the assistant said is still one turn in `turns` (§20.2); the split is
   presentation, and the second message does not re-announce the speaker.
+  Its header carries how long the stretch has been running and, **for a block
+  that reasoned**, an estimate of the output that reasoning cost — the one
+  place the figure belongs to the thinking that produced it, since reasoning is
+  billed output the reader never sees in the transcript (§20.1) and the usage
+  line has folded it into the turn's total by the time it appears there. It is
+  **marked as an estimate** and stays one: token counts arrive per turn, never
+  per block, so no real number replaces it. Blocks that only called tools show
+  nothing there.
 - **A conversation that does not exist yet greets you** — "Good morning,
   <user_name>", by the *reader's* clock rather than the identity's timezone
   (G.3), because the line is about the person looking at the screen and not

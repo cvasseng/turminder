@@ -66,6 +66,43 @@ describe('the reasoning body is not capped (§20.1)', () => {
   });
 });
 
+/**
+ * What the think cost, on the block that did it (§9, §20.1).
+ *
+ * The regression this guards is a second `/ 4` appearing somewhere: the strip
+ * and the block header describe the same output, and two copies of the same
+ * magic number are two numbers for one think the day someone tunes one of them.
+ */
+describe('the block header estimates its own output (§9)', () => {
+  it('shares one chars-per-token estimate with the usage strip', () => {
+    expect(js).toContain('const CHARS_PER_TOKEN = 4');
+    // Every estimate goes through the one helper. A bare `/ 4` is the bug.
+    expect([...js.matchAll(/estTokens\(/g)].length).toBeGreaterThanOrEqual(3);
+    expect(js).not.toMatch(/Math\.round\([A-Za-z.]+ \/ 4\)/);
+  });
+
+  it("counts this block's reasoning, not the turn's output", () => {
+    // `state.reasoningChars` is the turn's running total and resets with it;
+    // the header belongs to one stretch of work, so it keeps its own.
+    expect(showReasoning).toContain('group.reasoningChars += text.length');
+    const fn = functionSource('showGroupTokens');
+    expect(fn).toContain('group.reasoningChars');
+    expect(fn).not.toContain('state.reasoningChars');
+    expect(fn).not.toContain('turnTokensOut');
+  });
+
+  it('says nothing on a block that only called tools', () => {
+    expect(functionSource('showGroupTokens')).toMatch(/if \(!group\.reasoningChars\) return;/);
+  });
+
+  it('is marked as an estimate, because nothing ever replaces it', () => {
+    // Token counts arrive per turn, never per block: there is no settled
+    // figure to swap in, so the tilde is permanent rather than provisional.
+    expect(functionSource('showGroupTokens')).toContain('`~${compact(');
+    expect(functionSource('settleGroup')).not.toContain('tokens');
+  });
+});
+
 describe('the box is bounded instead (§9.1)', () => {
   it('gives the reasoning line a viewport-relative ceiling it can scroll in', () => {
     const reasoning = rule('.act-line.reasoning');
