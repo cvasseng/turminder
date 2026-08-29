@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LAYOUT_VERSION, openDataHome, resolveDataDir } from '../src/core/datadir.js';
 import { UserFacingError } from '../src/core/errors.js';
-import { tmpDir } from './helpers.js';
+import { copyTree, tmpDir } from './helpers.js';
 
 describe('resolveDataDir', () => {
   const savedEnv = process.env.TURMINDER_DATA_DIR;
@@ -124,7 +124,7 @@ describe('openDataHome', () => {
     const root = path.join(t.dir, 'home');
     openDataHome(root);
     const copy = path.join(t.dir, 'copy');
-    fs.cpSync(root, copy, { recursive: true });
+    copyTree(root, copy);
     const { created, home } = openDataHome(copy);
     expect(created).toBe(false);
     expect(home.readManifest().layout_version).toBe(LAYOUT_VERSION);
