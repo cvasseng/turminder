@@ -816,9 +816,14 @@ function startGroup() {
   const summary = document.createElement('span');
   summary.className = 'act-summary';
   summary.textContent = 'working…';
+  // Hidden until there is a chain to measure: a run of pure tool calls has
+  // nothing to say here, and "~0 out" beside the clock is worse than silence.
+  const tokens = document.createElement('span');
+  tokens.className = 'act-tokens';
+  tokens.hidden = true;
   const timer = document.createElement('span');
   timer.className = 'act-timer';
-  head.append(caret, pulse, summary, timer);
+  head.append(caret, pulse, summary, tokens, timer);
 
   const wrap = document.createElement('div');
   wrap.className = 'act-wrap';
@@ -841,8 +846,11 @@ function startGroup() {
     el,
     lines,
     summary,
+    tokens,
     timer,
     steps: 0,
+    /** This block's own reasoning, for the header's estimate (§20.1). */
+    reasoningChars: 0,
     tools: [],
     reasoningEl: null,
     reasoningNode: null,
@@ -968,6 +976,8 @@ function showReasoning(text) {
     );
   }
   group.reasoningNode.appendData(text);
+  group.reasoningChars += text.length;
+  showGroupTokens(group);
   group.reasoningTail = (group.reasoningTail + text).slice(-REASONING_TAIL_CAP);
   group.summary.textContent = `reasoning: ${tail(group.reasoningTail, 96)}`;
   if (group.reasoningPinned) group.reasoningEl.scrollTop = group.reasoningEl.scrollHeight;
@@ -989,6 +999,36 @@ function settleGroup() {
   group.summary.textContent = group.tools.length
     ? group.tools.join(', ')
     : `${group.steps} step${group.steps === 1 ? '' : 's'}`;
+}
+
+/**
+ * Characters per output token, for every figure showing before the server has
+ * counted anything. One constant because two places describe the same output —
+ * the usage strip and the block header — and two magic 4s would eventually
+ * disagree about one think.
+ */
+const CHARS_PER_TOKEN = 4;
+
+function estTokens(chars) {
+  return Math.round(chars / CHARS_PER_TOKEN);
+}
+
+/**
+ * What this think cost, beside how long it took (§20.1).
+ *
+ * Reasoning is billed output the reader never sees in the transcript, so the
+ * block is the one place the figure can belong to the thinking that produced
+ * it — by the time the usage strip has it, it is folded into the turn's total
+ * with everything else.
+ *
+ * An estimate, and marked as one: the server counts tokens per *turn*, never
+ * per block, so unlike the strip's figure there is no real number arriving
+ * later to replace this.
+ */
+function showGroupTokens(group) {
+  if (!group.reasoningChars) return;
+  group.tokens.hidden = false;
+  group.tokens.textContent = `~${compact(estTokens(group.reasoningChars))} out`;
 }
 
 function compact(n) {
@@ -1029,7 +1069,7 @@ function renderUsage() {
     // An estimate for as long as the figure is derived from characters. A turn
     // that has settled resets both counters, so this goes false on its own.
     const estimating = Boolean(state.streaming) || streamedNow > 0;
-    const out = estimating ? Math.round(streamedNow / 4) : state.turnTokensOut;
+    const out = estimating ? estTokens(streamedNow) : state.turnTokensOut;
     const inTokens = state.turnTokensIn || u?.context_used || 0;
     const ctx = u?.context_size ?? null;
     // Pressure, never billing (§21.1): the peak single prompt is what has to

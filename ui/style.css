@@ -663,6 +663,9 @@ main {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* What the think cost, beside how long it took: one question asked two ways,
+   so they read as a pair rather than as two unrelated figures. */
+.act-tokens,
 .act-timer {
   flex: 0 0 auto;
   opacity: 0.65;

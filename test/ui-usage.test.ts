@@ -59,8 +59,15 @@ describe('the live estimate can see reasoning (§20.1)', () => {
     expect(renderUsage).toMatch(
       /const streamedNow = state\.streamedChars \+ state\.reasoningChars;/,
     );
-    expect(renderUsage).toMatch(/Math\.round\(streamedNow \/ 4\)/);
+    // Through the shared helper, not an inline divisor: the block header
+    // estimates the same output from the same characters, and the strip
+    // saying one thing while the block says another is one think with two
+    // numbers on it. The constant is the single place either can be tuned.
+    expect(renderUsage).toMatch(/estTokens\(streamedNow\)/);
+    expect(js).toContain('const CHARS_PER_TOKEN = 4');
+    expect(functionSource('estTokens')).toMatch(/chars \/ CHARS_PER_TOKEN/);
     expect(renderUsage).not.toMatch(/state\.streamedChars \/ 4/);
+    expect(js).not.toMatch(/Math\.round\([A-Za-z.]+ \/ 4\)/);
   });
 
   it('accumulates them where the reasoning deltas arrive', () => {

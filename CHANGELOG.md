@@ -127,6 +127,15 @@
    the transcript stays where you left it. Reasoning is still never saved:
    reload and it is gone, as before.
 
+ * A thinking block now says what the think cost, beside how long it took:
+   `~1.1k out · 2.8s`. Reasoning is billed like any other output and on a
+   thinking model it is most of it, but it never appears in the transcript —
+   so by the time the number reaches the strip under the composer it has been
+   folded into the turn's total and there is no longer anything to attach it
+   to. On the block it belongs to the thinking that produced it. It is an
+   estimate and says so: counts arrive per turn, never per block. A stretch of
+   work that only called tools shows nothing there.
+
  * Fixed: the browser extension could never pair on Firefox. **Connect this
    browser** said it could not reach the gateway and asked whether the service
    was running, about a service that was running and answering — it had asked
