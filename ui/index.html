@@ -154,12 +154,48 @@
         title="Show the sidebar"
         aria-label="Show the sidebar"
       ></button>
+      <button
+        id="collapse"
+        class="icon"
+        data-icon="panel-close"
+        title="Collapse the sidebar"
+        aria-label="Collapse the sidebar"
+      ></button>
+      <!-- Who this install is, then what it runs on. Both were in the sidebar,
+           where collapsing the column took them off the page; the strip is the
+           one thing every layout renders. The Mind's name leads and carries the
+           accent because it is the one a reader is looking for — the product
+           name behind it is context, and is sized like context. -->
+      <h1 id="brand">
+        <span id="instance">…</span>
+        <span class="brand-sep" aria-hidden="true">|</span>
+        <span class="brand-name">Turminder</span>
+      </h1>
       <span class="badge" id="badge"></span>
       <span class="spacer"></span>
       <!-- The model selector (§10.6): only rendered with a choice to make. -->
       <span id="model-selector" hidden></span>
       <span id="status-text"></span>
       <span class="dot" id="status-dot"></span>
+      <!-- Devices and sign-out: whole-install actions, so they belong beside
+           the identity rather than at the foot of the conversation list. The
+           divider separates them from the rail, which navigates instead. -->
+      <span class="strip-divider" aria-hidden="true"></span>
+      <button
+        id="forget-token"
+        class="icon"
+        data-icon="logout"
+        title="Sign out — this browser will need the device token again"
+        aria-label="Sign out"
+      ></button>
+      <button
+        id="devices-toggle"
+        class="icon"
+        data-icon="key"
+        title="Devices and access tokens"
+        aria-label="Devices and access tokens"
+      ></button>
+      <span class="strip-divider" aria-hidden="true"></span>
       <!-- One drawer, three tabs. A tablist rather than three toggles because
            that is what the layout already was: below `ui_sheet_max` only one
            pane could ever be open, so three `aria-pressed` buttons described a
@@ -220,26 +256,9 @@
            panes are columns again. -->
       <button id="scrim" type="button" tabindex="-1" aria-hidden="true"></button>
       <aside id="sidebar">
-        <header>
-          <h1>Turminder</h1>
-          <button
-            id="collapse"
-            class="icon"
-            data-icon="panel-close"
-            title="Collapse the sidebar"
-            aria-label="Collapse the sidebar"
-          ></button>
-          <div id="whoami">
-            <div id="instance">…</div>
-            <button
-              id="forget-token"
-              class="icon"
-              data-icon="logout"
-              title="Sign out — this browser will need the device token again"
-              aria-label="Sign out"
-            ></button>
-          </div>
-        </header>
+        <!-- No header: the name that was here is in the strip, and the button
+             that closed the column is beside the one that reopens it. What is
+             left is the list, which is what the column is for. -->
         <div id="conversations"></div>
         <footer>
           <button
@@ -257,16 +276,23 @@
             aria-label="Show archived conversations"
             aria-pressed="false"
           ></button>
-          <span class="spacer"></span>
-          <button
-            id="devices-toggle"
-            class="icon"
-            data-icon="key"
-            title="Devices and access tokens"
-            aria-label="Devices and access tokens"
-          ></button>
         </footer>
       </aside>
+      <!-- Splitters (§9.1). `separator` with a tabindex is the ARIA window
+           splitter: the arrows resize, Home and End go to the ends, and the
+           value is a width in px so a screen reader can say what happened.
+           Present only where there is a boundary to drag — a collapsed
+           sidebar and a closed drawer have none, and in sheet mode the panes
+           are overlays whose width is the viewport's business, not yours. -->
+      <div
+        id="resize-sidebar"
+        class="resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-controls="sidebar"
+        aria-label="Resize the conversation list"
+        tabindex="0"
+      ></div>
       <main>
         <div id="messages"></div>
         <!-- Zero-height on purpose: the button inside it floats over the bottom
@@ -304,6 +330,15 @@
         </form>
         <div id="usage" title="Context use and cost of the last turn"></div>
       </main>
+      <div
+        id="resize-drawer"
+        class="resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-controls="drawer"
+        aria-label="Resize the side panel"
+        tabindex="0"
+      ></div>
       <!-- One drawer for what used to be three panels (§9.1). They were never
            all reachable at once — below `ui_sheet_max` the layout allowed
            exactly one — so this is the arithmetic made honest rather than a

@@ -70,6 +70,10 @@ const COLLAPSED_KEY = 'turminder.sidebarCollapsed';
 const ARCHIVED_KEY = 'turminder.showArchived';
 /** Which of the drawer's tabs is showing (§9.1); '' is closed. */
 const DRAWER_KEY = 'turminder.drawer';
+/** Folders the reader has closed in the file tree (§18.5) — see `folderOpen`. */
+const FOLDERS_KEY = 'turminder.foldersClosed';
+/** The two draggable column widths (§9.1). */
+const WIDTH_KEYS = { sidebar: 'turminder.sidebarWidth', drawer: 'turminder.drawerWidth' };
 
 /** App. A `pair_poll_interval_s` — the waiting gate's claim poll (§24.4). */
 const PAIR_POLL_MS = 2000;
@@ -103,6 +107,25 @@ const EXPECTED_FROM_SERVER = [
   'token.list.result',
   'token.reveal',
 ];
+
+function storedWidth(which, fallback) {
+  const n = Number(localStorage.getItem(WIDTH_KEYS[which]));
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : fallback;
+}
+
+/**
+ * A hand-edited or older store should cost the tree nothing: anything that is
+ * not an array of strings reads as "nothing closed", which is the default the
+ * whole scheme is built around.
+ */
+function readFoldersClosed() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(FOLDERS_KEY) ?? '[]');
+    return Array.isArray(raw) ? raw.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
 
 const state = {
   socket: null,
@@ -157,7 +180,14 @@ const state = {
   conversations: [],
   // form_id -> the rendered element, so a re-sent form replaces rather than stacks.
   forms: new Map(),
-  files: { entries: [], path: null, content: null, editing: false },
+  files: {
+    entries: [],
+    path: null,
+    content: null,
+    editing: false,
+    /** Closed folders, not open ones — open is the default (see `folderOpen`). */
+    collapsed: new Set(readFoldersClosed()),
+  },
   // Embeds (§22.6): `inChat` is what *this* transcript references, in the order
   // the markers appear — built from the embed.resolve round-trips the slots
   // already make, so the panel needs no list of its own. `entries` is the kept
@@ -176,6 +206,12 @@ const state = {
    * ever honoured one of them at a time anyway.
    */
   drawer: null,
+  /**
+   * The column widths the reader chose (§9.1). The defaults match the
+   * stylesheet's; a stored value that is not a number reads as the default
+   * rather than as `NaN` propagating into a CSS property.
+   */
+  widths: { sidebar: storedWidth('sidebar', 260), drawer: storedWidth('drawer', 340) },
   showArchived: localStorage.getItem(ARCHIVED_KEY) === '1',
   devices: [],
   /** Uploads waiting to be sent with the next message (§26.2). */
@@ -1541,6 +1577,7 @@ function handle(frame) {
 
     case 'files.read.result':
       state.files.path = p.path;
+      revealFolders(p.path);
       state.files.content = p.binary ? null : p.content;
       state.files.editing = false;
       renderFileView(p);
@@ -2675,9 +2712,164 @@ function anyPaneOpen() {
   return !document.body.classList.contains('sidebar-collapsed') || drawerTab() !== null;
 }
 
+function sidebarOpen() {
+  return !document.body.classList.contains('sidebar-collapsed');
+}
+
+/* ── the splitters (§9.1) ─────────────────────────────────────────────────
+   Both columns are draggable, and what bounds them is §9.1's rule rather than
+   a pair of maxima in the stylesheet: the transcript is never the pane that
+   shrinks to nothing, so a column may only grow into space the transcript can
+   spare. That ceiling depends on what the *other* column is currently taking,
+   which is why this is arithmetic here and not a `max-width` there.
+
+   `state.widths` is what the reader chose, always feasible for the window it
+   was chosen in. `applyWidths` re-fits it to the window they are in now and
+   writes the result to CSS **without** touching the store — the same rule the
+   panes themselves follow: preferences belong to the wide layout (§9.1). */
+
+/** App. A — the widths below which the shell stops being usable (§9.1). */
+const SIDEBAR_MIN_PX = 180;
+const DRAWER_MIN_PX = 260;
+const TRANSCRIPT_MIN_PX = 420;
+/** What one arrow key is worth. Small enough to aim, big enough to arrive. */
+const RESIZE_STEP_PX = 16;
+
+const PANES = {
+  sidebar: {
+    el: 'sidebar',
+    handle: 'resize-sidebar',
+    prop: '--sidebar-w',
+    min: SIDEBAR_MIN_PX,
+  },
+  drawer: { el: 'drawer', handle: 'resize-drawer', prop: '--drawer-w', min: DRAWER_MIN_PX },
+};
+
+function paneOpen(which) {
+  return which === 'sidebar' ? sidebarOpen() : drawerTab() !== null;
+}
+
+/** What this column may be right now, given the window and its neighbour. */
+function paneBounds(which) {
+  const other = which === 'sidebar' ? 'drawer' : 'sidebar';
+  const shell = $('shell').clientWidth || window.innerWidth;
+  const taken = paneOpen(other) ? $(PANES[other].el).getBoundingClientRect().width : 0;
+  const min = PANES[which].min;
+  return { min, max: Math.max(min, shell - taken - TRANSCRIPT_MIN_PX) };
+}
+
+/**
+ * Both widths at once, because each one's ceiling is what the other leaves.
+ *
+ * When two chosen widths cannot both fit — you dragged them wide and then
+ * narrowed the window — they give the difference back in proportion to what
+ * each is holding above its own floor. Taking it all from one would move a
+ * column the reader did not touch.
+ */
+function applyWidths() {
+  const shell = $('shell').clientWidth || window.innerWidth;
+  let sidebar = Math.max(SIDEBAR_MIN_PX, state.widths.sidebar);
+  let drawer = Math.max(DRAWER_MIN_PX, state.widths.drawer);
+  const openS = paneOpen('sidebar');
+  const openD = paneOpen('drawer');
+  const slackS = openS ? sidebar - SIDEBAR_MIN_PX : 0;
+  const slackD = openD ? drawer - DRAWER_MIN_PX : 0;
+  const want = slackS + slackD;
+  const give = Math.max(
+    0,
+    shell - TRANSCRIPT_MIN_PX - (openS ? SIDEBAR_MIN_PX : 0) - (openD ? DRAWER_MIN_PX : 0),
+  );
+  if (want > give) {
+    const keep = want ? Math.round((give * slackS) / want) : 0;
+    if (openS) sidebar = SIDEBAR_MIN_PX + keep;
+    if (openD) drawer = DRAWER_MIN_PX + (give - keep);
+  }
+  const root = document.documentElement.style;
+  root.setProperty('--sidebar-w', `${sidebar}px`);
+  root.setProperty('--drawer-w', `${drawer}px`);
+  for (const [which, width] of [
+    ['sidebar', sidebar],
+    ['drawer', drawer],
+  ]) {
+    const handle = $(PANES[which].handle);
+    const other = which === 'sidebar' ? drawer : sidebar;
+    const openOther = which === 'sidebar' ? openD : openS;
+    handle.setAttribute('aria-valuenow', String(width));
+    handle.setAttribute('aria-valuemin', String(PANES[which].min));
+    handle.setAttribute(
+      'aria-valuemax',
+      String(Math.max(PANES[which].min, shell - (openOther ? other : 0) - TRANSCRIPT_MIN_PX)),
+    );
+  }
+}
+
+/** Clamped at the point of choosing, so the store never holds an impossible width. */
+function setPaneWidth(which, px, persist = true) {
+  const { min, max } = paneBounds(which);
+  state.widths[which] = Math.min(max, Math.max(min, Math.round(px)));
+  applyWidths();
+  if (persist) localStorage.setItem(WIDTH_KEYS[which], String(state.widths[which]));
+}
+
+function wireResizer(which) {
+  const handle = $(PANES[which].handle);
+  handle.addEventListener('pointerdown', (e) => {
+    // Sheet mode has no boundary to drag: the panes float over the transcript
+    // rather than taking width from it. The handle is `display: none` there —
+    // this is the belt for a pointer that arrived anyway.
+    if (SHEET_MODE.matches || e.button !== 0) return;
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add('dragging');
+    document.body.classList.add('resizing');
+    // Measured once: the shell cannot move or resize under a drag, and reading
+    // it per pointermove would be a forced layout on every frame.
+    const rect = $('shell').getBoundingClientRect();
+    const move = (m) => {
+      setPaneWidth(
+        which,
+        which === 'sidebar' ? m.clientX - rect.left : rect.right - m.clientX,
+        false,
+      );
+    };
+    const done = () => {
+      handle.removeEventListener('pointermove', move);
+      handle.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      localStorage.setItem(WIDTH_KEYS[which], String(state.widths[which]));
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', done, { once: true });
+    handle.addEventListener('pointercancel', done, { once: true });
+  });
+
+  // The ARIA window-splitter keys. Left and right are screen directions, so
+  // the drawer's grow key is the opposite of the sidebar's.
+  handle.addEventListener('keydown', (e) => {
+    const grow = which === 'sidebar' ? 'ArrowRight' : 'ArrowLeft';
+    const shrink = which === 'sidebar' ? 'ArrowLeft' : 'ArrowRight';
+    const now = state.widths[which];
+    const bounds = paneBounds(which);
+    const next =
+      e.key === grow
+        ? now + RESIZE_STEP_PX
+        : e.key === shrink
+          ? now - RESIZE_STEP_PX
+          : e.key === 'Home'
+            ? bounds.min
+            : e.key === 'End'
+              ? bounds.max
+              : null;
+    if (next === null) return;
+    e.preventDefault();
+    setPaneWidth(which, next);
+  });
+}
+
 /** The scrim exists exactly when a sheet is over the transcript. */
 function applySheets() {
   document.body.classList.toggle('sheet-open', SHEET_MODE.matches && anyPaneOpen());
+  applyWidths();
 }
 
 /**
@@ -2721,6 +2913,23 @@ function applyLayout() {
   else restorePanes();
   applySheets();
 }
+
+/* Every pane mutator ends in `applySheets`, so the widths re-fit from there
+   rather than from four call sites that would each have to remember. */
+wireResizer('sidebar');
+wireResizer('drawer');
+
+/* A window resize changes what the transcript can spare. One recompute per
+   frame: `resize` fires continuously on a drag, and each one reads a layout
+   and writes two properties that invalidate it. */
+let widthTick = null;
+window.addEventListener('resize', () => {
+  if (widthTick !== null) return;
+  widthTick = requestAnimationFrame(() => {
+    widthTick = null;
+    applyWidths();
+  });
+});
 
 SHEET_MODE.addEventListener('change', applyLayout);
 
@@ -3087,6 +3296,18 @@ function setFileViewing(viewing) {
   $('panel-files').classList.toggle('viewing', viewing);
 }
 
+/** Opening a file inside a closed folder opens the folders it is under. */
+function revealFolders(path) {
+  const parts = String(path ?? '').split('/');
+  parts.pop();
+  let prefix = '';
+  for (const part of parts) {
+    prefix = prefix ? `${prefix}/${part}` : part;
+    state.files.collapsed.delete(prefix);
+  }
+  localStorage.setItem(FOLDERS_KEY, JSON.stringify([...state.files.collapsed]));
+}
+
 function closeFile() {
   state.files.path = null;
   state.files.content = null;
@@ -3101,6 +3322,108 @@ function closeFile() {
   renderFileList();
 }
 
+/**
+ * The listing as a tree (§18.5).
+ *
+ * `files.list` walks the store recursively and returns files only, root-
+ * relative with `/` separators (F.8) — directories are not in the payload and
+ * never were, so the folders here are inferred from the paths. That is also
+ * why this needs no frame of its own: the panel already has everything.
+ *
+ * Folders sort before files, each alphabetically. The server sorts per
+ * directory as it walks, but flattening loses that the moment two branches
+ * interleave.
+ */
+function fileTree(entries) {
+  const root = { dirs: new Map(), files: [] };
+  for (const entry of entries) {
+    const parts = entry.path.split('/');
+    const name = parts.pop();
+    let node = root;
+    let prefix = '';
+    for (const part of parts) {
+      prefix = prefix ? `${prefix}/${part}` : part;
+      if (!node.dirs.has(part))
+        node.dirs.set(part, { path: prefix, dirs: new Map(), files: [] });
+      node = node.dirs.get(part);
+    }
+    node.files.push({ ...entry, name });
+  }
+  const sort = (node) => {
+    node.files.sort((a, b) => a.name.localeCompare(b.name));
+    node.dirs = new Map([...node.dirs].sort(([a], [b]) => a.localeCompare(b)));
+    for (const dir of node.dirs.values()) sort(dir);
+  };
+  sort(root);
+  return root;
+}
+
+/**
+ * Folders are open unless you closed them, which is why the stored set is of
+ * *collapsed* paths: on a store with four files in two folders, an all-closed
+ * tree would be strictly less than the flat list it replaced, and the set that
+ * has to persist would be the big one.
+ */
+function folderOpen(path) {
+  return !state.files.collapsed.has(path);
+}
+
+function setFolderOpen(path, open) {
+  if (open) state.files.collapsed.delete(path);
+  else state.files.collapsed.add(path);
+  localStorage.setItem(FOLDERS_KEY, JSON.stringify([...state.files.collapsed]));
+  renderFileList();
+}
+
+function folderRow(dir, depth) {
+  const open = folderOpen(dir.path);
+  const el = document.createElement('button');
+  el.type = 'button';
+  el.className = `file-entry file-folder${open ? ' open' : ''}`;
+  el.style.paddingLeft = `${12 + depth * 13}px`;
+  el.setAttribute('aria-expanded', open ? 'true' : 'false');
+  const caret = document.createElement('span');
+  caret.className = 'file-caret';
+  caret.innerHTML = iconSvg('chevron');
+  const name = document.createElement('span');
+  name.className = 'file-path';
+  name.textContent = dir.path.split('/').pop();
+  const meta = document.createElement('span');
+  meta.className = 'file-meta';
+  const n = countFiles(dir);
+  meta.textContent = `${n}`;
+  el.append(caret, name, meta);
+  el.onclick = () => setFolderOpen(dir.path, !open);
+  return el;
+}
+
+/** What the folder is worth opening for, counted through its whole subtree. */
+function countFiles(dir) {
+  let n = dir.files.length;
+  for (const child of dir.dirs.values()) n += countFiles(child);
+  return n;
+}
+
+function fileRow(entry, depth) {
+  const el = document.createElement('button');
+  el.type = 'button';
+  el.className = `file-entry${entry.path === state.files.path ? ' active' : ''}`;
+  el.style.paddingLeft = `${12 + depth * 13 + 17}px`;
+  const name = document.createElement('span');
+  name.className = 'file-path';
+  name.textContent = entry.name;
+  name.title = entry.path;
+  const meta = document.createElement('span');
+  meta.className = 'file-meta';
+  meta.textContent = entry.binary ? 'binary' : `${Math.max(1, Math.round(entry.size / 1024))}k`;
+  el.append(name, meta);
+  el.onclick = () => {
+    setFileStatus('');
+    send('files.read', { path: entry.path });
+  };
+  return el;
+}
+
 function renderFileList() {
   const box = $('file-list');
   box.innerHTML = '';
@@ -3111,24 +3434,14 @@ function renderFileList() {
     box.append(empty);
     return;
   }
-  for (const entry of state.files.entries) {
-    const el = document.createElement('div');
-    el.className = `file-entry${entry.path === state.files.path ? ' active' : ''}`;
-    const name = document.createElement('span');
-    name.className = 'file-path';
-    name.textContent = entry.path;
-    const meta = document.createElement('span');
-    meta.className = 'file-meta';
-    meta.textContent = entry.binary
-      ? 'binary'
-      : `${Math.max(1, Math.round(entry.size / 1024))}k`;
-    el.append(name, meta);
-    el.onclick = () => {
-      setFileStatus('');
-      send('files.read', { path: entry.path });
-    };
-    box.append(el);
-  }
+  const walk = (node, depth) => {
+    for (const dir of node.dirs.values()) {
+      box.append(folderRow(dir, depth));
+      if (folderOpen(dir.path)) walk(dir, depth + 1);
+    }
+    for (const entry of node.files) box.append(fileRow(entry, depth));
+  };
+  walk(fileTree(state.files.entries), 0);
 }
 
 function renderFileActions(hasText) {

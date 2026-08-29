@@ -513,18 +513,21 @@ puts the assistant in someone's hand, and the UI has to survive arriving
 there. §16 defers a native **mobile app**; it does not defer the web UI on a
 small screen.
 
-The shell is a sidebar, a transcript and two side panels. The rule that makes
-it work at every width is that **the transcript is never the pane that
-shrinks to nothing** — it is the reason the page exists, and a layout in
-which a 340px panel outranks it is wrong however the arithmetic falls out.
-Three widths follow from the transcript needing roughly 420px to be readable
-(constants in App. A):
+The shell is a **status strip** spanning the page, and under it a sidebar, a
+transcript and **one drawer** on the right. The rule that makes it work at
+every width is that **the transcript is never the pane that shrinks to
+nothing** — it is the reason the page exists, and a layout in which a 340px
+panel outranks it is wrong however the arithmetic falls out. Two widths follow
+from the transcript needing roughly 420px to be readable (constants in App. A):
 
 - **Below `ui_sheet_max`** the side panes stop being columns. They overlay
   the transcript as full-height sheets over a scrim, one at a time; the
   transcript keeps the full width underneath and does not reflow when a sheet
-  opens. Dismissal is the scrim, `Escape`, or the pane's own control — **and
-  a gesture inside a sheet that changes what the transcript shows dismisses it
+  opens. The sheets and the scrim start **below the status strip**, so the
+  drawer's tab rail (below) stays visible and tappable while a sheet is over
+  the transcript — switching panels is one tap, not dismiss-then-open.
+  Dismissal is the scrim, `Escape`, or the pane's own control — **and a
+  gesture inside a sheet that changes what the transcript shows dismisses it
   too**: picking a conversation, or starting a new one. Without it you tap a
   conversation and the thing you asked for is behind the sheet you asked from.
   Two boundaries make this precise. On a wide screen it closes nothing, because
@@ -532,10 +535,77 @@ Three widths follow from the transcript needing roughly 420px to be readable
   never expressed. And it hangs off the **gesture**, not off the code that
   changes conversation — a reconnect re-selects the open conversation, and must
   not yank shut a sheet the reader deliberately opened.
-- **Between `ui_sheet_max` and `ui_both_panels_min`** the sidebar and one
-  side panel are columns; the second panel waits.
-- **At or above `ui_both_panels_min`** all three are columns — the layout the
-  UI was designed in.
+- **At or above `ui_sheet_max`** the sidebar, the transcript and the drawer
+  are all columns — the layout the UI was designed in. At the bottom of that
+  band it is 260 + 340 and roughly 500px of transcript, which is the
+  arithmetic the threshold is chosen for.
+
+**The status strip is the shell's toolbar**, and everything in it is there
+because a collapsed sidebar must not take it off the page. Left to right: the
+control that opens and closes the sidebar — one slot, never both buttons at
+once — then the identity as **`<instance name> | Turminder`**, then
+conversation state; and at the right the model selector, connection state, the
+two whole-install actions (**devices** (§24) and **sign out**) and the
+drawer's tab rail.
+
+The Mind's name leads the pair and carries the accent, because it is the one a
+reader is looking for and the one that differs between installs; the product
+name behind it is context and is set smaller. The name is also the half that
+truncates, and below `ui_compact_max` the product name is dropped entirely
+rather than costing the Mind's name the room to be legible. **The sidebar has
+no header**: it is the conversation list and its footer, and nothing else.
+
+**Both columns are resizable** by a splitter on their inner edge, and the
+constraint is the rule above rather than a fixed maximum: a column may grow
+only into space the transcript can spare, so its ceiling is what the *other*
+column is currently taking. Normative (constants in App. A):
+
+- A column never goes below `ui_sidebar_min` / `ui_drawer_min`, and the
+  transcript never below `ui_transcript_min` — the width §9.1 calls readable,
+  now a number rather than prose.
+- **A width is a preference of the wide layout**, like the panes themselves.
+  Narrowing the window re-fits the chosen widths for the window in front of
+  the reader and does not rewrite what they chose; widening restores it. When
+  two chosen widths cannot both fit, they give the difference back in
+  proportion to what each holds above its own floor — taking it all from one
+  would move a column the reader never touched.
+- Splitters are `separator` with a tabindex — the ARIA window-splitter
+  pattern: arrows resize by a step, `Home`/`End` go to the ends, and
+  `aria-valuenow`/`min`/`max` carry the width in px. A resize a mouse can do
+  and a keyboard cannot is half a feature.
+- **In sheet mode there are no splitters.** A sheet floats over the transcript
+  instead of taking width from it, so there is nothing to trade.
+
+**The three side panels are one drawer with three tabs** — files (§18.5),
+views (§22.6) and activity (§4.2.1). They were never simultaneously reachable:
+in sheet mode the layout allowed exactly one, so three independent toggles
+described a state nothing would honour. Normative:
+
+- **The rail is a `tablist`, not three toggles.** One control, one Tab stop,
+  arrow keys within it, `aria-selected` on the tabs and one `tabpanel` visible
+  at a time. Pressing the selected tab again closes the drawer, so "no tab
+  selected" is a legal state — the rail is the opener as well as the selector,
+  and a drawer with no way to shut it would cover a phone's transcript.
+- **The rail lives in the status strip**, right-justified, and the strip spans
+  the page. Both layouts render the same one: a rail that stopped at the
+  transcript's right edge would sit to the left of the drawer it opens, and a
+  rail in the sidebar footer is behind a closed sidebar on a phone — two taps
+  to the panel a phone most wants.
+- **The views tab is disabled when there is nothing behind it**, and stays
+  *selected* while its shelf is momentarily empty: switching conversation
+  empties it before the new transcript's markers resolve, and dropping the
+  selection there would shut the panel on every switch.
+- **The activity tab carries the count of outstanding work** — unsettled
+  events plus deliveries awaiting a click — so "is it doing the thing I asked"
+  is answerable without opening anything. Colour follows the worst row: a dead
+  letter reads as bad, a retry or an unanswered approval as waiting. The UI
+  therefore reads `event.list` (App. D) on every `welcome`, not only when the
+  panel is opened; a count that only became true once you looked would answer
+  the question after you had stopped asking it.
+- **The drawer's header is shared** — the active tab's name, one refresh that
+  re-sends whatever that tab's list frame is, and one close. Chrome belonging
+  to the *content* rather than the panel (the open file's back/edit/save bar)
+  stays inside the tab's own panel.
 
 Two further requirements, because they are correctness rather than taste:
 
@@ -1359,9 +1429,15 @@ file never race.
 
 ### 18.5 UI
 
-The chat UI grows a minimal file panel: tree/list, rendered markdown with
+The chat UI grows a minimal file panel: a **tree**, rendered markdown with
 live checkboxes (toggling writes through `files.edit` + commit), and
-plaintext editing. **Previews** beyond text use the browser's own
+plaintext editing. The tree is **derived client-side** from the flat listing
+`files.list` already returns — F.8's walk is recursive and returns files only,
+root-relative with `/` separators, so the folders are inferred from the paths
+and the panel needs no frame of its own. Folders are **open unless closed**,
+the closed set persists per browser, and opening a file opens the folders it
+is under; a closed folder carries the count of what is under it, which is the
+only reason to open it. **Previews** beyond text use the browser's own
 renderers, nothing more: images render `<img>`, PDFs render native
 `<embed>`, both fed by `GET /api/files/raw` (App. E) fetched with the
 bearer token and object-URL'd (a media element's `src` cannot carry an
@@ -2215,9 +2291,9 @@ marker on its own line at the *end* of the reply. The words introducing a view
 arrive before the view, which is also the order the activity block reads in
 (§9).
 
-**The views panel** sits on the *right* of the transcript, opposite the file
-panel, because it is a reference shelf for the conversation being read rather
-than a place to work. Two groups: the views **this conversation references**,
+**The views panel** is a tab of the right-hand drawer (§9.1), beside files and
+activity — a reference shelf for the conversation being read rather than a
+place to work. Two groups: the views **this conversation references**,
 in marker order — derived from the `embed.resolve` round-trips the transcript
 already makes, so the panel needs no query of its own and "in this
 conversation" means what the reader can actually see, including embeds created
@@ -3934,8 +4010,10 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Ingress payload excerpt | 4000 chars | ingress prompt (App. H) |
 | Memory auto-retrieve top-k | 5 | §5.4, §8.3 |
 | Chat context window | last 40 turns | §9 |
-| `ui_both_panels_min` | 1400px | §9.1 — both side panels may be columns |
-| `ui_sheet_max` | 1100px | §9.1 — below this the side panes are sheets |
+| `ui_sheet_max` | 1100px | §9.1 — below this the sidebar and the drawer are sheets |
+| `ui_sidebar_min` | 180px | §9.1 — the conversation list's floor when dragged |
+| `ui_drawer_min` | 260px | §9.1 — the drawer's floor when dragged |
+| `ui_transcript_min` | 420px | §9.1 — what a column may never take from the transcript |
 | `ui_compact_max` | 640px | §9.1 — phone density (targets, one-line usage) |
 | `ui_short_max` | 480px viewport height | §9.1 — landscape phone; the height-driven rules |
 | Conversation idle timeout (distils; never archives) | 30 min | §9 |
