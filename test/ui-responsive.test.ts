@@ -230,6 +230,140 @@ describe('the side panels are one drawer (§9.1)', () => {
 });
 
 /**
+ * The strip is the shell's toolbar, and the columns are draggable (§9.1).
+ *
+ * Two failures this guards. One: something that must survive a collapsed
+ * sidebar drifting back into the sidebar — the name, the account actions, the
+ * rail. Two: a splitter's floor drifting away from the App. A row that gives
+ * it, which is how a column quietly learns to eat the transcript.
+ */
+describe('the toolbar and the splitters (§9.1)', () => {
+  const strip = (): string =>
+    html.slice(html.indexOf('<div id="status">'), html.indexOf('<div id="shell">'));
+  const sidebar = (): string =>
+    html.slice(html.indexOf('<aside id="sidebar">'), html.indexOf('</aside>'));
+
+  it('keeps in the strip everything a collapsed sidebar would otherwise hide', () => {
+    for (const id of [
+      'brand',
+      'instance',
+      'expand',
+      'collapse',
+      'forget-token',
+      'devices-toggle',
+      'drawer-tabs',
+    ]) {
+      expect(strip(), `#${id} belongs in the status strip`).toContain(`id="${id}"`);
+      expect(sidebar(), `#${id} should not also be in the sidebar`).not.toContain(`id="${id}"`);
+    }
+    // The name leads it; the account actions and the rail close it.
+    expect(strip().indexOf('id="brand"')).toBeLessThan(strip().indexOf('class="spacer"'));
+    // `<name> | Turminder`, in that order, and the Mind's name is the half
+    // that carries the accent and survives a narrow strip.
+    expect(strip().indexOf('id="instance"')).toBeLessThan(strip().indexOf('brand-name'));
+    expect(css).toMatch(/#instance\s*\{[^}]*color:\s*var\(--accent\)/s);
+    expect(css).toMatch(/#instance\s*\{[^}]*text-overflow:\s*ellipsis/s);
+    // Smaller than the name it sits behind.
+    const brandName = /\.brand-name\s*\{[^}]*\}/s.exec(css)?.[0] ?? '';
+    expect(Number(/font-size:\s*(\d+)px/.exec(brandName)?.[1])).toBeLessThan(
+      Number(/font-size:\s*(\d+)px/.exec(/#brand\s*\{[^}]*\}/s.exec(css)?.[0] ?? '')?.[1]),
+    );
+    expect(strip().indexOf('id="forget-token"')).toBeGreaterThan(
+      strip().indexOf('class="spacer"'),
+    );
+    expect(strip().indexOf('id="drawer-tabs"')).toBeGreaterThan(
+      strip().indexOf('id="devices-toggle"'),
+    );
+  });
+
+  it('leaves the sidebar with nothing but its list and its footer', () => {
+    // The header went with the name that was in it: a bar existing only to
+    // hold the collapse button is a row of chrome for one control that now
+    // shares a slot with the button that undoes it.
+    expect(sidebar()).not.toContain('<header>');
+    expect(css).not.toContain('#sidebar header');
+    expect(css).toMatch(/body\.sidebar-collapsed #collapse/);
+  });
+
+  it('gives each splitter the floor App. A publishes', () => {
+    for (const [name, constant] of [
+      ['SIDEBAR_MIN_PX', 'ui_sidebar_min'],
+      ['DRAWER_MIN_PX', 'ui_drawer_min'],
+      ['TRANSCRIPT_MIN_PX', 'ui_transcript_min'],
+    ]) {
+      const decl = new RegExp(`const ${name} = (\\d+);`).exec(js);
+      expect(decl, `app.js should declare ${name}`).not.toBeNull();
+      expect(Number(decl?.[1]), `${name} should be App. A's ${constant}`).toBe(
+        specConstant(constant as string),
+      );
+    }
+  });
+
+  it('is a window splitter a keyboard can drive', () => {
+    const rail = html.slice(html.indexOf('id="resize-sidebar"'), html.indexOf('<main>'));
+    expect(rail).toContain('role="separator"');
+    expect(rail).toContain('aria-orientation="vertical"');
+    // Without a tabindex a separator is decoration; the arrows never arrive.
+    expect(rail).toContain('tabindex="0"');
+    expect(js).toMatch(/aria-valuenow/);
+    expect(js).toMatch(/aria-valuemax/);
+    expect(js).toContain('RESIZE_STEP_PX');
+  });
+
+  it('has no splitter where there is no boundary to drag', () => {
+    // A sheet floats over the transcript rather than taking width from it.
+    const sheetBlock = css.slice(css.indexOf('@media (max-width: 1099.98px)'));
+    const body = sheetBlock.slice(0, sheetBlock.indexOf('\n}\n'));
+    expect(body).toContain('#resize-sidebar');
+    expect(js).toMatch(/if \(SHEET_MODE\.matches \|\| e\.button !== 0\) return;/);
+  });
+
+  it('re-fits a stored width without rewriting it', () => {
+    // Widths are a preference of the wide layout (§9.1): `applyWidths` writes
+    // CSS, and only a deliberate resize reaches localStorage.
+    const fn = js.slice(
+      js.indexOf('function applyWidths'),
+      js.indexOf('function setPaneWidth'),
+    );
+    expect(fn).toContain("setProperty('--sidebar-w'");
+    expect(fn).toContain("setProperty('--drawer-w'");
+    expect(fn).not.toContain('localStorage');
+  });
+});
+
+/**
+ * The file panel is a tree, built from the listing that already arrives (§18.5).
+ */
+describe('the file tree (§18.5)', () => {
+  it('needs no frame of its own', () => {
+    // F.8's walk is recursive and returns files only, root-relative with `/`
+    // separators — the folders are inferred here. A `files.list` that started
+    // asking for one directory at a time would be a protocol change, and the
+    // spec says this one is not.
+    expect(js).toContain('function fileTree');
+    expect(js).toMatch(/entry\.path\.split\('\/'\)/);
+    const sends = [...js.matchAll(/send\('files\.list', ([^)]*)\)/g)].map((m) => m[1]);
+    expect(sends.length).toBeGreaterThan(0);
+    for (const arg of sends) expect(arg).toBe('{}');
+  });
+
+  it('stores what is closed, because open is the default', () => {
+    // A store with four files in two folders must not open worse than the
+    // flat list it replaced, so the set that persists is the small one.
+    expect(js).toContain("const FOLDERS_KEY = 'turminder.foldersClosed'");
+    const fn = js.slice(
+      js.indexOf('function folderOpen'),
+      js.indexOf('function setFolderOpen'),
+    );
+    expect(fn).toMatch(/return !state\.files\.collapsed\.has/);
+  });
+
+  it('opens the folders the file you opened is under', () => {
+    expect(js).toMatch(/case 'files\.read\.result':[\s\S]{0,160}revealFolders\(/);
+  });
+});
+
+/**
  * Sheets get out of the way when the thing behind them changes (§9.1).
  *
  * Driven for real over CDP at 420px — click the sidebar open, press New, and

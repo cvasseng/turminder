@@ -45,7 +45,39 @@
    on you shows there too, so one raised while you were elsewhere is not
    something you have to remember. It is a live window on what is outstanding,
    not a log browser, and the contents of what arrived are never shown there —
-   only what the assistant itself wrote about it.
+   only what the assistant itself wrote about it. Its tab carries a count of
+   what is still outstanding, so the question it exists to answer — is the
+   thing I asked for happening? — needs no click at all: the number turns
+   amber for something retrying or waiting on you, red for something that
+   gave up.
+
+ * Files, views and activity are one panel now, on the right of the window,
+   with three tabs in a strip along the top instead of four separate toggles
+   at the bottom of the conversation list. They were never on screen together
+   — the layout only ever had room for one — so what has changed is that the
+   controls say so, and that reaching your files on a phone is one tap rather
+   than opening the conversation list to find the button first. The tabs stay
+   lit and usable while a panel is covering the conversation, so moving
+   between them is a single tap; pressing the tab you are already on puts the
+   panel away. That strip is the window's toolbar now, and it leads with who
+   you are talking to: your assistant's name, then Turminder's, then what it
+   is doing and which model it is on — and, at the right, devices and sign
+   out, reachable whether or not the conversation list is open. The
+   conversation list is just the list now; everything that used to sit above
+   and below it is up there.
+
+ * The conversation list and the side panel can both be dragged wider or
+   narrower, by the mouse or with the arrow keys, and each remembers its width.
+   Neither can be dragged far enough to squeeze the conversation out: a column
+   only grows into room the transcript can spare, so the handle stops where the
+   text would start becoming unreadable. Make a window narrower than what you
+   chose will fit and the columns give ground for as long as they have to,
+   then take it back when the window grows again — what you dragged to is not
+   forgotten because the window changed shape.
+
+ * The file panel is a folder tree rather than a flat list of full paths.
+   Folders start open, remember the ones you close, count what is inside them
+   while closed, and open themselves when you open a file that lives in them.
 
  * Fixed: on a phone, the box you type in could end up behind the on-screen
    keyboard. The page was still being laid out against the full height of the

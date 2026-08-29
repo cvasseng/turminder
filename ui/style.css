@@ -8,6 +8,12 @@
   --warn: #e0a458;
   --bad: #e06c75;
   --ok: #86c06c;
+  /* The two column widths (§9.1). Properties rather than constants because
+     they are draggable; app.js writes the clamped value here and the defaults
+     below are what an install starts on. In sheet mode the media query wins
+     and these stop mattering. */
+  --sidebar-w: 260px;
+  --drawer-w: 340px;
   color-scheme: dark;
 }
 * {
@@ -132,54 +138,25 @@ textarea:focus {
 
 /* chat layout */
 #sidebar {
-  width: 260px;
+  width: var(--sidebar-w);
   border-right: 1px solid var(--line);
   background: var(--panel);
   display: flex;
   flex-direction: column;
   flex: 0 0 auto;
 }
-#sidebar header {
-  padding: 12px;
-  border-bottom: 1px solid var(--line);
-  position: relative;
-}
-#collapse {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-}
-/* Collapsed: the sidebar is gone, and the button that brings it back sits in
-   the status row rather than floating over it, so it lines up. */
+/* Open and close are one slot at the left of the strip, never both at once —
+   the control that hides the column and the one that brings it back are the
+   same control to everyone but the DOM. */
 #expand {
   display: none;
 }
-body.sidebar-collapsed #sidebar {
+body.sidebar-collapsed #sidebar,
+body.sidebar-collapsed #collapse {
   display: none;
 }
 body.sidebar-collapsed #expand {
   display: inline-flex;
-}
-#sidebar h1 {
-  font-size: 14px;
-  margin: 0 0 6px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--dim);
-}
-#whoami {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-#instance {
-  flex: 1;
-  min-width: 0;
-  color: var(--accent);
-  font-size: 16px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 #forget-token:hover:not(:disabled) {
   color: var(--bad);
@@ -286,6 +263,49 @@ main {
   align-items: center;
   min-height: 37px;
   flex: 0 0 auto;
+}
+/* `<name> | Turminder` at the left end of the strip — both halves were in the
+   sidebar, where collapsing the column took them off the page. It yields
+   before anything else does: the strip is otherwise all controls. */
+#brand {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+/* The Mind's name is what a reader is looking for, so it gets the accent and
+   the size, and it is the half that truncates — the product name behind it is
+   fixed-length context. */
+#instance {
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.brand-sep {
+  color: var(--line);
+  flex: 0 0 auto;
+}
+.brand-name {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+  flex: 0 0 auto;
+}
+/* A hairline, not a gap: the strip runs identity → state → account → panels,
+   and without it the account pair reads as two more tabs. */
+.strip-divider {
+  width: 1px;
+  height: 18px;
+  flex: 0 0 auto;
+  background: var(--line);
 }
 #status .dot {
   width: 8px;
@@ -828,8 +848,8 @@ main {
    changed tab would move the transcript under the reader's eyes. */
 #drawer {
   display: none;
-  width: 340px;
-  min-width: 340px;
+  width: var(--drawer-w);
+  min-width: var(--drawer-w);
   border-left: 1px solid var(--line);
   background: var(--panel);
   flex-direction: column;
@@ -1141,19 +1161,57 @@ button.icon[aria-selected='true'] {
 #panel-files.viewing #file-list {
   display: none;
 }
+/* A row in the tree (§18.5). Buttons, not divs: a tree you can only reach
+   with a mouse is half a file panel, and the folder rows carry
+   `aria-expanded`. `padding-left` is written per row by app.js — it is the
+   depth, and the depth is data. */
 .file-entry {
   display: flex;
+  align-items: center;
   gap: 8px;
+  width: 100%;
   padding: 5px 12px;
   cursor: pointer;
+  font: inherit;
   font-size: 13px;
+  color: var(--dim);
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 0;
 }
-.file-entry:hover {
+.file-entry:hover:not(:disabled) {
   background: var(--bg);
+  border-color: transparent;
+}
+.file-entry:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 .file-entry.active {
   background: var(--bg);
   color: var(--accent);
+}
+.file-folder {
+  color: var(--text);
+}
+.file-caret {
+  display: flex;
+  flex: 0 0 auto;
+  opacity: 0.7;
+  transition: transform 0.18s ease;
+}
+.file-caret svg {
+  width: 13px;
+  height: 13px;
+}
+.file-folder.open .file-caret {
+  transform: rotate(90deg);
+}
+/* The count is what a closed folder is worth opening for; on an open one it
+   is quiet enough to ignore. */
+.file-folder .file-meta {
+  opacity: 0.55;
 }
 .file-path {
   flex: 1;
@@ -1833,6 +1891,13 @@ body.locked #gate {
     right: 0;
     border-left: 1px solid var(--line);
   }
+  /* A sheet's width is the viewport's business: it floats over the transcript
+     instead of taking width from it, so there is nothing to trade. Spelled at
+     the specificity of the rules above, or `body.drawer-open` would win. */
+  #resize-sidebar,
+  body.drawer-open #resize-drawer {
+    display: none;
+  }
   /* The transcript is the page. It does not move when a sheet opens — sliding
      the content under a sheet costs a reflow of the whole message list on a
      device that can least afford one. */
@@ -1845,6 +1910,52 @@ body.locked #gate {
   body.sheet-open #scrim {
     display: block;
   }
+}
+
+/* ── the splitters (§9.1) ──────────────────────────────────────────────────
+   A 5px target pulled 2px over each neighbour, so it costs the layout one
+   pixel and the pointer five. Invisible until you go for it: the columns
+   already have borders, and a permanent handle on each would put two more
+   vertical lines in a shell that is mostly vertical lines. */
+.resizer {
+  flex: 0 0 5px;
+  margin: 0 -2px;
+  position: relative;
+  z-index: 6;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: col-resize;
+  touch-action: none;
+}
+.resizer::after {
+  content: '';
+  position: absolute;
+  inset: 0 2px;
+  background: var(--accent);
+  opacity: 0;
+}
+.resizer:hover::after,
+.resizer:focus-visible::after,
+.resizer.dragging::after {
+  opacity: 1;
+}
+.resizer:focus-visible {
+  outline: none;
+}
+/* No boundary, no handle. */
+body.sidebar-collapsed #resize-sidebar,
+#resize-drawer {
+  display: none;
+}
+body.drawer-open #resize-drawer {
+  display: block;
+}
+/* While dragging, the pointer owns the page: a text selection started on the
+   transcript would otherwise follow the drag across it. */
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 /* The scrim is markup, not a pseudo-element: it needs to be a click target,
@@ -1870,10 +1981,19 @@ body.locked #gate {
     padding: 12px 12px 48px;
   }
   /* The status row holds a 40px touch target now, so its own padding has to
-     come off or the row grows instead of the button. */
+     come off or the row grows instead of the button. Six of them plus the
+     rail is most of a phone's width, so the gaps come in too. */
   #status {
-    padding: 2px 12px 2px 6px;
+    padding: 2px 10px 2px 4px;
     min-height: 44px;
+    gap: 4px;
+  }
+  /* The product name is the one thing here a reader already knows, and at this
+     width showing it costs the assistant's own name the room to be legible.
+     The tab title still carries it. */
+  .brand-sep,
+  .brand-name {
+    display: none;
   }
   #composer {
     padding: 8px 10px 6px;
