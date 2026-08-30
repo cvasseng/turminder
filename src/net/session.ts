@@ -29,6 +29,7 @@ export const SUPPORTED_FRAMES = [
   'ack',
   'event',
   'chat.send',
+  'chat.stop',
   'chat.history',
   'conversation.list',
   'conversation.close',
@@ -68,6 +69,7 @@ export const EMITTED_FRAMES = [
   'chat.usage',
   'chat.done',
   'chat.error',
+  'chat.stopped',
   'chat.history.result',
   'conversation.list.result',
   'conversation.closed',
@@ -304,12 +306,31 @@ export class ChannelSession {
           conversation_id: sent.conversationId,
           event_id: sent.eventId,
         });
-        if (sent.mode === 'onboarding') {
+        // Onboarding and voice are both labels the UI needs (D.2); `normal`
+        // is the absence of one and says nothing.
+        if (sent.mode !== 'normal') {
           this.send('conversation.mode', {
             conversation_id: sent.conversationId,
-            mode: 'onboarding',
+            mode: sent.mode,
           });
         }
+        return;
+      }
+
+      case 'chat.stop': {
+        if (typeof p.conversation_id !== 'string') {
+          this.fail('bad_frame', 'chat.stop needs conversation_id', frame.id);
+          return;
+        }
+        // Idempotent, the `ack` precedent: stopping a conversation where
+        // nothing is running succeeds with `run_id: null` — the state the user
+        // asked for is already the state, and a race with the run's own end
+        // is not an error anyone can act on.
+        const stopped = this.service.chatStops.stop(p.conversation_id);
+        this.send('chat.stopped', {
+          conversation_id: p.conversation_id,
+          run_id: stopped?.runId ?? null,
+        });
         return;
       }
 
@@ -355,8 +376,11 @@ export class ChannelSession {
               id: c.id,
               title: c.title,
               status: c.status,
+              // Already `voice` when a device owns it — derived in the repo's
+              // row mapper, not here (§33.1, D.2).
               mode: c.mode,
               last_activity_at: c.last_activity_at,
+              ...(c.voice_device ? { voice_device: c.voice_device } : {}),
             })),
         });
         return;
@@ -759,7 +783,7 @@ export class ChannelSession {
             caps: e.caps,
             ...(e.contextSize ? { context_size: e.contextSize } : {}),
             ...(e.efforts ? { efforts: e.efforts } : {}),
-            ...(e.cost
+            ...(e.cost && 'inPerMtok' in e.cost
               ? {
                   cost: {
                     in_per_mtok: e.cost.inPerMtok,

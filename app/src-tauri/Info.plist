@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Merged into the macOS bundle's Info.plist by tauri-bundler, which picks this
+  file up from beside tauri.conf.json without being told to.
+
+  §28.6: macOS refuses the microphone outright without a usage description, and
+  the string is the sentence a person reads in the permission dialog — so it
+  says what the feature is and what the shell does not do. It lands now, before
+  the macOS build does (§28.4 ships Linux first), because a bundle key nobody
+  wrote is a build that fails on the machine that cannot test it.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Turminder listens when you hold the push-to-talk key, or say its name if you have turned the wake word on. Nothing is recorded or sent before one of those happens, and no audio is kept on this Mac.</string>
+  </dict>
+</plist>

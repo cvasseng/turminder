@@ -57,7 +57,7 @@ function routingResult(routing: Routing, chosenBy: RoutingResult['chosen_by']): 
 
 /** G.2's vocabulary order — the effort field's options follow it rather than
  *  declaration order, which is arbitrary per endpoint. */
-const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh'] as const;
+const EFFORT_ORDER = ['none', 'low', 'medium', 'high', 'xhigh'] as const;
 
 /** Matches `renderModelPick` in `ui/app.js` — the same three facts, in the
  *  same order, so a handler's picker and the chat selector read as one system. */
@@ -65,7 +65,9 @@ function endpointLabel(ep: ResolvedEndpoint): string {
   const bits = [ep.name];
   if (!ep.caps.includes('tools')) bits.push('no tools');
   bits.push(
-    ep.cost ? `${ep.cost.inPerMtok}/${ep.cost.outPerMtok} ${ep.cost.currency}` : 'local',
+    ep.cost && 'inPerMtok' in ep.cost
+      ? `${ep.cost.inPerMtok}/${ep.cost.outPerMtok} ${ep.cost.currency}`
+      : 'local',
   );
   return bits.join(' · ');
 }

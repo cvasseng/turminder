@@ -164,6 +164,20 @@ export const TurminderYamlSchema = z.strictObject({
       image_context_turns: z.number().int().nonnegative().optional(),
     })
     .optional(),
+  voice: z
+    .strictObject({
+      /** §33.1 — how long a voice conversation stays the device's current one. */
+      idle_min: z.number().int().positive().optional(),
+      /** §33.2 — longer audio is refused outright, before any transcription. */
+      max_utterance_s: z.number().int().positive().optional(),
+      /** §33.2 — shorter audio is `nothing_heard`; a click is not a sentence. */
+      stt_min_audio_ms: z.number().int().nonnegative().optional(),
+      /** §33.3 — cap on the `spoken` line a handler may put on a notification. */
+      spoken_max_chars: z.number().int().positive().optional(),
+      /** §33.2 — silence before a voice turn says it is working; 0 = never. */
+      acknowledge_after_ms: z.number().int().nonnegative().optional(),
+    })
+    .optional(),
   gateway: z
     .strictObject({
       /**
@@ -186,14 +200,51 @@ export type ModelClass = z.infer<typeof ModelClassSchema>;
 export const ModelCapSchema = z.enum(['json', 'tools', 'long_context', 'vision']);
 export type ModelCap = z.infer<typeof ModelCapSchema>;
 
-/** Reasoning levels an endpoint may declare (§10.6, G.2). */
-export const ModelEffortSchema = z.enum(['low', 'medium', 'high', 'xhigh']);
+/**
+ * Reasoning levels an endpoint may declare (§10.6, G.2). `none` means "do not
+ * think" — a level like the others, declared like the others, and the one a
+ * voice conversation pins (§33.1), because a model that reasons for 1.3 s
+ * before its first word cannot hold a conversation out loud.
+ */
+export const ModelEffortSchema = z.enum(['none', 'low', 'medium', 'high', 'xhigh']);
 export type ModelEffort = z.infer<typeof ModelEffortSchema>;
 
-/** What an endpoint does (§10.1, §10.6, G.2). `stt`/`tts` are §16-deferred —
- *  not accepted here yet. */
-export const ModelEndpointKindSchema = z.enum(['chat', 'embedding']);
+/** What an endpoint does (§10.1, §10.6, §10.9, G.2): an LLM the router may pick
+ *  for a purpose, a vector server, a transcriber, or a speech synthesiser. */
+export const ModelEndpointKindSchema = z.enum(['chat', 'embedding', 'stt', 'tts']);
 export type ModelEndpointKind = z.infer<typeof ModelEndpointKindSchema>;
+
+/**
+ * Pricing, per kind (§10.5, §10.9, G.2). Three shapes because three things are
+ * being sold: tokens, minutes of audio, characters of speech. Omitting the
+ * block entirely means **costless by declaration** — the local box — reported
+ * as `local` rather than a zero that looks like a measurement.
+ */
+export const ChatCostSchema = z.strictObject({
+  in_per_mtok: z.number().nonnegative(),
+  out_per_mtok: z.number().nonnegative(),
+  currency: z.string().min(1),
+});
+export const SttCostSchema = z.strictObject({
+  per_minute: z.number().nonnegative(),
+  currency: z.string().min(1),
+});
+export const TtsCostSchema = z.strictObject({
+  per_kchar: z.number().nonnegative(),
+  currency: z.string().min(1),
+});
+export const ModelCostSchema = z.union([ChatCostSchema, SttCostSchema, TtsCostSchema]);
+export type ModelCost = z.infer<typeof ModelCostSchema>;
+
+/** Which `cost` shape a kind is priced in — one table rather than a branch in
+ *  every reader, so a new kind cannot half-arrive. */
+const COST_UNIT: Record<ModelEndpointKind, 'in_per_mtok' | 'per_minute' | 'per_kchar' | null> =
+  {
+    chat: 'in_per_mtok',
+    embedding: null,
+    stt: 'per_minute',
+    tts: 'per_kchar',
+  };
 
 export const ModelEndpointSchema = z
   .strictObject({
@@ -214,6 +265,15 @@ export const ModelEndpointSchema = z
      * unguessed. An empty list is a typo, not a declaration.
      */
     efforts: z.array(ModelEffortSchema).min(1).optional(),
+    /**
+     * How `none` travels, for an endpoint that declares it (§10.6, G.2): a
+     * request-body fragment merged in when `none` is selected, because the
+     * ecosystem has not agreed on one knob — Qwen on vLLM and llama.cpp want
+     * `{chat_template_kwargs: {enable_thinking: false}}`, others take
+     * `{reasoning_effort: "none"}`, which is the default when this is absent.
+     * Body only: never a prompt change, so the prefix cache is untouched.
+     */
+    no_think: z.record(z.string(), z.unknown()).optional(),
     /** Hard cap on concurrent in-flight calls for this endpoint (§10.3). */
     concurrency: z.number().int().positive().optional(),
     /**
@@ -222,13 +282,15 @@ export const ModelEndpointSchema = z
      * `local` rather than `0.00`, because free and unpriced are different
      * statements.
      */
-    cost: z
-      .strictObject({
-        in_per_mtok: z.number().nonnegative(),
-        out_per_mtok: z.number().nonnegative(),
-        currency: z.string().min(1),
-      })
-      .optional(),
+    cost: ModelCostSchema.optional(),
+    /** The voice a `tts` endpoint speaks with (§33.5, G.2); set by `setup.voice`. */
+    voice: z.string().min(1).optional(),
+    /**
+     * The language an `stt` endpoint is asked to transcribe (§10.9, G.2). Absent
+     * means the G.3 `locale`; `auto` means let the transcriber detect, i.e. the
+     * parameter is omitted from the request. Set by `setup.voice` (§33.5).
+     */
+    language: z.string().min(1).optional(),
   })
   .superRefine((e, ctx) => {
     if (e.kind === 'chat' && !e.classes?.length) {
@@ -254,6 +316,53 @@ export const ModelEndpointSchema = z
         });
       }
     }
+    // A speech endpoint has no class to route it by and no capability worth
+    // probing for (§10.9): `routes.stt`/`routes.tts` name it directly, and what
+    // it can do is "audio in" or "audio out". `cost` it may have — priced per
+    // minute or per thousand characters, checked below with the rest.
+    if (e.kind === 'stt' || e.kind === 'tts') {
+      if (e.classes?.length || e.caps.length || e.efforts) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['classes'],
+          message: `a ${e.kind} endpoint takes no classes/caps/efforts`,
+        });
+      }
+    }
+    if (e.voice !== undefined && e.kind !== 'tts') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['voice'],
+        message: `only a tts endpoint names a voice (this one is kind: ${e.kind})`,
+      });
+    }
+    if (e.language !== undefined && e.kind !== 'stt') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['language'],
+        message: `only an stt endpoint pins a language (this one is kind: ${e.kind})`,
+      });
+    }
+    if (e.cost) {
+      const want = COST_UNIT[e.kind];
+      if (!want) {
+        // Unreachable for `embedding` (the block above already refused it);
+        // here so a future costless kind cannot slip through unpriced-but-priced.
+        ctx.addIssue({
+          code: 'custom',
+          path: ['cost'],
+          message: `a ${e.kind} endpoint takes no cost block`,
+        });
+      } else if (!(want in e.cost)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['cost'],
+          message: `a ${e.kind} endpoint is priced with ${want}, not ${Object.keys(e.cost)
+            .filter((k) => k !== 'currency')
+            .join('/')}`,
+        });
+      }
+    }
   });
 export type ModelEndpoint = z.infer<typeof ModelEndpointSchema>;
 
@@ -273,6 +382,8 @@ export const ROUTABLE_PURPOSES = [
   'title',
   'memory',
   'embedding',
+  'stt',
+  'tts',
 ] as const;
 export const RoutablePurposeSchema = z.enum(ROUTABLE_PURPOSES);
 export type RoutablePurpose = z.infer<typeof RoutablePurposeSchema>;
@@ -286,7 +397,9 @@ export const RouteSchema = z.union([
 export type Route = z.infer<typeof RouteSchema>;
 
 /** `routes.<purpose>` (G.2, §10.6). Keys are exactly `ROUTABLE_PURPOSES`;
- *  `embedding` accepts `{endpoint}` only — there is no class to route it by. */
+ *  `embedding`, `stt` and `tts` accept `{endpoint}` only — there is no class to
+ *  route a non-chat kind by. */
+const EndpointRouteSchema = z.strictObject({ endpoint: z.string().min(1) });
 export const RoutesSchema = z.strictObject({
   chat: RouteSchema.optional(),
   handler: RouteSchema.optional(),
@@ -294,7 +407,9 @@ export const RoutesSchema = z.strictObject({
   distill: RouteSchema.optional(),
   title: RouteSchema.optional(),
   memory: RouteSchema.optional(),
-  embedding: z.strictObject({ endpoint: z.string().min(1) }).optional(),
+  embedding: EndpointRouteSchema.optional(),
+  stt: EndpointRouteSchema.optional(),
+  tts: EndpointRouteSchema.optional(),
 });
 export type Routes = z.infer<typeof RoutesSchema>;
 

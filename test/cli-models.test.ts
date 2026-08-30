@@ -26,6 +26,17 @@ describe('turminder models', () => {
   - name: emb
     url: http://c
     kind: embedding
+  - name: whisper
+    url: http://d/v1
+    kind: stt
+    model: large-v3
+    language: nb
+  - name: piper
+    url: http://e/v1
+    kind: tts
+    model: tts-1
+    voice: alloy
+    cost: { per_kchar: 0.015, currency: USD }
 routes:
   handler: { endpoint: quick }
 `,
@@ -68,5 +79,38 @@ routes:
     const line = purposeLine(r.stdout, 'embedding');
     expect(line).toContain('source=default');
     expect(line).toContain('→ emb');
+  });
+
+  it('lists the speech kinds with their voice and language in the note column (§10.9)', async () => {
+    const r = await turminder(['--data-dir', root, 'models']);
+    expect(r.stdout).toMatch(/NAME\s+KIND/);
+    expect(r.stdout).toMatch(/NOTE/);
+    expect(r.stdout).toMatch(/whisper\s+stt/);
+    expect(r.stdout).toMatch(/piper\s+tts/);
+    // Priced in its own unit, not per Mtok (§10.9).
+    expect(r.stdout).toContain('0.015 USD per kchar');
+    expect(r.stdout).toContain('language=nb');
+    expect(r.stdout).toMatch(/piper.*alloy/);
+  });
+
+  it('resolves stt and tts to the first endpoint of the kind', async () => {
+    const r = await turminder(['--data-dir', root, 'models']);
+    expect(purposeLine(r.stdout, 'stt')).toContain('source=default');
+    expect(purposeLine(r.stdout, 'stt')).toContain('→ whisper');
+    expect(purposeLine(r.stdout, 'tts')).toContain('→ piper');
+  });
+
+  it('says (none) for a kind this install has no endpoint for', async () => {
+    write(
+      path.join(root, 'config', 'models.yaml'),
+      `endpoints:
+  - name: quick
+    url: http://a/v1
+    classes: [fast, best]
+`,
+    );
+    const r = await turminder(['--data-dir', root, 'models']);
+    expect(purposeLine(r.stdout, 'stt')).toContain('→ (none)');
+    expect(purposeLine(r.stdout, 'tts')).toContain('→ (none)');
   });
 });

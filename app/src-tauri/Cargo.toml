@@ -28,6 +28,19 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
 url = "2"
 
+# Voice (§28.6, App. J) — the four crates that section names, and no others.
+# `cpal` is pinned to 0.17 rather than the newer 0.18 because `rodio` depends
+# on `^0.17`: two cpal versions in one tree means two ALSA handles and two
+# device enumerations that disagree about what this machine has.
+cpal = "0.17"
+# No default features: rodio's defaults pull a decoder for every format there
+# is, and the only thing the shell ever plays is WAV the service made.
+rodio = { version = "0.22", default-features = false, features = ["playback", "wav"] }
+# The wake word, on-device (§28.6): pure Rust, no runtime, no model download,
+# no language — which is what lets a Norwegian instance name work.
+rustpotter = "3"
+tauri-plugin-global-shortcut = "2"
+
 # The OS vault (§28.2), named per platform because "the OS vault" resolves to a
 # different store on each and the crate's features are not interchangeable. The
 # Linux pin is load-bearing: the crate's default combo silently returns Ok from

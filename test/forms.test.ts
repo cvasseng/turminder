@@ -11,6 +11,9 @@ import { redactTraceArgs } from '../src/tools/redact.js';
 import { splitCommand } from '../src/tools/integrations/setup/templates.js';
 import { fillSecretKeys, mergeFields } from '../src/tools/integrations/setup/tools.js';
 import { bootService, TestClient, type ServiceHarness } from './service-harness.js';
+import { FakeSpeech } from './fake-speech.js';
+import { clearVoiceCache } from '../src/model/probe.js';
+import { OPENAI_VOICES, STT_LANGUAGES } from '../src/tools/integrations/setup/tools.js';
 import { tmpDir, write } from './helpers.js';
 
 let h: ServiceHarness;
@@ -746,6 +749,329 @@ describe('connector templates (§19.3)', () => {
     const classesField = form.payload.fields.find((f: any) => f.name === 'classes');
     expect(classesField.value).toBeUndefined();
     expect(classesField.label).toContain('already has a chat endpoint');
+  });
+});
+
+describe('the speech_endpoint template (§10.9, F.9)', () => {
+  let speech: FakeSpeech;
+
+  afterEach(async () => {
+    await speech?.stop();
+  });
+
+  /** Drive `setup.form` with the speech template and submit these values. */
+  async function addSpeechEndpoint(values: Record<string, string>): Promise<any> {
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    let asked = false;
+    h.fake.always((req: any) => {
+      if (req.body.tools && !asked) {
+        asked = true;
+        return {
+          toolCalls: [
+            {
+              name: 'setup.form',
+              args: { title: 'Connect speech', template: 'speech_endpoint' },
+            },
+          ],
+        };
+      }
+      return { text: 'ready' };
+    });
+    const sent = h.service.chat.send({ text: 'connect my transcriber' });
+    const form = await client.next('form.request', 15000);
+    client.send('form.submit', { form_id: form.payload.form_id, values });
+    await drain(h);
+    return { ...form.payload, eventId: sent.eventId };
+  }
+
+  function modelsYaml(): any {
+    return YAML.parse(fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8'));
+  }
+
+  it('probes, writes the entry, routes the purpose once, and keeps the key a reference', async () => {
+    h = await bootService({ onboarded: true });
+    speech = new FakeSpeech();
+    const url = await speech.start();
+    speech.script('Turminder is ready to help you today.');
+
+    await addSpeechEndpoint({
+      kind: 'stt',
+      name: 'whisper',
+      url,
+      api_key: 'sentinel-speech-key',
+      language: 'nb',
+    });
+
+    const models = modelsYaml();
+    const added = models.endpoints.find((e: any) => e.name === 'whisper');
+    expect(added).toMatchObject({ kind: 'stt', language: 'nb', model: 'fake-whisper' });
+    expect(added.api_key).toBe('${secret:WHISPER_API_KEY}');
+    expect(added.classes).toBeUndefined();
+    expect(models.routes.stt).toEqual({ endpoint: 'whisper' });
+    expect(h.service.modelStack?.router.speech('stt')?.name).toBe('whisper');
+    expect(sweep(h.dataDir, 'sentinel-speech-key')).toEqual(['secrets/secrets.yaml']);
+    // It probed before writing — the fixture went over the wire, not a guess.
+    expect(speech.requests.some((r) => r.path.endsWith('/audio/transcriptions'))).toBe(true);
+  });
+
+  it('writes a tts entry with its voice and does not steal an existing route', async () => {
+    h = await bootService({ onboarded: true });
+    speech = new FakeSpeech();
+    const url = await speech.start();
+
+    await addSpeechEndpoint({ kind: 'tts', name: 'piper', url, voice: 'alloy' });
+    expect(modelsYaml().routes.tts).toEqual({ endpoint: 'piper' });
+
+    await addSpeechEndpoint({ kind: 'tts', name: 'second', url, voice: 'nova' });
+    const models = modelsYaml();
+    expect(models.endpoints.find((e: any) => e.name === 'second')).toMatchObject({
+      kind: 'tts',
+      voice: 'nova',
+    });
+    // The first one keeps the route: a second endpoint is an addition, not a
+    // silent reassignment (§10.6).
+    expect(models.routes.tts).toEqual({ endpoint: 'piper' });
+  });
+
+  it('writes nothing when the probe fails', async () => {
+    h = await bootService({ onboarded: true });
+    speech = new FakeSpeech();
+    const url = await speech.start();
+    speech.script('Thank you for watching.'); // the silence hallucination
+
+    const added = await addSpeechEndpoint({ kind: 'stt', name: 'deaf', url });
+
+    const models = modelsYaml();
+    expect(models.endpoints.find((e: any) => e.name === 'deaf')).toBeUndefined();
+    expect(models.routes?.stt).toBeUndefined();
+    const call = h.service.repos.trace
+      .forEvent(added.eventId)
+      .find((t) => t.kind === 'tool_call')!.data as any;
+    expect(call.result_excerpt).toContain('probe_failed');
+  });
+
+  it('offers the kind as a two-button choice and asks for nothing it cannot use', async () => {
+    h = await bootService({ onboarded: true });
+    speech = new FakeSpeech();
+    const url = await speech.start();
+    const payload = await addSpeechEndpoint({ kind: 'tts', name: 'piper', url });
+    const fields: any[] = payload.fields;
+    expect(fields.find((f) => f.name === 'kind')).toMatchObject({
+      type: 'choice',
+      options: ['stt', 'tts'],
+    });
+    expect(fields.find((f) => f.name === 'api_key')).toMatchObject({
+      type: 'secret',
+      required: false,
+    });
+    expect(fields.map((f) => f.name)).toEqual([
+      'kind',
+      'name',
+      'url',
+      'api_key',
+      'model',
+      'voice',
+      'language',
+    ]);
+  });
+});
+
+describe('setup.voice (§33.5)', () => {
+  let speech: FakeSpeech;
+
+  afterEach(async () => {
+    await speech?.stop();
+  });
+
+  /** A harness whose models.yaml carries a transcriber and a synthesiser. */
+  async function bootWithSpeech(
+    entries: { stt?: Record<string, unknown>; tts?: Record<string, unknown> } = {},
+  ): Promise<void> {
+    clearVoiceCache();
+    h = await bootService({ onboarded: true, watchFiles: false });
+    speech = new FakeSpeech();
+    const url = await speech.start();
+    const file = path.join(h.dataDir, 'config', 'models.yaml');
+    const models = YAML.parse(fs.readFileSync(file, 'utf8')) as {
+      endpoints: Record<string, unknown>[];
+    };
+    if (entries.stt !== undefined) {
+      models.endpoints.push({ name: 'whisper', url, kind: 'stt', model: 'w', ...entries.stt });
+    }
+    if (entries.tts !== undefined) {
+      models.endpoints.push({ name: 'piper', url, kind: 'tts', model: 'p', ...entries.tts });
+    }
+    fs.writeFileSync(file, YAML.stringify(models), 'utf8');
+    h.app.config.reload();
+    h.service.loadModels();
+  }
+
+  const modelsFile = () => path.join(h.dataDir, 'config', 'models.yaml');
+  const modelsYaml = () => YAML.parse(fs.readFileSync(modelsFile(), 'utf8'));
+
+  /** Drive `setup.voice` and answer (or refuse) its form. */
+  async function runVoiceForm(
+    answer: Record<string, string> | 'cancel' | null,
+  ): Promise<{ form: any; result: any }> {
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    let asked = false;
+    h.fake.always((req: any) => {
+      if (req.body.tools && !asked) {
+        asked = true;
+        return { toolCalls: [{ name: 'setup.voice', args: {} }] };
+      }
+      return { text: 'done' };
+    });
+    const sent = h.service.chat.send({ text: 'speak Norwegian' });
+    let form: any = null;
+    if (answer !== null) {
+      form = (await client.next('form.request', 15000)).payload;
+      if (answer === 'cancel') client.send('form.cancel', { form_id: form.form_id });
+      else client.send('form.submit', { form_id: form.form_id, values: answer });
+    }
+    await drain(h);
+    const call = h.service.repos.trace
+      .forEvent(sent.eventId)
+      .find((t) => t.kind === 'tool_call')!.data as any;
+    client.close();
+    return { form, result: call.result_excerpt as string };
+  }
+
+  it('prefills the language from the identity locale, and from the entry when it has one', async () => {
+    await bootWithSpeech({ stt: {}, tts: {} });
+    const bare = await runVoiceForm('cancel');
+    const language = bare.form.fields.find((f: any) => f.name === 'language');
+    // The harness identity says `locale: en`, and an absent `language` means
+    // exactly that (§10.9) — so that is what the form shows.
+    expect(language.value).toBe('en — English');
+    expect(language.options).toContain('auto — let the transcriber detect');
+    expect(language.options.length).toBeGreaterThanOrEqual(20);
+    expect(language.options).toEqual(STT_LANGUAGES);
+
+    await h.cleanup();
+    await speech.stop();
+    await bootWithSpeech({ stt: { language: 'nb' }, tts: {} });
+    const pinned = await runVoiceForm('cancel');
+    expect(pinned.form.fields.find((f: any) => f.name === 'language').value).toBe(
+      'nb — Norwegian Bokmål',
+    );
+  });
+
+  it('offers a previewable voice field led by the configured voice', async () => {
+    await bootWithSpeech({ stt: {}, tts: { voice: 'nova' } });
+    speech.voices = ['alloy', 'nova'];
+    const { form } = await runVoiceForm('cancel');
+    const voice = form.fields.find((f: any) => f.name === 'voice');
+    expect(voice.type).toBe('voice');
+    expect(voice.value).toBe('nova');
+    // What is in use leads the list, so the common case — open the form, hear
+    // one or two others, keep what you had — is one click.
+    expect(voice.options).toEqual(['nova', 'alloy']);
+  });
+
+  it('keeps a configured voice the endpoint does not list, but stops defaulting to it', async () => {
+    // The endpoint lists voices and this is not one of them, so it is a
+    // leftover from a synthesiser this address no longer is. Still reachable,
+    // because a listing can be incomplete; no longer the default, because the
+    // default is what submitting an untouched form writes back.
+    await bootWithSpeech({ stt: {}, tts: { voice: 'nb_NO-talesyntese-medium' } });
+    speech.voices = ['alloy', 'nova'];
+    const { form } = await runVoiceForm('cancel');
+    const voice = form.fields.find((f: any) => f.name === 'voice');
+    expect(voice.value).toBe('alloy');
+    expect(voice.options).toEqual(['alloy', 'nova', 'nb_NO-talesyntese-medium']);
+  });
+
+  it('offers the voices the endpoint nests in its model listing', async () => {
+    // Speaches has no /voices route at all — the voices are inside the
+    // `/v1/models` entry. Before this the form offered OpenAI's six, which are
+    // openedai-speech's piper aliases, so the wrong list looked like a right
+    // one (Christer, 2026-08-31).
+    await bootWithSpeech({ stt: {}, tts: { model: 'kokoro', voice: 'af_heart' } });
+    speech.voices = null;
+    speech.otherModels = ['kokoro'];
+    speech.modelVoices = { kokoro: ['af_heart', 'am_puck', 'bf_emma'] };
+    const { form } = await runVoiceForm('cancel');
+    const voice = form.fields.find((f: any) => f.name === 'voice');
+    expect(voice.options).toEqual(['af_heart', 'am_puck', 'bf_emma']);
+    expect(voice.value).toBe('af_heart');
+  });
+
+  it('stops defaulting to a voice the endpoint no longer has, without hiding it', async () => {
+    // Swapping openedai-speech for Speaches leaves `voice: alloy` in the file
+    // and Kokoro has no `alloy`. Leading with it would mean submitting the
+    // form unchanged writes the broken setting straight back.
+    await bootWithSpeech({ stt: {}, tts: { model: 'kokoro', voice: 'alloy' } });
+    speech.voices = null;
+    speech.otherModels = ['kokoro'];
+    speech.modelVoices = { kokoro: ['af_heart', 'am_puck'] };
+    const { form } = await runVoiceForm('cancel');
+    const voice = form.fields.find((f: any) => f.name === 'voice');
+    // Prefilled with something that works…
+    expect(voice.value).toBe('af_heart');
+    // …and the leftover still reachable, in case the listing is incomplete.
+    expect(voice.options).toEqual(['af_heart', 'am_puck', 'alloy']);
+  });
+
+  it('falls back to the OpenAI six when the endpoint lists nothing', async () => {
+    await bootWithSpeech({ stt: {}, tts: {} });
+    const { form } = await runVoiceForm('cancel');
+    expect(form.fields.find((f: any) => f.name === 'voice').options).toEqual(OPENAI_VOICES);
+  });
+
+  it('writes the language and the voice and nothing else', async () => {
+    await bootWithSpeech({ stt: {}, tts: { voice: 'alloy' } });
+    const before = modelsYaml();
+    const { result } = await runVoiceForm({
+      language: 'nb — Norwegian Bokmål',
+      voice: 'nova',
+    });
+    expect(result).toContain('"submitted":true');
+    const after = modelsYaml();
+    expect(after.endpoints.find((e: any) => e.name === 'whisper')).toMatchObject({
+      language: 'nb',
+      model: 'w',
+    });
+    expect(after.endpoints.find((e: any) => e.name === 'piper').voice).toBe('nova');
+    // Everything else, byte for byte: only those two keys moved.
+    const strip = (doc: any) =>
+      JSON.stringify({
+        ...doc,
+        endpoints: doc.endpoints.map((e: any) => {
+          const { language: _l, voice: _v, ...rest } = e;
+          return rest;
+        }),
+      });
+    expect(strip(after)).toBe(strip(before));
+    expect(h.service.modelStack?.router.speech('stt')?.language).toBe('nb');
+  });
+
+  it('deletes the key for `auto` rather than writing it', async () => {
+    // Absent means the locale, `auto` means detect (G.2) — and the file says
+    // "detect" by saying nothing at all.
+    await bootWithSpeech({ stt: { language: 'nb' }, tts: { voice: 'alloy' } });
+    await runVoiceForm({ language: 'auto — let the transcriber detect', voice: 'alloy' });
+    const entry = modelsYaml().endpoints.find((e: any) => e.name === 'whisper');
+    expect('language' in entry).toBe(false);
+  });
+
+  it('writes nothing on cancel', async () => {
+    await bootWithSpeech({ stt: { language: 'nb' }, tts: { voice: 'alloy' } });
+    const before = fs.readFileSync(modelsFile(), 'utf8');
+    const { result } = await runVoiceForm('cancel');
+    expect(result).toContain('"submitted":false');
+    expect(fs.readFileSync(modelsFile(), 'utf8')).toBe(before);
+  });
+
+  it('names the missing kind rather than opening a form about nothing', async () => {
+    await bootWithSpeech({ stt: {} });
+    const { form, result } = await runVoiceForm(null);
+    expect(form).toBeNull();
+    expect(result).toContain('no_speech_endpoint');
+    expect(result).toContain('"kind":"tts"');
+    expect(result).toContain('speech_endpoint');
   });
 });
 

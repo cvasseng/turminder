@@ -70,6 +70,21 @@ export function imageMarker(name: string, reason: 'elided' | 'no_vision'): strin
 }
 
 /**
+ * Is this value a transcript *placeholder* — a `[[stored:` or `[[elided:`
+ * marker standing where content used to be — rather than content? These two
+ * forms are stand-ins for the model's own bytes (§20.4, §20.6); the other
+ * markers annotate history and can legitimately be *mentioned*. A model that
+ * re-sends a placeholder as a tool argument has mistaken the stub for a failed
+ * write (2026-08-30: two `memory.update` calls stored the marker itself), so
+ * the hub refuses exactly this shape and nothing broader (§20.8's limitation).
+ */
+export function isTranscriptPlaceholder(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const head = value.trimStart().toLowerCase();
+  return head.startsWith(STORED_PREFIX) || head.startsWith(ELIDED_PREFIX);
+}
+
+/**
  * The reserved forms present in `text`, deduped and lowercased — the opening
  * token of each, which is what identifies the form in a trace row. Detection
  * is deterministic string matching: this is output *validation*, not a

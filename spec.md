@@ -524,6 +524,13 @@ the server's (`POST /api/speak`, App. E), exactly as every word of a
   So does **voice** (§33): a spoken utterance is a `chat.message` on a
   conversation a device owns (`voice_device`, App. C), listed and labelled
   like any other, answered by an ordinary run whose reply is read aloud.
+- **A streaming answer can be stopped** (`chat.stop`, App. D): generation
+  aborts mid-token, tool calls already in flight finish but nothing further
+  runs, and what had been said stands as the turn under the ordinary §20.2
+  rules — the user watched it stream, so it is theirs to keep. The stopped
+  run's event is settled, never retried: a retry would answer a question
+  the user just declined to have answered. The chat UI shows a stop button
+  while a run is in flight (Esc works too).
 - With more than one endpoint configured the UI shows a **model
   selector** (per-conversation force-override, persisted; §10.6) and the
   usage line carries the conversation's **estimated cost** (§10.5). When
@@ -695,7 +702,9 @@ so does widening past the phone breakpoint.
   pick for a purpose, §10.6) or `embedding` (a vector server, §8.3). An
   embedding endpoint declares no `classes`, `caps`, `efforts` or `cost` — there
   is no class to route it by, `routes.embedding` (§10.6) names it directly.
-  `kind: stt | tts` is designed-for, not built (§16). A chat endpoint never
+  `kind: stt | tts` are the speech endpoints of §10.9, routed the same way and
+  priced in their own units; they declare no `classes`, `caps` or `efforts`
+  either. A chat endpoint never
   appears where a chat surface picks a model: `models.list`, the chat
   override, or a handler's `endpoint:` pin (§10.6) all filter to `kind: chat`.
 - **A pre-this-track `embedding:` block heals itself on load** (Christer,
@@ -797,8 +806,8 @@ invisibly. Both halves get fixed: the decision becomes **inspectable**,
 and for chat, **overridable**.
 
 **Purpose — who is asking.** Every call names a `purpose`: `chat`, `handler`,
-`ingress`, `distill`, `title`, `memory`, `embedding`, plus the non-routable
-`probe`. The vocabulary is closed and lives in code (`src/model/routes.ts`,
+`ingress`, `distill`, `title`, `memory`, `embedding`, `stt`, `tts`, plus the
+non-routable `probe`. The vocabulary is closed and lives in code (`src/model/routes.ts`,
 `ROUTABLE_PURPOSES`) — there is no second copy, and `turminder models`
 (below) derives its printed table from that same list plus the live config,
 never a hand-maintained one. `probe` shows up in traces like any other
@@ -836,6 +845,9 @@ one-endpoint router before any routing config exists to read, so
    | `memory` | `fast` |
    | `embedding` | the first `kind: embedding` endpoint (§8.3) — there is no
      class to default to |
+   | `stt` / `tts` | the first endpoint of that kind (§10.9) — likewise no
+     class, and no endpoint of the kind means the install cannot take voice,
+     which is a fact rather than an error |
 
    Shipped handlers state their class explicitly (§30.5) rather than
    leaning on the default.
@@ -844,7 +856,10 @@ one-endpoint router before any routing config exists to read, so
    order is priority order; the spec says it so reordering is a
    deliberate act. A `{class}` route or the kind-default table both resolve
    this way; a `{endpoint}` route or pin resolves directly, still checked
-   against required caps.
+   against required caps. `embedding`, `stt` and `tts` skip steps 1, 2 and 4
+   entirely — they are resolved by `ModelRouter.embedding()`/`speech()`, which
+   return `null` rather than throwing, because a missing vector server or
+   transcriber degrades a feature instead of failing a call.
 
 **Every `llm_call` trace row records the resolution** (C.1): `purpose`,
 `endpoint` (the name that served it), `requested_class` (when a class was
@@ -1016,6 +1031,15 @@ swapping a local whisper for a hosted transcriber is a URL and a key.
   writes G.2 through the same single writer the other templates use; the
   transcriber's language and the speaking voice are changed afterwards by
   `setup.voice` (§33.5), with a preview of each candidate voice.
+- **A voice listing is read wherever the endpoint keeps it.** Some servers
+  answer a flat `/audio/speech/voices` (or `/audio/voices`, or `/voices`);
+  **Speaches keeps none of those** and nests the voices in each `/v1/models`
+  entry as `voices: [{name, language, gender}]`. Both are read, flat first.
+  The listing is **scoped to the endpoint's own `model`**: one address commonly
+  serves several synthesisers — the reference box has Kokoro with fifty-four
+  voices beside a Norwegian piper with one — and a union offers voices the
+  configured model refuses. An endpoint that lists nothing is not an error: the
+  six names OpenAI's dialect defines are the fallback (Christer, 2026-08-31).
 
 ---
 
@@ -1944,12 +1968,18 @@ never touch. Therefore:
 
 - A `ToolDefinition` may declare `bulkArgs: ["html", "content", …]` —
   the fields that carry authored content.
-- After the call executes, those fields in the transcript's tool-call
-  entry are replaced in place with
-  `"[[stored: 31204 chars — the content was written and is stored. Read it back with the tool if needed. Never copy this marker into a tool call]]"`
+- After the call executes **successfully**, those fields in the
+  transcript's tool-call entry are replaced in place with
+  `"[[stored: 31204 chars — placeholder for the content you sent in this call; it was written successfully and is stored, and is shown as this marker to save space. Read it back with the tool if needed. Never copy this marker into a tool call]]"`
   (a string marker, for the §20.4 reasons)
   — before the next gateway turn, monotonic, same mechanics and cache
-  argument as §20.4. All other arg fields stay verbatim.
+  argument as §20.4. All other arg fields stay verbatim. A refused or
+  failed write — `ok: false`, or an `{error}` return — is **not** stubbed:
+  it stored nothing, and the retry needs the content it was sent with. The
+  marker says what it is before it says what happened, because the earlier
+  wording ("the content was written and is stored") was read by a 27B model
+  as "my content was replaced" and answered with eight rewrites in seventy
+  seconds (2026-08-30, run `01M18071PR7SRR04VV7B8TZQZP`).
 - The trace stores the original args as always (subject to redaction and
   retention); only the transcript is stubbed.
 - Declared on: `embeds.create`/`embeds.edit` (`html`, `replace`),
@@ -1958,6 +1988,20 @@ never touch. Therefore:
 - The model re-reads stored content via the corresponding read tool;
   edits use search-replace tools, so authored artifacts are paid for
   **once** as output tokens, never again as context.
+- **A placeholder is never content.** A bulk field whose value *is* a
+  transcript placeholder — a string beginning `[[stored:` or `[[elided:` —
+  is refused at the hub before the tool runs:
+  `{error: "placeholder_as_content", field, message}`, a return value the
+  model can read, no file touched, no commit, no stub. Two `memory.update`
+  calls once stored the marker itself (the same run as above); the marker
+  text asking not to be copied was the only defence, and a plea is not a
+  guard. The test is "is the whole value a placeholder", never "does it
+  contain one" — §20.8's reason for leaving tool args otherwise unchecked
+  still holds.
+- Write tools **confirm in their result** what the transcript is about to
+  hide: `memory.update` returns `{name, file, updated: true, chars}` (F.1),
+  so a model looking for proof that its write landed finds it in the answer
+  rather than in the argument it can no longer see.
 
 ---
 
@@ -1978,6 +2022,21 @@ keeps a per-run map of `(tool, stable-serialized args)`:
   passing, not circling.
 - Args are compared key-order-independently, so "the same call" means the
   same call.
+
+**The rewrite backstop** covers the other way a model circles: the same
+write tool aimed at the same target with *different* content every time —
+a model that believes its write failed and re-sends it reworded, which the
+identical-args map cannot see (2026-08-30: eight `memory.update` calls to
+one memory in seventy seconds, all stored, all committed). The target is
+the call's args minus its `bulkArgs` fields (§20.6); a call whose args are
+*all* bulk has no target and is exempt. From the third write to one target
+in a run (App. A, `repeated_write_threshold`) the result comes back wrapped:
+`{repeated_write: true, note: "this is <tool> number N to the same target
+this run, each with different content, and each one was stored — you are
+rewriting, not fixing. If you doubt what is there, read it back with the
+tool; otherwise stop.", result: <the real output>}`. Pressure, never
+refusal — every write still runs and still lands; an identical repeat keeps
+the identical-call note above and is not counted twice.
 
 Held in reserve (§16): `transcript.recall {id}` — recall-by-id of elided
 content, with ids added to the §20.4 markers and a per-run recall budget.
@@ -2068,11 +2127,15 @@ Two accepted limitations, decided rather than overlooked:
   a guard with holes; the corrective note teaches the way out (describe,
   don't transcribe), and the cost of the rare slip is one retry and a
   clean strip, never a dead run.
-- **Tool args are deliberately unchecked.** Writing markers into a file
-  (`files.write` and friends) is legitimate — files are the user-trusted
-  surface (§14.4.3), and documentation about this system rightly contains
-  its markers. The guard fences the *conversational* voice, where the
-  fabrication lived.
+- **Tool args are unchecked, with one exception.** Writing markers into a
+  file (`files.write` and friends) is legitimate — files are the
+  user-trusted surface (§14.4.3), and documentation about this system
+  rightly contains its markers. The guard fences the *conversational*
+  voice, where the fabrication lived. The exception (2026-08-30, run
+  `01M18071PR7SRR04VV7B8TZQZP`): a bulk-content argument whose value *is* a
+  transcript placeholder is refused at the hub (§20.6) — that shape is
+  never documentation, it is the stub of content mistaken for content, and
+  two memories briefly consisted of it.
 
 Guard tests are permanent CI: the history-render contract test (marker
 form, legacy strip), the adversarial executor test (a scripted response
@@ -3295,8 +3358,41 @@ it is shell state, not service config. It is therefore kept in the app's
 own config directory (`<app_config_dir>/mode.json`) and never in the data
 dir — a plain file, not a vault entry, because it is not a secret and
 because bundled mode has to work where there is no vault at all (§28.2).
-No mode chosen yet is what makes the first screen a chooser rather than a
-connect form.
+
+**An unconfigured shell shows the welcome screen** — the two choices above,
+named and explained, and nothing else. *Unconfigured* is a property of the
+install rather than of one file: no mode chosen, **or a mode with nothing
+behind it**. What "behind it" means differs by mode and both cases are real:
+
+- **Connect** — the stored connection is gone: a cleared vault, a `forget`, an
+  app closed before the link was pasted.
+- **Bundled** — the data dir (§12.1) is gone. Deleting it is what a person does
+  to start over, and the shell must agree that they did: `mode.json` lives in
+  the app's *config* directory, not the data dir, so without this check the
+  reset half-succeeds — a fresh empty install is scaffolded and the user lands
+  on the service's "pick a model" form having asked for the opposite. The check
+  runs **before the sidecar starts**, because booting one recreates the very
+  directory whose absence is the answer. (Christer, 2026-08-30, from exactly
+  this.)
+
+Either way the shell cannot reach an assistant it was told to reach, and the
+honest screen is the one offering both ways to get one — not a paste box, and
+not a model form, for a half that was picked once.
+
+**The welcome is reachable again**, from the tray, at any time (§28.2), by an
+item named for what somebody is trying to do rather than for one of the two
+transitions — the only other route was deleting a directory, and the wrong one
+at that. It forgets the mode and the stored connection and **never touches the
+data dir**: "where should this run" is not "throw my assistant away", and the
+two must not be one button. An install that chose one mode on day one must not
+be stuck with it, and the box with the GPU is often not the box with the
+microphone.
+
+Returning to it is a **navigation to the shell's own asset origin**, never a
+relative one — once the window has loaded the service's UI, `index.html`
+resolves against *that* origin and lands on the service's chat page, which
+looks exactly like the menu item doing nothing. The shell therefore remembers
+the URL its window started on and navigates back to it by absolute address.
 
 Boot is slow enough to need saying so, and it starts before the webview
 exists to hear it: the shell's boot state is therefore both **pushed** as
@@ -3308,11 +3404,12 @@ page loads leaves a screen that claims to still be working.
 - **The webview loads the UI from the service** (`GET /`), never a
   bundled copy — one UI, zero drift, and every UI improvement reaches the
   app with the service. The shell's own chrome is the tray and its menu,
-  the connect screen, and — when voice is enabled (§28.6) — the listening
-  overlay and the wake-word enrolment screen; nothing else. The connect
-  screen is reachable from the tray in every mode, not only on first run,
-  because the box with the GPU is often not the box with the microphone
-  (Christer, 2026-08-30).
+  the welcome and connect screens, and — when voice is enabled (§28.6) — the
+  listening overlay and the wake-word enrolment screen; nothing else. Both the
+  welcome and the connect screen are reachable from the tray in every mode, not
+  only on first run, because the box with the GPU is often not the box with the
+  microphone, and because a mode chosen once must stay a choice (Christer,
+  2026-08-30).
 - **Auth bootstrap, bundled mode**: on first run the shell invokes the
   sidecar CLI `token create app` (§24.1) — in its own short-lived process,
   *before* the server starts, so the data dir is scaffolded once
@@ -3323,11 +3420,7 @@ page loads leaves a screen that claims to still be working.
   §27.1 uses for the service's own secrets. Hash-at-rest holds: nothing
   readable lands in the data dir.
   **Where there is no vault, bundled mode mints a fresh token every
-  launch** rather than refusing to start. This is the one place the shell
-  degrades instead of failing loudly, and the asymmetry with connect mode
-  below is deliberate: a pasted connect URL that cannot be stored is a
-  setup step that silently will not stick, while a bundled install is
-  somebody's only copy of their assistant and has to open. `token create`
+  launch** rather than refusing to start. `token create`
   already rotates in place (§24.1), so the cost is a `channels.yaml`
   commit per start on such a box and nothing else — no token ever reaches
   a file. In connect mode the pasted connect URL carries
@@ -3335,8 +3428,28 @@ page loads leaves a screen that claims to still be working.
   `GET /api/whoami` (App. E) before storing** — a stale QR should fail on
   the connect screen, not as a blank window. On Linux the vault is the
   Secret Service specifically: a kernel keyring would forget the token at
-  the next reboot, so a box with no secrets daemon gets a refusal on the
-  connect screen rather than a connection that quietly does not persist.
+  the next reboot.
+- **A missing vault degrades connect mode too, in memory** (Christer,
+  2026-08-30, who hit it): the verified connection is held for the life of
+  the process and **written nowhere**, the screen says so, and the next
+  launch asks for the link again. Refusing outright was the earlier rule and
+  it was wrong — plenty of machines have no Secret Service (a minimal window
+  manager, a NixOS box nobody enabled gnome-keyring on, a session started
+  over SSH), and those are disproportionately the machines pointed at a
+  service running somewhere else. The rule the vault exists to keep is *no
+  credential at rest outside it*, and holding one in memory keeps it; writing
+  the token to a config file would be the violation, and is what this
+  degradation exists **instead of**. Both modes now bend the same way: work
+  now, persist nothing, say which.
+- **A failure a person reads is a failure written for a person.** The
+  transports underneath speak their own language — `keyring` reports
+  *"Platform secure storage failure: DBus error: The name is not
+  activatable"*, a TCP connect reports *"Connection refused (os error 111)"* —
+  and neither says what happened, what follows from it, or what would fix it.
+  Anything the shell puts in front of somebody says all three, in that order,
+  and keeps the original text only where nothing anticipated it. This is a
+  contract, not a style note: the shell's screens are the whole of its
+  chrome, and a message is most of what they do.
 - **The bundled port is remembered, not fixed.** The sidecar binds a free
   localhost port; the shell writes the number it landed on to its own state
   file (never the data dir — that is the service's, git-managed) and tries it
@@ -3537,20 +3650,49 @@ The shell is the first voice device (§33): it has a microphone, a speaker,
 a Rust core holding the device token, and it sits on the desk all day.
 Voice is **opt-in** and lives in the shell's own state —
 `<app_config_dir>/voice.json`: enabled, wake word on/off, quiet mode, input
-and output device names, hotkey, sensitivity — shell state, never service
+and output device names, hotkey, sensitivity, and the phrase the trained
+model listens for — shell state, never service
 config, the `mode.json` precedent of §28.1. (Christer, 2026-08-30.)
 
 - **Capture and playback are native**, in the Rust core (`cpal` in, `rodio`
   out), never the webview: `getUserMedia` inside WKWebView and WebKitGTK is
   inconsistent about permission and device choice, and control over both
-  is the point. **Input and output devices are chosen explicitly** — tray
+  is the point.
+- **One microphone, many readers.** The wake-word detector, the turn itself
+  and the follow-up window all want the input stream at overlapping times, and
+  each opening its own capture is a device conflict on any host that does not
+  share a PCM — on PipeWire's ALSA layer it is a stream of
+  `pcm_dsnoop.c: unable to open slave` and a turn that cannot listen because
+  the last one has not let go (Christer, 2026-08-30). So the shell opens the
+  device **once**, reference-counted, and readers take a claim with their own
+  position in the stream. The device is opened when the first reader arrives
+  and closed when the last leaves, so the OS indicator says exactly what is
+  true: nothing listening means nothing open. The buffer behind it is
+  **bounded** — a detector left running all day must not accumulate the day.
+- **Input and output devices are chosen explicitly** — tray
   submenus list what `cpal` enumerates and remember the choice by name;
-  when a remembered device is absent the shell falls back to the system
-  default and says so in the tray, rather than listening to nothing. A
+  when a remembered device is absent the shell falls back and says so, rather
+  than listening to nothing. A
   machine with several audio devices is the normal case, not the edge.
-- **Two triggers.** *Push-to-talk*: a global hotkey
+  **A name is a preference, not an address**: `cpal` enumerates the same
+  hardware several times and lists PCMs that cannot be opened at all — the
+  reference box offers four devices all called "HDA Intel PCH, ALC256 Analog"
+  and a second "Default Audio Device" that fails outright beside the one that
+  works. So the menu deduplicates names, and opening tries every device
+  answering to the chosen name, then the host default, then the rest, until one
+  actually starts. The only honest test of an audio device is opening it.
+- **Three triggers.** *Push-to-talk*: a global hotkey
   (`tauri-plugin-global-shortcut`); press, speak, release — the release is
-  the end of the utterance, no silence detection, the fastest path. *Wake
+  the end of the utterance, no silence detection, the fastest path.
+  ***Talk to it***: a tray item that starts the same turn with no key held
+  and no name said (Christer, 2026-08-30). It is the discoverable trigger —
+  the one that works before a wake word is enrolled and on a machine whose
+  hotkey another application already owns — and, like the hotkey, it answers
+  from quiet mode, because reaching for it is the opposite of being disturbed.
+  A click has no release, so the utterance is **end-pointed** like the wake
+  word's, and the same item reads *Stop listening* while it is: a trigger with
+  no key to let go of needs a way out that is not waiting for
+  `voice_max_utterance_s`, and cancelling sends nothing. *Wake
   word*: a detector on the microphone stream in the Rust core, **on-device**
   — `rustpotter`, trained from a handful of the user's own recordings of the
   phrase, by default the instance's own name (G.3): pure Rust, no runtime,
@@ -3560,10 +3702,30 @@ config, the `mode.json` precedent of §28.1. (Christer, 2026-08-30.)
   `voice_endpoint_silence_ms` of silence or `voice_max_utterance_s`
   (App. A). A **follow-up window** of `voice_followup_s` after a reply
   listens again without the wake word.
-- **The tray menu** gains *Wake word* (on/off — off leaves push-to-talk
-  working), *Quiet mode* (on/off), *Input device ▸*, *Output device ▸*, and
+- **The tray menu** gains *Voice* (the opt-in itself — there is nowhere else
+  for it, since shell settings are deliberately unreachable from chat, §33.5),
+  *Talk to it* (the trigger above; *Stop listening* while it is, and greyed
+  when voice is off — a menu item that switched the microphone on and started
+  listening would be doing two things, one of which nobody asked for),
+  *Wake word ▸* (its own switch — off leaves push-to-talk working — plus
+  *Enrol…*, which is also how it is re-trained), *Quiet mode* (on/off),
+  *Input device ▸*, *Output device ▸*, and
   *Connect to another instance…* (§28.1). The tray icon shows the state:
   idle, listening, thinking, speaking, quiet.
+- **The overlay is the voice interface**, not a receipt. A small always-on-top
+  window that comes up with the microphone and says what is happening —
+  *listening*, then what was heard, then *working on it*, then *answering* —
+  and goes away when the turn does. A reply you only hear is a reply you cannot
+  check, and the transcript is the thing that says *understood right*: it is
+  shown **the moment the service reports it**, about a fifth of a second in,
+  against seconds for the whole reply. That is the same argument §33.2 makes
+  for putting it in a response header, and the header is only useful if the
+  client reads it when it arrives rather than when the body ends.
+  The window **asks for its state as well as listening for it** — it is created
+  and pushed to in the same breath, so the first event of the first turn is
+  emitted before there is a page to hear it. That race is why it once sat on
+  "…" forever (Christer, 2026-08-30); it is the same one `sidecar::LastState`
+  exists for, and it wants the same answer.
 - **Quiet mode** is do-not-disturb for the whole shell: no spoken replies to
   deliveries, no native notifications, no chime. The hotkey still works —
   the user pressing it is the opposite of being disturbed. Deliveries that
@@ -3571,6 +3733,12 @@ config, the `mode.json` precedent of §28.1. (Christer, 2026-08-30.)
   see stays unacked) and are rendered — and spoken, if voice is on — when
   quiet mode ends, unless they have expired by then. Nothing is lost and
   nothing is faked.
+- **The format the device offers is the format taken**, and converted here.
+  Asking ALSA for 16 kHz mono because that is what the transcriber wants is
+  asking a plugin to honour a range it advertises and will not deliver; a
+  refused stream is a dead microphone, where a resample is arithmetic this
+  tier already does and tests. Down-conversion low-passes first — folded alias
+  is a metallic buzz a transcriber hears as words.
 - **Containment**, in the spirit of §28.3 and §14.3: audio lives in a ring
   buffer in memory and is written nowhere; before a trigger fires nothing
   leaves the machine — the detector runs locally and the stream is
@@ -4314,7 +4482,19 @@ conversation id in response headers so a client can show what was heard.
    per second; speech plays at about 2.5 words per second, so after the
    first sentence the stream never starves. Reasoning is never spoken
    (§20.1); reserved markers are stripped before speech (§20.8).
-4. A run that fails mid-way ends the stream with the spoken sentence
+4. **A slow turn says so.** If nothing has been said by
+   `voice_acknowledge_after_ms` (App. A) the adapter speaks one short
+   acknowledgement — "one moment", rotated from a small set — and the reply
+   follows it. Silence in a room is indistinguishable from a machine that did
+   not hear you, and a turn that calls tools is several seconds of it
+   (Christer, 2026-08-30). The line is **not composed by the model**: it has to
+   be immediate when it fires, and a second call to the same endpoint would
+   queue behind the very turn it is covering and arrive after the answer. The
+   synthesiser is a different endpoint, so a known sentence costs only its
+   audio. `0` turns it off; a turn that answers inside the window never hears
+   it, because an announcement in front of a fast answer is worse than the
+   answer alone.
+5. A run that fails mid-way ends the stream with the spoken sentence
    "Sorry, that went wrong" and the ordinary `chat.error`; a run suspended
    for a `confirm` speaks that it is waiting for approval on a screen, and
    ends.
@@ -4361,8 +4541,14 @@ one form: `language`, a select of the transcriber's languages with the
 identity's `locale` (G.3) preselected, written to the `stt` endpoint's
 `language` (G.2; absent means the locale, `auto` means let the transcriber
 detect); and `voice`, a `voice`-typed field (D.5) — a select of the voices
-the `tts` endpoint lists, or the OpenAI six when it lists none, the
-configured voice always among them — with a **preview** button beside it
+the `tts` endpoint lists (§10.9), or the OpenAI six when it lists none. The
+configured voice is **always among them**, because a listing can be incomplete
+and nothing in use should become unpickable; it **leads and prefills the list
+only when the endpoint lists it**. A configured voice the endpoint does not
+know is a leftover from a synthesiser this address no longer is — swapping
+openedai-speech for Speaches leaves `voice: alloy` behind and Kokoro has no
+`alloy` — and prefilling it means submitting an untouched form writes the
+broken setting straight back (Christer, 2026-08-31) — with a **preview** button beside it
 that plays `GET /api/voice/preview?voice=<name>` (App. E): the fixed
 sentence of App. A in that voice, through the same `tts` route, traced and
 priced like any speech call. Submit writes both entries in `models.yaml`
@@ -4434,6 +4620,7 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Weather forecast cache TTL | 15 min per rounded (4-decimal) coordinate | App. F.11 |
 | Geocoding cache TTL / rate | 30 days / ≤1 req/s to Nominatim | App. F.11 |
 | Fabrication-guard retries | 1 per assistant response, then strip + trace | §20.8 |
+| Rewrite backstop threshold (`repeated_write_threshold`) | 3 writes to one (tool, target) per run → wrapped | §20.7 |
 | `docs.read` docx range cap | 500 content items per call | §23.5, App. F.14 |
 | `history.search` k default / max | 5 / 20 | §25, App. F.15 |
 | `history.search` excerpt cap | 500 chars per result | §25 |
@@ -4441,6 +4628,9 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Upload TTL (`upload_ttl_days`) | 30 days | §26.1 |
 | Upload accepted types | png, jpeg, webp, gif | §26.1 |
 | Image context window (`image_context_turns`) | last 2 user turns, then marker | §26.3 |
+| Speech call timeout (`stt`/`tts`) | 60s | §10.9 — the gateway's ceiling on one transcription or one synthesis; under the tool-call transport timeout above, because a transcriber that has not answered in a minute is down, not thinking |
+| `voice_acknowledge_after_ms` | 1200ms | §33.2 — silence before a voice turn says it is working; 0 = never |
+| Voice acknowledgements | "One moment." / "Let me look." / "Working on that." / "Just a second." / "Looking into it." | §33.2 — rotated, so the same words stop being information |
 | `voice_max_utterance_s` | 30s | §33.2 — longer audio is refused `413` |
 | `stt_min_audio_ms` | 300ms | §33.2 — shorter is `nothing_heard` |
 | `voice_idle_min` | 10 min | §33.1 — a quiet voice conversation rolls over to a new one |
@@ -4836,6 +5026,7 @@ server closes.
 | `event` | `{type, payload, occurred_at?, idempotency_key?}` | `event.accepted {event_id}` or `error` — the daemon-as-source path (§7.3); source is set server-side to the device id |
 | `chat.send` | `{conversation_id?, text, attachments?: [upload_id], pins?: {endpoint?: string, effort?: string}}` | `chat.accepted {conversation_id, event_id}` — omitted conversation_id creates one; an unknown or expired upload id → `error(not_found)` at send time, never silently dropped (§26.2). `pins` applies the §10.6 overrides to the conversation **before the run is dequeued** — it exists because a pick made while composing the first message must govern that very message, not the one after (the one-turn lag, found live 2026-08-22); validation identical to `conversation.model`, and an invalid pin fails the send rather than half-applying |
 | `chat.history` | `{conversation_id, before_seq?, limit?=50}` | `chat.history.result {turns: [{seq, role, text, created_at, attachments?: [{upload_id, name, mime}]}], more: bool}` — the UI re-renders thumbnails via `GET /api/uploads/<id>` (§26.2) |
+| `chat.stop` | `{conversation_id}` | `chat.stopped {conversation_id, run_id\|null}` — aborts the conversation's in-flight run: generation stops mid-token, what was already said persists as the turn (§20.2, no banner — the person who ended it knows), and the run settles with `error: "stopped_by_user"` (`done` when it had said something, `failed` when it had not). **The event is complete either way — a stop must never retry into a second answer.** Idempotent, the `ack` precedent: nothing running → `run_id: null`, still success, because a race with the run's own end is not an error anyone can act on |
 | `token.list` | `{}` | `token.list.result {devices: [{device, label?, created_at?, last_seen}]}` — metadata only, **never token values** (§24.1) |
 | `token.create` | `{device, label?}` | `token.reveal` (D.2) — the UI's "connect a device" (§24.3), driving the same create-blind machinery as `setup.token_create` rather than a second writer of G.4. The value is in the reveal and nowhere else; a duplicate name → `error(bad_frame)` naming the clash |
 | `token.revoke` | `{device}` | `token.revoked {device}` — removes the row and closes that device's live sessions immediately (§24.1); the user holding a device token is the confirmation, per the `embed.promote` precedent |
@@ -4876,7 +5067,8 @@ expired is marked `expired` at that moment.
 | `chat.delta` | `{conversation_id, run_id, text}` — transient, never persisted or replayed; a reconnecting client re-fetches via `chat.history` |
 | `chat.retract` | `{conversation_id, run_id}` — **unsay the turn in flight** (§20.8). The client drops everything it is holding for this run's current assistant message; what replaces it arrives as ordinary `chat.delta`s. No text, because the client's job is to render what it is told rather than work out which characters moved. Transient like `chat.delta`, and safe to miss: a reconnecting client re-fetches the settled turn, which was never anything but clean |
 | `chat.done` | `{conversation_id, turn_seq, run_id}` |
-| `chat.activity` | `{conversation_id, run_id, activity}` — what the run is doing now (queued, thinking, reasoning, tool_call, tool_result, usage, stopped); transient, never persisted |
+| `chat.stopped` | `{conversation_id, run_id\|null}` — the reply to `chat.stop` (D.1), to the requesting device; everyone else sees the run end through the ordinary `chat.done`/`chat.error` it causes |
+| `chat.activity` | `{conversation_id, run_id, activity}` — what the run is doing now (queued, thinking, reasoning, tool_call, tool_result, `awaiting_confirm {tool}`, usage, stopped); transient, never persisted. `awaiting_confirm` is sent as the run suspends on a §11.3 confirmation, so a surface that cannot show the confirm card — `/api/voice` (§33.2) — can say so and stop rather than hold a connection open until the App. A timeout |
 | `chat.usage` | `{conversation_id, run_id, model, turns, context_used, prompt_evaluated, billed_with_timings, tokens_in, tokens_out, context_size, conversation_tokens_in, conversation_tokens_out, duration_ms, queue_wait_ms, cost: {run, conversation, currency}\|null}` — `cost` per §10.5 (null when every call in scope was costless; always an estimate from configured prices, rendered as "est."). §21.1: `context_used` is the peak single-turn prompt (the headline), `tokens_in`/`tokens_out` are cumulative billing (secondary). `prompt_evaluated` is null when the endpoint sent no `timings`; `billed_with_timings` is the prompt total those turns account for, so cache-hit % is computed over the turns it actually covers rather than over the whole run |
 | `chat.error` | `{conversation_id, message}` |
 | `conversation.mode` | `{conversation_id, mode}` — sent when a conversation is in `onboarding` mode, or is a voice conversation (`mode: "voice"`, derived from `voice_device`, §33.1), so the UI can label it |
@@ -4990,7 +5182,7 @@ localStorage and uses it for `/ws`.
 |---|---|
 | `GET /` | chat UI; serves the setup page instead when `models.yaml` is absent/invalid (plan-v1 §3b). A `#connect=<token>` URL fragment (the §24.3 QR payload) is consumed client-side — **by the setup page too** (scan the first-run QR before configuring and the token survives setup instead of vanishing): token stored, fragment stripped via `history.replaceState`, connect — the fragment never reaches the server |
 | `GET /healthz` | `{status:"ok", db_version, layout_version, linked}` — no auth. `linked` is whether **any** device token exists (§24): the chat UI's gate must choose what to tell someone before it holds a credential to ask with — scan the QR your assistant shows, or (nothing linked, nobody to ask) the CLI. A boolean and nothing more: never a count, never a device name |
-| `POST /api/setup/probe` | `{url, api_key?, model?, kind?: "chat"="chat"\|"embedding"}` → chat: `{reachable, model_id?, models?: [string], context_size?, caps: {json: bool, tools: bool}, error?}`; `models` is every id the endpoint lists and `model_id` is the one these caps were **measured against** — absent `model`, the first it lists, which is all an endpoint serving one model can mean. The page re-probes with `model` when someone picks another, because a capability tag describes a model rather than an address (§10.2). The key is presented as **both** `Authorization: Bearer` and `x-api-key`, since `/v1/models` is commonly served from a provider's native API rather than its OpenAI-compatible layer and the two disagree on how a key travels; embedding: `{reachable, model_id?, dimensions?, error?}` — a real `/v1/embeddings` (then native `/embedding`) round-trip whose vector length is `dimensions`; "answered at all" is never the question (§27.1's lesson). Only enabled while unconfigured |
+| `POST /api/setup/probe` | `{url, api_key?, model?, kind?: "chat"="chat"\|"embedding"}` → chat: `{reachable, model_id?, models?: [string], context_size?, caps: {json: bool, tools: bool}, error?}`; `models` is every id the endpoint lists and `model_id` is the one these caps were **measured against** — absent `model`, the first it lists, which is all an endpoint serving one model can mean. The page re-probes with `model` when someone picks another, because a capability tag describes a model rather than an address (§10.2). The chat result also carries `efforts?: ["none"]` — the one reasoning level a probe can *verify* (§10.6): the same question asked twice, once with the endpoint's `no_think` fragment, tagged only when it reasoned the first time and not the second. Reported, never auto-written into G.2: a partial `efforts` list would deny the levels nobody measured. The key is presented as **both** `Authorization: Bearer` and `x-api-key`, since `/v1/models` is commonly served from a provider's native API rather than its OpenAI-compatible layer and the two disagree on how a key travels; embedding: `{reachable, model_id?, dimensions?, error?}` — a real `/v1/embeddings` (then native `/embedding`) round-trip whose vector length is `dimensions`; "answered at all" is never the question (§27.1's lesson). Only enabled while unconfigured |
 | `POST /api/setup/commit` | `{endpoints: [ModelEndpoint], embedding?: bool, embedding_url?}` (App. G.2) — `embedding: false` is a decline and writes no block; otherwise the URL defaults to the first endpoint's root and inherits that endpoint's `${secret:}` key reference when it *is* that root (§28.5) → writes `models.yaml`, git commit, 200. The embedding field is **offered on the setup page, optional, with the honest consequence stated** ("without it, semantic search runs on keyword overlap — everything works, recall is cruder"); it landed here after the block spent a day hand-edited and silently broken (2026-08-23). First run only, the response also carries `ui_token` so the page can open `/ws` without the operator copying it out of the terminal — the value comes from the scaffold's in-memory carrier, never from disk (§24: there is only a hash there), so a service that did not create this data dir omits the field |
 | `POST /api/events` | inject an event: `{type, payload, occurred_at?, idempotency_key?, serialization_key?}` → `{event_id}` — generic webhook/testing ingress; `webhook.<name>` types conventionally. **`source` is stamped server-side from the authenticated device** (matching the WS `event` frame, D.1) — a caller-supplied `source` is ignored: provenance comes from the token, identity from the type. Payload caps per App. A where the type declares them (§29.3) → `{error: "too_large"}` |
 | `GET /api/whoami` | bearer auth → `{device, label?}` — the authenticated identity probe; pairing UIs (§29.5) verify a token and show what it authenticated as |
@@ -5006,9 +5198,9 @@ localStorage and uses it for `/ws`.
 | `GET /api/files/raw?path=` | bearer auth; serves a file-store file `Content-Disposition: inline`, `X-Content-Type-Options: nosniff` — the §18.5 preview source. Images and PDFs get their real Content-Type; **HTML is never served as HTML** and SVG carries `Content-Security-Policy: default-src 'none'` — a store file may be assistant-authored and this route answers on the origin holding the device token, so anything else is served `text/plain` (assistant-authored pages run in the §22.3 embed sandbox, never here). Path normalization + symlink rules are F.8's, through the same resolution code (one door); traversal → 403, unknown or a directory → 404, no `path` → 400. The UI fetches with the bearer token and object-URLs the blob (an `<img>`/`<embed>` src cannot carry an Authorization header) |
 | `POST /api/uploads` | bearer auth; body = the file (`Content-Type` + `X-Upload-Name` headers) → `{upload_id, sha256, mime, bytes}` (§26.1). Type outside the whitelist → 415 `{error: "unsupported_media_type"}`; over `upload_max_mb` → 413 `{error: "too_large"}` |
 | `GET /api/uploads/<id>` | bearer auth; the stored bytes, real Content-Type, inline — transcript re-display (§26.2). Expired/unknown → 404 |
-| `POST /api/voice` | bearer auth; body `audio/wav` (16 kHz mono preferred) up to `voice_max_utterance_s` → `audio/wav`, chunked, produced sentence by sentence (§33.2); response headers `X-Turminder-Conversation` (the voice conversation id) and `X-Turminder-Transcript` (what was heard, RFC 8187-encoded). `413 {error: "too_long"}`, `415 {error: "unsupported_media_type"}`, `422 {error: "nothing_heard"}` (empty, too short, or a silence hallucination — nothing written, no run), `503 {error: "no_speech_endpoint", kind}` naming the missing kind |
-| `POST /api/speak` | bearer auth; `{delivery_id}` → `audio/wav`, the server-composed spoken form of a delivery (§33.3). `404` unknown, `410 {error: "expired"}`, `503 {error: "no_speech_endpoint", kind: "tts"}`. Takes an id, never free text: the shell is not a text-to-speech proxy |
-| `GET /api/voice/preview?voice=<name>` | bearer auth → `audio/wav`: the App. A preview sentence spoken in that voice by the `tts` route (§33.5). The text is the server's; the voice name is the only input. `400 {error: "unknown_voice"}` when the endpoint lists voices and this is not one; `503 {error: "no_speech_endpoint", kind: "tts"}` |
+| `POST /api/voice` | bearer auth; body `audio/wav` (16 kHz mono preferred) up to `voice_max_utterance_s` → `audio/wav`, chunked, produced sentence by sentence (§33.2); response headers `X-Turminder-Conversation` (the voice conversation id) and `X-Turminder-Transcript` (what was heard, RFC 8187-encoded). `413 {error: "too_long"}`, `415 {error: "unsupported_media_type"}`, `422 {error: "nothing_heard"}` (empty, too short, or a silence hallucination — nothing written, no chat run; the transcription itself is traced), `502 {error: "speech_failed"}` when the transcriber or the synthesiser was reachable and failed — an outage, not an answer, and the only one of these that can also happen *after* the 200, where the response is simply cut short because there is no status code left to send, `503 {error: "no_speech_endpoint", kind}` naming the missing kind |
+| `POST /api/speak` | bearer auth; `{delivery_id}` → `audio/wav`, the server-composed spoken form of a delivery (§33.3). `400 {error: "bad_request"}` for a body that is not `{delivery_id}`, `404` unknown, `410 {error: "expired"}`, `502 {error: "speech_failed"}` when the synthesiser was reachable and failed, `503 {error: "no_speech_endpoint", kind: "tts"}`. Takes an id, never free text: the shell is not a text-to-speech proxy |
+| `GET /api/voice/preview?voice=<name>` | bearer auth → `audio/wav`: the App. A preview sentence spoken in that voice by the `tts` route (§33.5). The text is the server's; the voice name is the only input. `400 {error: "bad_request"}` without a `voice`; `400 {error: "unknown_voice"}` when the endpoint lists voices and this is not one — an endpoint that lists none takes whatever name it is given, because absence of a listing is not an empty allowlist; `502 {error: "speech_failed"}`; `503 {error: "no_speech_endpoint", kind: "tts"}` |
 
 The `/embed*` routes are authenticated by the per-embed scoped token in `t`
 (§22.3.4) and **never** by a device token — the two auth models must not meet.
@@ -5058,8 +5250,8 @@ JSON Schema in shorthand: `field: type` (all fields required unless `?`).
 | tool | tier | args | returns |
 |---|---|---|---|
 | `memory.query` | ro | `{query: string, k?: int=5}` | `{results: [{name, description, type, content, score}]}` |
-| `memory.save` | se | `{type: "fact"\|"preference"\|"note"\|"reference", description: string, content: string, name?: string, project?: string\|null}` | `{name, file, action: "created"\|"merged"}` — the agent dedupes: if an existing memory covers it, it updates that file and returns `merged`. `project` scopes the memory (§31.5): default = the conversation's most recently loaded project (general when none loaded); an explicit name must be in the loaded set (`{error: "not_loaded"}` otherwise); explicit `null` = "remember this generally" |
-| `memory.update` | se | `{name: string, content?: string, description?: string}` | `{name, file}` |
+| `memory.save` | se | `{type: "fact"\|"preference"\|"note"\|"reference", description: string, content: string, name?: string (≤ 80 chars — a title, never a sentence; G.9 slugs it into the filename), project?: string\|null}` | `{name, file, action: "created"\|"merged"}` — the agent dedupes: if an existing memory covers it, it updates that file and returns `merged`. `project` scopes the memory (§31.5): default = the conversation's most recently loaded project (general when none loaded); an explicit name must be in the loaded set (`{error: "not_loaded"}` otherwise); explicit `null` = "remember this generally" |
+| `memory.update` | se | `{name: string, content?: string, description?: string}` | `{name, file, updated: true, chars?}` — `chars` is the length of the content written, present when content was; the confirmation the transcript's `[[stored:]]` placeholder cannot give (§20.6). `{error: "not_found", name}` for an unknown name |
 | `memory.forget` | se | `{name: string, reason: string}` | `{name, deleted: true}` |
 
 Every `se` call performs a git commit; commit message =
@@ -5249,7 +5441,7 @@ committing flow (memory, config, embeds).
 | `setup.token_create` | se | `{device: string, label?: string}` | `{device, label, created: true, revealed_to_user: true}` — the value itself goes to the user in a one-time `token.reveal` frame and is **never** in the result, the trace, or any persisted turn (§24.2). `{error: "device_exists"}` on a name collision; `{error: "no_reveal_target"}` (and no row written) when no connected chat-capable device can receive the reveal |
 | `setup.pair_approve` | se | `{code: string, device: string, label?: string}` | `{device, label, approved: true, delivered_to_device: true}` — approves a device that asked to be paired from its own gate (§24.4); the value goes straight to that device and is **never** in the result, the trace, or any persisted turn. `{error: "no_such_request"}` on an unknown or expired code (no row written), `{error: "already_approved"}`, `{error: "device_exists"}` on a name collision or `{error: "bad_device_name"}` on an unusable one (the request survives either, so another name still works). There is deliberately no tool that lists pending requests — the code comes from the human |
 | `setup.pricing` | se | `{endpoint?: string}` | `{submitted: true, endpoint, cost: {in_per_mtok, out_per_mtok, currency}\|null, committed: bool, models_loaded: bool, note}` or `{submitted: false, reason}`; `{error: "unknown_endpoint"\|"no_endpoints"\|"no_conversation"\|"no_run"}`, and `{submitted: true, priced: false, error: "bad_price"}` when the typed figures do not validate — **nothing is written in any error case**. A form round-trip (§19.1), prefilled from the current block so it reads as an edit: three numbers a human types, because three numbers and a currency dictated by a model into a tool call is the anti-telephone problem with money attached. Omitting `endpoint` with more than one configured makes the form lead with a select. Carries an explicit **"no — local or free"** choice that removes the `cost` block, without which a mistyped price is permanent and §10.5's distinction between *free* and *unpriced* is unreachable from the surface that created it. Writes G.2 through the same `writeRaw` + git-commit + `reloadModels()` path the templates use — one writer, not two |
-| `setup.voice` | se | `{}` | `{submitted: true, language, voice, committed: bool}` or `{submitted: false, reason}`; `{error: "no_speech_endpoint", kind}` when there is no `stt` or `tts` endpoint to configure (the answer is the `speech_endpoint` template), `{error: "no_conversation"\|"no_run"}` — one form (§33.5): `language` (select, prefilled from the `stt` entry or the identity locale; `auto` = let the transcriber detect), `voice` (D.5 `voice` type, previewable, prefilled from the `tts` entry, options from the endpoint's voice listing or the OpenAI six). Writes both G.2 entries through `writeRaw` + reload; **nothing is written on cancel or timeout** |
+| `setup.voice` | se | `{}` | `{submitted: true, language, voice, committed: bool, models_loaded: bool}` or `{submitted: false, reason}`; `{error: "no_speech_endpoint", kind}` when there is no `stt` or `tts` endpoint to configure (the answer is the `speech_endpoint` template), `{error: "no_conversation"\|"no_run"}` — one form (§33.5): `language` (select, prefilled from the `stt` entry or the identity locale; `auto` = let the transcriber detect), `voice` (D.5 `voice` type, previewable, prefilled from the `tts` entry, options from the endpoint's voice listing or the OpenAI six). Writes both G.2 entries through `writeRaw` + reload; **nothing is written on cancel or timeout** |
 | `setup.rename` | se | `{name: string, story?: string (a new identity body — the self-description prose; omitted, the old body keeps with whole-word occurrences of the old name swapped for the new)}` | `{name, previous, updated: "config/identity.md", committed: bool, old_name_still_in: [paths], note}` — renames the instance: one validated, committed rewrite of `config/identity.md` (frontmatter `instance_name` + body), then a scan of `config/personality.md` and `memory/*.md` reporting where the old name still appears — the model curates those with its own grants (`memory.update`, prose is judgment) rather than a tool sed-ing curated text. `{error: "not_onboarded"}` before an identity exists; `{error: "same_name"}` when nothing would change. Chat gets it via the default `setup.*` grant — the rename no longer needs onboarding's `config.write`. Connected screens learn the name at `hello`, so they show the new one after their next reconnect |
 
 Suspension per F.7/D.5. Template and activation submissions execute their
@@ -5437,6 +5629,9 @@ secrets:                  # §27.1
 voice:                    # §33 — the transcriber's language and the speaking voice
   idle_min: 10            #   live on the stt/tts entries in models.yaml (G.2, setup.voice)
   max_utterance_s: 30
+  stt_min_audio_ms: 300   # §33.2 — shorter is `nothing_heard`
+  spoken_max_chars: 300   # §33.3 — cap on deliver.notify's `spoken`
+  acknowledge_after_ms: 1200  # §33.2 — silence before "one moment"; 0 = never
 retention_days: 90
 ```
 
@@ -5841,7 +6036,9 @@ src/
   model/          # models.yaml types, router, inference scheduler, agent loop, probes,
                   #   tool-names.ts (the §11.5 wire facade: `.` ↔ `__`), routes.ts (the
                   #   closed purpose vocabulary + kind-default table, §10.6), feed.ts
-                  #   (the request log's live fan-out, §10.8)
+                  #   (the request log's live fan-out, §10.8), wav.ts (the one RIFF
+                  #   header reader, §10.9), fixtures/ (the stt probe's checked-in
+                  #   stimulus — copied beside the build like prompts/library/)
   tools/          # dispatcher, grants, run-grant registry (§23.2), mcp-client,
                   #   registry, integrations/{memory,schedule,deliver,events,web,config,
                   #   skills,asana,google,files,setup,time,weather,embeds,docs,
@@ -5950,7 +6147,9 @@ from the table.
 
 The desktop shell (§28) is **packaging tier**: its Rust dependencies are
 pinned by `app/Cargo.lock`, and its build toolchain — the Rust compiler,
-the Tauri CLI, webkitgtk/gtk/dbus — by `app/shell.nix`. Voice in the
+the Tauri CLI, webkitgtk/gtk/dbus, and — since voice — `alsa-lib`, which
+is what `cpal` links against on Linux and therefore how PipeWire and
+PulseAudio are reached — by `app/shell.nix`. Voice in the
 shell (§28.6) adds exactly four crates there — `cpal`, `rodio`,
 `rustpotter`, `tauri-plugin-global-shortcut` — and no others. Any JS
 tooling a platform's build needs lives in `app/package.json`. None of it

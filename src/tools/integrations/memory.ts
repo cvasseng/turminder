@@ -62,8 +62,11 @@ export function memoryTools(
         content: z.string().min(1).describe('the memory itself, in prose'),
         name: z
           .string()
+          .max(80)
           .optional()
-          .describe('optional stable name; a slug of it becomes the filename'),
+          .describe(
+            'optional stable name — a short title (at most 80 characters), never a sentence; a slug of it becomes the filename',
+          ),
         project: z
           .string()
           .nullable()

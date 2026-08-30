@@ -28,10 +28,12 @@ const ICONS = {
   check: '<path d="M20 6 9 17l-5-5"/>',
   'arrow-left': '<path d="M19 12H5"/><path d="m12 19-7-7 7-7"/>',
   send: '<path d="M22 2 11 13"/><path d="M22 2l-7 20-4-9-9-4Z"/>',
+  stop: '<rect x="7" y="7" width="10" height="10" rx="1.5"/>',
   trash:
     '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M18.5 6 17.6 20a1 1 0 0 1-1 1H7.4a1 1 0 0 1-1-1L5.5 6"/><path d="M10 11v6M14 11v6"/>',
   chevron: '<path d="m9 18 6-6-6-6"/>',
   activity: '<path d="M3 12h4l3 8 4-16 3 8h4"/>',
+  mic: '<rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v4"/>',
   calls: '<path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/>',
   layout:
     '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/>',
@@ -84,6 +86,7 @@ const REQUIRED_FRAMES = [
   'event.list',
   'calls.list',
   'chat.send',
+  'chat.stop',
   'chat.history',
   'conversation.list',
   'conversation.close',
@@ -105,6 +108,7 @@ const EXPECTED_FROM_SERVER = [
   'call.made',
   'chat.activity',
   'chat.retract',
+  'chat.stopped',
   'chat.usage',
   'conversation.titled',
   'form.request',
@@ -156,6 +160,8 @@ const state = {
   conversationId: localStorage.getItem(CONV_KEY) || null,
   mode: 'normal',
   streaming: null,
+  /** Conversations with a run in flight — what the stop button acts on. */
+  running: new Set(),
   // Set once the server answers a connection with welcome: proof the token is
   // good, and the difference between "reconnect" and "ask for a new token".
   authed: false,
@@ -769,6 +775,8 @@ function activityLine(a) {
       return `calling ${a.tool} ${summariseArgs(a.args)}`;
     case 'tool_result':
       return `${a.tool} ${a.ok ? '→' : 'failed:'} ${truncate(a.summary, 120)}`;
+    case 'awaiting_confirm':
+      return `waiting for you to approve ${a.tool}`;
     case 'stopped':
       return `stopped: ${a.reason}`;
     default:
@@ -1199,9 +1207,19 @@ function renderConversations() {
     label.className = 'label';
     const title = document.createElement('span');
     title.className = 'title';
-    title.textContent =
+    // A voice conversation reads like any other; the glyph is the only thing
+    // that says it was spoken rather than typed (§33.1).
+    if (c.mode === 'voice') {
+      const mic = document.createElement('span');
+      mic.className = 'conv-mic';
+      mic.title = c.voice_device ? `spoken from ${c.voice_device}` : 'spoken';
+      mic.innerHTML = iconSvg('mic');
+      title.append(mic);
+    }
+    title.append(
       (c.title || (c.mode === 'onboarding' ? 'onboarding' : c.id.slice(-8))) +
-      (c.status === 'closed' ? ' · archived' : '');
+        (c.status === 'closed' ? ' · archived' : ''),
+    );
     const when = document.createElement('span');
     when.className = 'when';
     when.textContent = new Date(c.last_activity_at).toLocaleString();
@@ -1266,6 +1284,7 @@ function selectConversation(id) {
   clearMessages();
   send('chat.history', { conversation_id: id, limit: 100 });
   renderConversations();
+  refreshStop();
 }
 
 function connect() {
@@ -1429,6 +1448,8 @@ function handle(frame) {
         state.models.pending = null;
       }
       state.streaming = null;
+      state.running.add(p.conversation_id);
+      refreshStop();
       if (moved) {
         addMessage('system', 'continued in another conversation - reloading', 'system');
         selectConversation(p.conversation_id);
@@ -1439,6 +1460,11 @@ function handle(frame) {
 
     case 'chat.activity': {
       if (p.conversation_id !== state.conversationId) break;
+      // A run another device started still gets a stop button here.
+      if (!state.running.has(p.conversation_id)) {
+        state.running.add(p.conversation_id);
+        refreshStop();
+      }
       const activity = p.activity || {};
       if (activity.kind === 'reasoning') {
         // Live reasoning from a thinking model. Never persisted, never re-fed
@@ -1533,6 +1559,8 @@ function handle(frame) {
       break;
 
     case 'chat.done':
+      state.running.delete(p.conversation_id);
+      refreshStop();
       if (p.conversation_id !== state.conversationId) break;
       settleGroup();
       // Only now: the marker is complete and the text will not re-render.
@@ -1545,11 +1573,23 @@ function handle(frame) {
       break;
 
     case 'chat.error':
+      if (p.conversation_id) {
+        state.running.delete(p.conversation_id);
+        refreshStop();
+      }
       if (p.conversation_id && p.conversation_id !== state.conversationId) break;
       settleGroup();
       state.streaming = null;
       $('send').disabled = false;
       addMessage('error', p.message || 'something went wrong', 'error');
+      break;
+
+    case 'chat.stopped':
+      // The direct answer to our chat.stop; the run's own done/error follows
+      // and is what finalizes the transcript. run_id null means nothing was
+      // running — a race with the run's own end, and nothing to say about it.
+      if (p.conversation_id !== state.conversationId) break;
+      if (p.run_id) addMessage('system', 'stopped', 'system');
       break;
 
     case 'delivery':
@@ -2421,6 +2461,10 @@ function showForm(frame) {
   const inputs = new Map();
   const choices = new Map();
   const choiceButtons = [];
+  // Declared before the fields because a `voice` field's play button reports
+  // a failed preview into it.
+  const status = document.createElement('div');
+  status.className = 'form-status';
   for (const field of frame.fields || []) {
     if (field.type === 'choice') {
       // A button row: one click answers. The value lands in `choices` and the
@@ -2456,7 +2500,8 @@ function showForm(frame) {
     if (field.required === false) label.textContent += ' (optional)';
 
     let input;
-    if (field.type === 'select') {
+    let preview = null;
+    if (field.type === 'select' || field.type === 'voice') {
       input = document.createElement('select');
       for (const option of field.options || []) {
         const el2 = document.createElement('option');
@@ -2465,6 +2510,10 @@ function showForm(frame) {
         input.append(el2);
       }
       if (field.value !== undefined) input.value = field.value;
+      // A voice is a sound, and picking one from a list of names is picking
+      // blind (§33.5, D.5). The play button is the only difference from a
+      // plain select; a surface that cannot play audio simply has no button.
+      if (field.type === 'voice') preview = voicePreviewButton(input, status);
     } else {
       input = document.createElement('input');
       input.type =
@@ -2475,7 +2524,14 @@ function showForm(frame) {
     input.name = field.name;
     inputs.set(field.name, input);
 
-    row.append(label, input);
+    if (preview) {
+      const line = document.createElement('span');
+      line.className = 'form-voice';
+      line.append(input, preview);
+      row.append(label, line);
+    } else {
+      row.append(label, input);
+    }
     if (field.type === 'secret') {
       const note = document.createElement('span');
       note.className = 'form-note';
@@ -2484,9 +2540,6 @@ function showForm(frame) {
     }
     el.append(row);
   }
-
-  const status = document.createElement('div');
-  status.className = 'form-status';
 
   const actions = document.createElement('div');
   actions.className = 'form-actions';
@@ -2629,6 +2682,55 @@ function renderPending() {
 }
 
 /**
+ * The ▶ beside a `voice` field (§33.5, D.5): fetch the fixed preview sentence
+ * in the selected voice and play it. Nothing is chosen by pressing it — the
+ * value only changes when the select does.
+ */
+function voicePreviewButton(select, status) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'voice-preview';
+  button.title = 'Hear this voice';
+  button.textContent = '▶';
+  let url = null;
+  const release = () => {
+    if (url) URL.revokeObjectURL(url);
+    url = null;
+  };
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try {
+      const res = await fetch(`/api/voice/preview?voice=${encodeURIComponent(select.value)}`, {
+        headers: { authorization: `Bearer ${token()}` },
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        status.textContent = body.message || `preview failed: HTTP ${res.status}`;
+        button.disabled = false;
+        return;
+      }
+      release();
+      url = URL.createObjectURL(await res.blob());
+      const audio = new Audio(url);
+      // Re-enabled on whatever ends the playback, including a decode error —
+      // a button stuck disabled is worse than a preview that did not play.
+      const done = () => {
+        release();
+        button.disabled = false;
+      };
+      audio.addEventListener('ended', done, { once: true });
+      audio.addEventListener('error', done, { once: true });
+      await audio.play();
+    } catch (e) {
+      status.textContent = `preview failed: ${e.message}`;
+      release();
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+/**
  * Point an `<img>` at an upload. The GET route needs the bearer token and an
  * `<img src>` cannot carry a header, so the bytes are fetched and object-URL'd
  * — the same trick the file panel uses (§18.5). An upload that has been reaped
@@ -2665,6 +2767,16 @@ for (const type of ['dragover', 'drop']) {
     if (type === 'drop') void attachFiles([...(e.dataTransfer?.files ?? [])]);
   });
 }
+
+/** The stop button exists exactly while this conversation has a run in flight. */
+function refreshStop() {
+  $('stop').hidden = !(state.conversationId && state.running.has(state.conversationId));
+}
+
+$('stop').onclick = () => {
+  if (!state.conversationId) return;
+  send('chat.stop', { conversation_id: state.conversationId });
+};
 
 $('composer').onsubmit = (e) => {
   e.preventDefault();
@@ -2703,6 +2815,11 @@ $('input').addEventListener('keydown', (e) => {
     e.preventDefault();
     $('composer').requestSubmit();
   }
+  // Esc = the stop button, when there is something to stop.
+  if (e.key === 'Escape' && !$('stop').hidden) {
+    e.preventDefault();
+    $('stop').onclick();
+  }
 });
 
 $('new').onclick = () => {
@@ -2710,6 +2827,7 @@ $('new').onclick = () => {
   localStorage.removeItem(CONV_KEY);
   clearMessages();
   renderConversations();
+  refreshStop();
   // The button lives in the sidebar's footer, so on a narrow screen the thing
   // it just made is underneath the sheet you pressed it from.
   dismissSheets();

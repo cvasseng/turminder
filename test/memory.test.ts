@@ -4,7 +4,9 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { bootService, offeredTools, type ServiceHarness } from './service-harness.js';
 import { MemoryStore, slugify } from '../src/memory/store.js';
+import { ProjectScope } from '../src/projects/scope.js';
 import { lexicalSearch } from '../src/rag/index-store.js';
+import { memoryTools } from '../src/tools/integrations/memory.js';
 
 let h: ServiceHarness;
 afterEach(async () => {
@@ -147,8 +149,23 @@ describe('memory agent (§8.2)', () => {
       content: 'Rides a green bike.',
     });
     expect(updated?.name).toBe(saved.name);
+    // The result says plainly that it landed, and how much (§20.6): the
+    // transcript is about to show this call's content as a placeholder.
+    expect(updated).toMatchObject({ updated: true, chars: 'Rides a green bike.'.length });
     expect(h.service.memoryStore.get(saved.name)?.content).toBe('Rides a green bike.');
     expect(await h.service.memory.update('ghost', { content: 'x' })).toBeNull();
+  });
+
+  it('caps a memory name at 80 characters — a title, never a sentence (F.1, G.9)', async () => {
+    h = await bootService({ onboarded: true });
+    const save = memoryTools(
+      h.service.memory,
+      new ProjectScope(h.service.repos.conversations),
+      h.service.repos.trace,
+    ).find((t) => t.name === 'memory.save')!;
+    const args = { type: 'fact', description: 'd', content: 'c' };
+    expect(save.args.safeParse({ ...args, name: 'x'.repeat(80) }).success).toBe(true);
+    expect(save.args.safeParse({ ...args, name: 'x'.repeat(81) }).success).toBe(false);
   });
 });
 

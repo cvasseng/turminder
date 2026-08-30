@@ -36,6 +36,13 @@ const FUTILE_STREAK_THRESHOLD = 3;
 const MARKER_RETRIES = 1;
 
 /**
+ * The rewrite backstop's threshold (§20.7, App. A): the write to the same
+ * target, with different content, that comes back wrapped. Two rewrites is a
+ * correction; three is a model that no longer believes its own results.
+ */
+const REPEATED_WRITE_THRESHOLD = 3;
+
+/**
  * The corrective note a retry carries (§20.8). An error that teaches, per
  * §23.2's precedent: naming the pattern is what makes it fixable, and the
  * middle sentence is the whole lesson of the incident. The paraphrase clause
@@ -199,6 +206,8 @@ export async function runAgent(
   // Zero-arg calls are exempt: `time.now` twice in a run is time passing,
   // not a model that lost the thread.
   const repeats = new Map<string, { count: number; output: unknown }>();
+  /** Writes per (tool, target) — the args minus their bulk content (§20.7). */
+  const writes = new Map<string, number>();
   // Fabrication-guard retries spent on the current assistant response (§20.8).
   let markerRetries = 0;
   // Consecutive empty results per tool namespace (§20.9), reset by any
@@ -208,6 +217,11 @@ export async function runAgent(
   let reasoningChars = 0;
   let text = '';
   const spoken: string[] = [];
+  // What the current gateway turn has streamed so far. An aborted turn (App. D
+  // `chat.stop`) dies mid-stream inside gateway.turn, so its text never reaches
+  // `spoken` — but the user already watched it go past, so the catch salvages
+  // it from here rather than letting the throw discard it.
+  let streamedThisTurn = '';
   let endpoint = '';
   let stopReason: StopReason;
   let error: string | undefined;
@@ -238,6 +252,7 @@ export async function runAgent(
         if (dropped.length) l.debug({ tools: dropped, turn: turns }, 'elided stale results');
       }
       req.onActivity?.({ kind: 'thinking', turn: turns });
+      streamedThisTurn = '';
       const turn = await gateway.turn({
         selector: req.selector,
         priority: req.priority,
@@ -246,7 +261,14 @@ export async function runAgent(
         tools: dispatcher.toolSet(),
         trace,
         abortSignal: controller.signal,
-        ...(req.onDelta ? { onDelta: req.onDelta } : {}),
+        ...(req.onDelta
+          ? {
+              onDelta: (t: string) => {
+                streamedThisTurn += t;
+                req.onDelta!(t);
+              },
+            }
+          : {}),
         // Reasoning is feedback, never content (§20.1): it rides the activity
         // channel and is not accumulated into anything this loop returns.
         ...(req.onActivity
@@ -421,6 +443,39 @@ export async function runAgent(
             }
           }
           /**
+           * The rewrite backstop (§20.7). The identical-args map above cannot
+           * see the other way a model circles: the same write tool aimed at the
+           * same target with *different* content every time — a model that
+           * believes its write failed and re-sends it reworded (2026-08-30:
+           * eight `memory.update` calls to one memory in seventy seconds, all
+           * stored, all committed). The target is the call minus its bulk
+           * fields; from the third such write the result comes back wrapped.
+           * Pressure, never refusal: every write still runs and still lands.
+           */
+          if (outcome.bulkArgs?.length && !seen && !trivialArgs) {
+            const target = { ...(call.input as Record<string, unknown>) };
+            for (const field of outcome.bulkArgs) delete target[field];
+            if (Object.keys(target).length) {
+              const writeKey = `${call.toolName} ${stableJson(target)}`;
+              const count = (writes.get(writeKey) ?? 0) + 1;
+              writes.set(writeKey, count);
+              if (count >= REPEATED_WRITE_THRESHOLD) {
+                outcome = {
+                  ...outcome,
+                  output: {
+                    repeated_write: true,
+                    note:
+                      `this is ${call.toolName} number ${count} to the same target this run, ` +
+                      `each with different content, and each one was stored — you are ` +
+                      `rewriting, not fixing. If you doubt what is there, read it back with ` +
+                      `the tool; otherwise stop.`,
+                    result: outcome.output,
+                  },
+                };
+              }
+            }
+          }
+          /**
            * The futility backstop (§20.9). Counting is per namespace because
            * that is the unit an approach lives in: four different `web.*`
            * calls that all found nothing is one wrong idea, not four unlucky
@@ -525,6 +580,13 @@ export async function runAgent(
     } else if (req.abortSignal?.aborted) {
       stopReason = 'aborted';
       error = 'aborted';
+      // Keep what the aborted turn had already said. Stripped like any fresh
+      // output (§20.8) — this text died before the guard could look at it.
+      const partial = stripReservedMarkers(streamedThisTurn).trim();
+      if (partial) {
+        text = partial;
+        spoken.push(partial);
+      }
     } else {
       stopReason = 'error';
       error = errMessage(e);

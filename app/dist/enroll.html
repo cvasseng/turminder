@@ -1,0 +1,198 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Teach Turminder its name</title>
+<!--
+  Enrolment (§28.6, V7.2): say the name five times, then once more to check.
+
+  The takes never leave the Rust core and are never written down — this page
+  asks, counts, and shows what happened; the microphone, the training and the
+  one file on disk are all `src-tauri/src/wake.rs`. Plain HTML, no build step,
+  like every other page in this tier.
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfd;
+    --fg: #1b1d22;
+    --dim: #6b7280;
+    --line: #dfe3ea;
+    --accent: #2f6df6;
+    --bad: #b42318;
+    --good: #157347;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c;
+      --fg: #e9ecf1;
+      --dim: #9aa3af;
+      --line: #2a2e35;
+      --accent: #5b8cff;
+      --bad: #ffb4a2;
+      --good: #6ee7a2;
+    }
+  }
+  body {
+    margin: 0;
+    padding: 26px 28px;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  h1 {
+    font-size: 19px;
+    margin: 0 0 6px;
+  }
+  p {
+    margin: 0 0 14px;
+    line-height: 1.45;
+    color: var(--dim);
+    font-size: 13px;
+  }
+  .phrase {
+    font-size: 26px;
+    font-weight: 600;
+    text-align: center;
+    padding: 18px 10px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    margin-bottom: 16px;
+  }
+  .takes {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-bottom: 18px;
+  }
+  .pip {
+    width: 34px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--line);
+  }
+  .pip.done {
+    background: var(--accent);
+  }
+  .row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  button {
+    font: inherit;
+    padding: 9px 16px;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+  }
+  button.secondary {
+    background: transparent;
+    color: var(--fg);
+  }
+  button[disabled] {
+    opacity: 0.55;
+    cursor: default;
+  }
+  #status {
+    font-size: 13px;
+    min-height: 1.4em;
+  }
+  #status.bad {
+    color: var(--bad);
+  }
+  #status.good {
+    color: var(--good);
+  }
+</style>
+<h1>Teach it to hear its name</h1>
+<p>
+  Say the name below, once per press, in the voice and the room you will actually
+  use. Five takes, then one more to check it worked. Nothing is recorded to disk
+  — the takes become a small template and are then gone.
+</p>
+<div class="phrase" id="phrase">Turminder</div>
+<div class="takes" id="pips"></div>
+<div class="row">
+  <button id="record">Record take 1</button>
+  <button id="again" class="secondary" hidden>Start over</button>
+</div>
+<p id="status"></p>
+<script>
+  const bridge = window.__TAURI__;
+  const invoke = bridge.core.invoke;
+  const TAKES = 5;
+  const $ = (id) => document.getElementById(id);
+  let taken = 0;
+  let phase = 'record';
+
+  const pips = () => {
+    $('pips').replaceChildren(
+      ...Array.from({ length: TAKES }, (_, i) => {
+        const pip = document.createElement('div');
+        pip.className = `pip${i < taken ? ' done' : ''}`;
+        return pip;
+      }),
+    );
+  };
+
+  const say = (text, kind = '') => {
+    $('status').textContent = text;
+    $('status').className = kind;
+  };
+
+  invoke('instance_name')
+    .then((name) => ($('phrase').textContent = name))
+    .catch(() => {});
+  pips();
+
+  $('again').onclick = async () => {
+    await invoke('enrol_reset').catch(() => {});
+    taken = 0;
+    phase = 'record';
+    pips();
+    $('record').textContent = 'Record take 1';
+    $('record').disabled = false;
+    $('again').hidden = true;
+    say('');
+  };
+
+  $('record').onclick = async () => {
+    $('record').disabled = true;
+    try {
+      if (phase === 'record') {
+        say('Listening — say it now.');
+        taken = await invoke('enrol_record');
+        pips();
+        if (taken < TAKES) {
+          $('record').textContent = `Record take ${taken + 1}`;
+          say(`${taken} of ${TAKES}.`);
+        } else {
+          say('Training…');
+          await invoke('enrol_train');
+          phase = 'verify';
+          $('record').textContent = 'Say it once more';
+          say('Trained. Now say it once more so we can check.');
+        }
+      } else if (phase === 'verify') {
+        say('Listening…');
+        const heard = await invoke('enrol_verify');
+        if (heard) {
+          phase = 'done';
+          $('record').hidden = true;
+          say('Heard it. The wake word is on — turn it off in the tray.', 'good');
+        } else {
+          // Not a failure to hide: a model that cannot hear the voice that
+          // trained it would leave the tray claiming to be ready (§28.6).
+          say('That did not register. Try once more, or start over.', 'bad');
+          $('again').hidden = false;
+        }
+      }
+    } catch (e) {
+      say(String(e && e.message ? e.message : e), 'bad');
+      $('again').hidden = false;
+    } finally {
+      $('record').disabled = false;
+    }
+  };
+</script>

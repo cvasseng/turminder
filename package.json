@@ -15,7 +15,7 @@
   },
   "scripts": {
     "start": "node dist/src/index.js",
-    "build": "tsc -p tsconfig.json && mkdir -p dist/src/prompts && cp -R src/prompts/library dist/src/prompts/",
+    "build": "tsc -p tsconfig.json && mkdir -p dist/src/prompts dist/src/model && cp -R src/prompts/library dist/src/prompts/ && cp -R src/model/fixtures dist/src/model/",
     "build:extensions": "node extension/build.mjs",
     "dev": "node dev.mjs",
     "turminder": "tsx src/index.ts",

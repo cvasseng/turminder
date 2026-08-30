@@ -57,6 +57,10 @@ pkgs.mkShell {
     # libdbus — the vault itself is whatever daemon owns
     # `org.freedesktop.secrets` on the machine.
     dbus
+    # Microphone and speaker (§28.6). `cpal` links `alsa-sys` through
+    # pkg-config on Linux; PipeWire and PulseAudio are reached through ALSA's
+    # own compatibility layer, so this one library covers all three.
+    alsa-lib
   ];
 
   # WebKit picks its rendering path from the environment; software rendering is

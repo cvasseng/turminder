@@ -332,6 +332,17 @@
             placeholder="Say something. Enter sends, shift+enter for a newline."
             autofocus
           ></textarea>
+          <!-- Shown only while this conversation has a run in flight: the
+               answer streaming past is the thing it stops (App. D chat.stop). -->
+          <button
+            type="button"
+            id="stop"
+            class="icon stop"
+            data-icon="stop"
+            title="Stop the answer (Esc)"
+            aria-label="Stop the answer"
+            hidden
+          ></button>
           <button
             type="submit"
             id="send"

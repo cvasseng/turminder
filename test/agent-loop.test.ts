@@ -98,6 +98,51 @@ describe('agent loop', () => {
     expect(JSON.stringify(fake.requests.at(-1)!.body.messages)).not.toContain('repeated_call');
   });
 
+  it('flags the third rewrite of one target while every write still lands (§20.7)', async () => {
+    // The other way a model circles: the same write tool, the same target,
+    // different content each time — a model that believes its write failed
+    // (2026-08-30: eight memory.update calls to one memory in seventy seconds).
+    const write = (content: string) => ({
+      toolCalls: [{ name: 'save', args: { name: 'host', content } }],
+    });
+    fake.script(write('first'), write('second'), write('third'), { text: 'ok, stopping' });
+    const disp = new RecordingDispatcher(
+      { save: () => ({ name: 'host', updated: true }) },
+      {
+        bulkArgs: { save: ['content'] },
+        schema: {
+          save: {
+            type: 'object',
+            properties: { name: { type: 'string' }, content: { type: 'string' } },
+            required: ['name', 'content'],
+            additionalProperties: false,
+          },
+        },
+      },
+    );
+    const r = await runAgent(gw, { ...base, dispatcher: disp });
+
+    expect(r.stopReason).toBe('stop');
+    // Pressure, never refusal: all three writes executed.
+    expect(disp.calls).toHaveLength(3);
+    const wire = JSON.stringify(fake.requests.at(-1)!.body.messages);
+    // Different content each time, so the identical-call note never applies…
+    expect(wire).not.toContain('repeated_call');
+    // …and exactly one result — the third — carries the rewrite note.
+    expect(wire.split('repeated_write').length - 1).toBe(1);
+    expect(wire).toContain('rewriting, not fixing');
+    // The tool's own answer still rides inside the wrapper.
+    const toolMessages = (fake.requests.at(-1)!.body.messages as any[]).filter(
+      (m) => m.role === 'tool',
+    );
+    const third = JSON.parse(toolMessages[2].content);
+    expect(third).toMatchObject({
+      repeated_write: true,
+      result: { name: 'host', updated: true },
+    });
+    expect(JSON.parse(toolMessages[1].content)).toEqual({ name: 'host', updated: true });
+  });
+
   it('stops a runaway loop at max_turns', async () => {
     fake.always({ toolCalls: [{ name: 'lookup', args: { q: 'again' } }] });
     const disp = new RecordingDispatcher({ lookup: () => ({ more: true }) });

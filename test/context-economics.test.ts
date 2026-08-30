@@ -268,7 +268,7 @@ describe('tool paging (§21.2)', () => {
 
     const prompt = system(h);
     expect(prompt).toMatch(/^- config: 2 tools — .+ \(closed; open with tools\.open\)$/m);
-    expect(prompt).toContain('- setup: 10 tools —');
+    expect(prompt).toContain('- setup: 11 tools —');
     // A description from the integration manifest, not a list of tool names.
     expect(prompt).toContain('Reading and writing the assistant’s own configuration.');
   });
@@ -915,7 +915,12 @@ describe('prompt and schema economics (§21.3, §21.4)', () => {
       // that is not always on. Capability, not prose — the *why* of each value
       // is in the skill, which is the split this ceiling exists to enforce.
       'schedule.create': 860,
-      'deliver.notify': 800,
+      // Raised 800 → 915 when `spoken` landed (§33.3, F.3): a capped optional
+      // string and eleven words saying what a speaker reads instead of the
+      // title and body. Capability, not prose — a handler that cannot say
+      // "two thousand three hundred kroner" has to have its three-line body
+      // read out, and the ceiling exists to stop *prose* creeping back.
+      'deliver.notify': 915,
       // Raised 600 → 692 when the handler-routing carve-out landed (§10.6,
       // §19.2, F.6): a new `rechoose_routing` arg and a short clause saying
       // routing keys are the user's choice, not the model's. Capability, not

@@ -1,7 +1,12 @@
-import type { ModelCap, ModelClass, ModelEffort } from '../core/config-schemas.js';
+import type {
+  ModelCap,
+  ModelClass,
+  ModelEffort,
+  ModelEndpointKind,
+} from '../core/config-schemas.js';
 import type { Purpose } from './routes.js';
 
-export type { ModelCap, ModelClass, ModelEffort };
+export type { ModelCap, ModelClass, ModelEffort, ModelEndpointKind };
 export type { Purpose };
 
 /** Inference scheduler priorities (§10.3). Strict order, highest first. */
@@ -51,25 +56,42 @@ export interface ResolvedEndpoint {
   apiKey?: string;
   /** Model id sent to the API; llama.cpp ignores it, other providers don't. */
   model: string;
-  /** What this endpoint does (§10.1, §10.6, G.2). A `chat` selector never
-   *  resolves to an `embedding` endpoint — `ModelRouter.chatEndpoints()`
-   *  filters them out before any chat surface sees the list. */
-  kind: 'chat' | 'embedding';
+  /** What this endpoint does (§10.1, §10.6, §10.9, G.2). A `chat` selector never
+   *  resolves to an `embedding`, `stt` or `tts` endpoint —
+   *  `ModelRouter.chatEndpoints()` filters them out before any chat surface
+   *  sees the list. */
+  kind: ModelEndpointKind;
   classes: ModelClass[];
   caps: ModelCap[];
   contextSize?: number;
   /** Reasoning levels this endpoint honors (§10.6, G.2); absent = the knob is
    *  never sent to it. */
   efforts?: ModelEffort[];
+  /** How `none` travels to this endpoint (§10.6, G.2 `no_think`); absent means
+   *  the default fragment, `{reasoning_effort: "none"}`. */
+  noThink?: Record<string, unknown>;
   /** Max concurrent in-flight calls (llama.cpp slots). Default 1. */
   concurrency: number;
   /**
-   * Price per million tokens (§10.5, G.2). Absent means costless **by
-   * declaration** — the local box — which is reported as `local`, never as a
-   * zero that looks like a measurement.
+   * Price, in the unit its kind is sold in (§10.5, §10.9, G.2): tokens for
+   * `chat`, minutes of audio for `stt`, thousands of characters for `tts`.
+   * Absent means costless **by declaration** — the local box — which is
+   * reported as `local`, never as a zero that looks like a measurement.
    */
-  cost?: { inPerMtok: number; outPerMtok: number; currency: string };
+  cost?: EndpointCost;
+  /** The voice a `tts` endpoint speaks with (§33.5, G.2). */
+  voice?: string;
+  /** The language an `stt` endpoint transcribes (§10.9, G.2); `auto` means the
+   *  parameter is omitted and the transcriber detects. */
+  language?: string;
 }
+
+/** The three prices, discriminated by which field is present — the shape
+ *  `ModelCostSchema` parses, camel-cased for the resolved endpoint. */
+export type EndpointCost =
+  | { inPerMtok: number; outPerMtok: number; currency: string }
+  | { perMinute: number; currency: string }
+  | { perKchar: number; currency: string };
 
 /** What `EmbeddingClient` needs from an endpoint (§8.3) — the embedding-kind
  *  slice of `ResolvedEndpoint`, so `ModelRouter.embedding()`'s result passes
@@ -85,10 +107,46 @@ export function callCost(
   tokensIn: number,
   tokensOut: number,
 ): { cost: number; currency: string } | null {
-  if (!endpoint.cost) return null;
-  const cost =
-    (tokensIn * endpoint.cost.inPerMtok) / 1e6 + (tokensOut * endpoint.cost.outPerMtok) / 1e6;
-  return { cost, currency: endpoint.cost.currency };
+  const price = endpoint.cost;
+  if (!price || !('inPerMtok' in price)) return null;
+  const cost = (tokensIn * price.inPerMtok) / 1e6 + (tokensOut * price.outPerMtok) / 1e6;
+  return { cost, currency: price.currency };
+}
+
+/** What a transcription cost (§10.9): seconds of audio at the `stt` endpoint's
+ *  per-minute price. Same stamping rule as `callCost` — the price at call time. */
+export function transcribeCost(
+  endpoint: Pick<ResolvedEndpoint, 'cost'>,
+  audioSeconds: number,
+): { cost: number; currency: string } | null {
+  const price = endpoint.cost;
+  if (!price || !('perMinute' in price)) return null;
+  return { cost: (audioSeconds / 60) * price.perMinute, currency: price.currency };
+}
+
+/** What a spoken sentence cost (§10.9): characters at the `tts` endpoint's
+ *  per-thousand-characters price. */
+export function speakCost(
+  endpoint: Pick<ResolvedEndpoint, 'cost'>,
+  chars: number,
+): { cost: number; currency: string } | null {
+  const price = endpoint.cost;
+  if (!price || !('perKchar' in price)) return null;
+  return { cost: (chars / 1000) * price.perKchar, currency: price.currency };
+}
+
+/**
+ * A price rendered for a human (§10.5, §10.9): tokens, minutes, or thousands
+ * of characters, whichever unit the endpoint's kind is sold in. `local` for an
+ * endpoint that declared no price — unpriced and free are different claims,
+ * and `0.00` would state the wrong one.
+ */
+export function priceLabel(cost: EndpointCost | undefined): string {
+  if (!cost) return 'local';
+  if ('inPerMtok' in cost)
+    return `${cost.inPerMtok}/${cost.outPerMtok} ${cost.currency} per Mtok`;
+  if ('perMinute' in cost) return `${cost.perMinute} ${cost.currency} per minute`;
+  return `${cost.perKchar} ${cost.currency} per kchar`;
 }
 
 /** Agent-loop budgets (§5.4, App. A). */
@@ -111,6 +169,15 @@ export type AgentActivity =
   | { kind: 'recalled'; count: number; mode: string }
   | { kind: 'tool_call'; tool: string; args: unknown }
   | { kind: 'tool_result'; tool: string; ok: boolean; summary: string }
+  /**
+   * The run is suspended on a human confirmation (§11.3) and will stay there
+   * until somebody answers or the App. A timeout deems it denied. Until this
+   * existed, a suspended run looked exactly like a slow one — which is fine on
+   * a screen showing the confirm card and useless to `/api/voice`, which has
+   * to say "I need your approval on a screen" and hang up rather than hold an
+   * HTTP response open for an hour (§33.2).
+   */
+  | { kind: 'awaiting_confirm'; tool: string }
   /** Settled counts for one model call; `context_size` is the endpoint's limit. */
   | {
       kind: 'usage';
@@ -150,6 +217,10 @@ export interface LlmCallTrace {
   stop_reason: string;
   /** Reasoning produced, in characters (§20.1). Metrics only, never content. */
   reasoning_chars?: number;
+  /** Seconds of audio transcribed, on a `purpose: stt` row (§10.9, C.1). */
+  audio_s?: number;
+  /** Characters spoken, on a `purpose: tts` row (§10.9, C.1). */
+  chars?: number;
   /**
    * llama.cpp `timings.prompt_n` — prompt tokens actually evaluated rather
    * than served from the KV cache (§21.1). Absent when the endpoint sent no

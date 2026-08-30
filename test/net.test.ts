@@ -616,6 +616,84 @@ describe('websocket protocol (App. D)', () => {
     client.close();
   });
 
+  it('stops a streaming run mid-answer and keeps what was said (chat.stop, App. D)', async () => {
+    h = await bootService({ onboarded: true });
+    // A long answer, drip-fed, so the stop lands mid-stream.
+    h.fake.always({ text: 'word '.repeat(400), chunkDelayMs: 25 });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello();
+    client.send('chat.send', { text: 'tell me everything' });
+    const accepted = await client.next('chat.accepted');
+    await client.next('chat.delta');
+
+    client.send('chat.stop', { conversation_id: accepted.payload.conversation_id });
+    const stopped = await client.next('chat.stopped');
+    expect(stopped.payload.conversation_id).toBe(accepted.payload.conversation_id);
+    expect(stopped.payload.run_id).toBeTruthy();
+
+    // The partial answer persists as the turn; no error banner follows.
+    const done = await client.next('chat.done');
+    expect(done.payload.run_id).toBe(stopped.payload.run_id);
+    client.send('chat.history', { conversation_id: accepted.payload.conversation_id });
+    const history = await client.next('chat.history.result');
+    const assistant = history.payload.turns.find((t: any) => t.role === 'assistant');
+    expect(assistant.text.length).toBeGreaterThan(0);
+    expect(assistant.text.length).toBeLessThan('word '.repeat(400).trim().length);
+    expect(client.of('chat.error')).toHaveLength(0);
+
+    // The run says the user ended it, and the event settles — never a retry.
+    await h.service.queue.drain();
+    const run = h.service.repos.runs.get(stopped.payload.run_id)!;
+    expect(run.status).toBe('done');
+    expect(run.error).toBe('stopped_by_user');
+    expect(h.service.repos.events.get(accepted.payload.event_id)!.status).toBe('done');
+    client.close();
+  });
+
+  it('stops a run that has said nothing yet, in-band and without a turn', async () => {
+    h = await bootService({ onboarded: true });
+    h.fake.always({ text: 'too late to matter', delayMs: 5000 });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello();
+    client.send('chat.send', { text: 'hello?' });
+    const accepted = await client.next('chat.accepted');
+    // Wait until the run is actually in flight before pulling the plug.
+    await client.next('chat.activity');
+
+    client.send('chat.stop', { conversation_id: accepted.payload.conversation_id });
+    const stopped = await client.next('chat.stopped');
+    expect(stopped.payload.run_id).toBeTruthy();
+
+    // Nothing was said: the outcome is the in-band "stopped", not a turn.
+    const failed = await client.next('chat.error');
+    expect(failed.payload.message).toBe('stopped');
+    client.send('chat.history', { conversation_id: accepted.payload.conversation_id });
+    const history = await client.next('chat.history.result');
+    expect(history.payload.turns.map((t: any) => t.role)).toEqual(['user']);
+
+    await h.service.queue.drain();
+    const run = h.service.repos.runs.get(stopped.payload.run_id)!;
+    expect(run.status).toBe('failed');
+    expect(run.error).toBe('stopped_by_user');
+    expect(h.service.repos.events.get(accepted.payload.event_id)!.status).toBe('done');
+    client.close();
+  });
+
+  it('answers chat.stop on an idle conversation with run_id null — the ack precedent', async () => {
+    h = await bootService({ onboarded: true });
+    h.fake.always({ text: 'done already' });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello();
+    client.send('chat.send', { text: 'quick one' });
+    const accepted = await client.next('chat.accepted');
+    await client.next('chat.done');
+
+    client.send('chat.stop', { conversation_id: accepted.payload.conversation_id });
+    const stopped = await client.next('chat.stopped');
+    expect(stopped.payload.run_id).toBeNull();
+    client.close();
+  });
+
   /**
    * The whole path, because the bug lived between two layers that were each
    * correct: the guard rejected the turn, and the socket had already sent it.

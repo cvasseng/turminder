@@ -1,6 +1,6 @@
 import type { Identity, Personality } from '../core/config-schemas.js';
 import type { RunKind } from '../model/types.js';
-import { BASE_PROMPTS } from './base.js';
+import { BASE_PROMPTS, VOICE_FRAGMENT } from './base.js';
 
 export interface SkillRosterEntry {
   name: string;
@@ -45,6 +45,13 @@ export interface PromptParts {
    * than silently reintroducing the cache-busting placement.
    */
   memories?: never;
+  /**
+   * This is a voice conversation (§33.1): the `voice` fragment (H.5) joins the
+   * base prompt. Conversation-scoped, not turn-scoped — it is true for every
+   * turn of a spoken conversation and for none of a typed one, which is what
+   * makes it safe to put in the prefix at all (§20.5).
+   */
+  voice?: boolean;
   /** Handler document body, or other per-run task instructions. */
   taskContext?: string;
   /**
@@ -85,7 +92,10 @@ function identitySection(parts: PromptParts): string | null {
  * sits (§20.5).
  */
 export function assembleSystemPrompt(parts: PromptParts): string {
-  const sections: string[] = [BASE_PROMPTS[parts.kind]];
+  const base = parts.voice
+    ? `${BASE_PROMPTS[parts.kind]}\n\n${VOICE_FRAGMENT}`
+    : BASE_PROMPTS[parts.kind];
+  const sections: string[] = [base];
 
   const identity = identitySection(parts);
   if (identity) sections.push(`# Who you are\n\n${identity}`);

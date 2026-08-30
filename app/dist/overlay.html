@@ -1,0 +1,184 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Turminder</title>
+<!--
+  The voice interface (§28.6): what the machine is doing, and what it heard.
+
+  Not a receipt at the end — a spoken turn takes seconds and the person who
+  said something needs to know they were heard *now*. So: listening the moment
+  the microphone opens, the transcript the moment the service reports it (about
+  a fifth of a second in), then thinking, then speaking, then gone.
+
+  It asks for the state as well as listening for it. The window is created and
+  emitted to in the same breath, so the first event of the first turn is sent
+  before this page exists — which is exactly why it used to sit on "…" forever.
+-->
+<style>
+  :root {
+    color-scheme: dark;
+    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  }
+  html,
+  body {
+    margin: 0;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+    box-sizing: border-box;
+  }
+  .card {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 14px 18px;
+    border-radius: 14px;
+    background: rgba(22, 24, 28, 0.94);
+    color: #e9ecf1;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .phase {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.7;
+    margin-bottom: 7px;
+  }
+  /* One dot, three moods. Listening breathes, thinking spins, speaking pulses
+     — a still overlay is indistinguishable from a frozen one. */
+  .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex: none;
+    background: #7c8494;
+  }
+  [data-phase='listening'] .dot {
+    background: #3bc95a;
+    animation: breathe 1.4s ease-in-out infinite;
+  }
+  [data-phase='thinking'] .dot {
+    background: transparent;
+    border: 2px solid rgba(242, 176, 44, 0.35);
+    border-top-color: #f2b02c;
+    box-sizing: border-box;
+    width: 11px;
+    height: 11px;
+    animation: spin 0.8s linear infinite;
+  }
+  [data-phase='speaking'] .dot {
+    background: #4a9eff;
+    animation: pulse 1s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    0%,
+    100% {
+      transform: scale(0.75);
+      opacity: 0.65;
+    }
+    50% {
+      transform: scale(1.15);
+      opacity: 1;
+    }
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 0.5;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .dot {
+      animation: none !important;
+    }
+  }
+  .heard {
+    font-size: 15px;
+    line-height: 1.35;
+    min-height: 1.35em;
+  }
+  .heard.waiting {
+    opacity: 0.45;
+  }
+  .problem {
+    margin-top: 10px;
+    font-size: 13px;
+    line-height: 1.45;
+    color: #ffb4a2;
+  }
+  .problem:empty {
+    display: none;
+  }
+</style>
+<div class="card" id="card" data-phase="idle">
+  <div class="phase"><span class="dot"></span><span id="label">listening</span></div>
+  <div class="heard waiting" id="heard">…</div>
+  <div class="problem" id="problem"></div>
+</div>
+<script>
+  const bridge = window.__TAURI__;
+  const invoke = bridge.core.invoke;
+  const card = document.getElementById('card');
+  const label = document.getElementById('label');
+  const heard = document.getElementById('heard');
+  const problem = document.getElementById('problem');
+  let hideTimer = null;
+
+  const LABELS = {
+    listening: 'listening',
+    thinking: 'working on it',
+    speaking: 'answering',
+    idle: 'heard',
+  };
+
+  function render(state) {
+    const phase = state.phase || 'idle';
+    card.dataset.phase = phase;
+    label.textContent = LABELS[phase] || phase;
+
+    if (state.transcript) {
+      heard.textContent = state.transcript;
+      heard.classList.remove('waiting');
+    } else if (phase === 'listening') {
+      heard.textContent = 'go ahead…';
+      heard.classList.add('waiting');
+    } else if (phase === 'thinking') {
+      // Between the microphone closing and the service reporting what it
+      // heard — a fifth of a second, but a blank box in that gap reads as
+      // broken.
+      heard.textContent = 'working out what you said…';
+      heard.classList.add('waiting');
+    }
+    problem.textContent = state.problem || '';
+
+    // Only a finished turn goes away, and a problem stays long enough to read.
+    clearTimeout(hideTimer);
+    if (phase === 'idle') {
+      hideTimer = setTimeout(
+        () => bridge.window.getCurrentWindow().hide(),
+        state.problem ? 9000 : 4000,
+      );
+    }
+  }
+
+  bridge.event.listen('voice://utterance', ({ payload }) => render(payload));
+  // Ask, as well as listen: the events that got us here were emitted before
+  // this page existed.
+  invoke('overlay_state').then(render).catch(() => {});
+</script>

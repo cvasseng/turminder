@@ -1,4 +1,10 @@
-import type { ModelClass, ModelsYaml, Route, Routes } from '../core/config-schemas.js';
+import type {
+  ModelClass,
+  ModelEndpointKind,
+  ModelsYaml,
+  Route,
+  Routes,
+} from '../core/config-schemas.js';
 import { UserFacingError } from '../core/errors.js';
 import { DEFAULT_ROUTES, type RoutablePurpose } from './routes.js';
 import type { ModelCap, ModelSelector, ResolvedEndpoint } from './types.js';
@@ -31,12 +37,23 @@ export class ModelRouter {
       if (e.api_key) ep.apiKey = e.api_key;
       if (e.context_size) ep.contextSize = e.context_size;
       if (e.efforts) ep.efforts = e.efforts;
+      if (e.no_think) ep.noThink = e.no_think;
+      if (e.voice) ep.voice = e.voice;
+      if (e.language) ep.language = e.language;
       if (e.cost) {
-        ep.cost = {
-          inPerMtok: e.cost.in_per_mtok,
-          outPerMtok: e.cost.out_per_mtok,
-          currency: e.cost.currency,
-        };
+        // Three prices, one per kind (§10.9); the schema has already refused a
+        // shape that does not match the kind, so a present field is the price.
+        if ('in_per_mtok' in e.cost) {
+          ep.cost = {
+            inPerMtok: e.cost.in_per_mtok,
+            outPerMtok: e.cost.out_per_mtok,
+            currency: e.cost.currency,
+          };
+        } else if ('per_minute' in e.cost) {
+          ep.cost = { perMinute: e.cost.per_minute, currency: e.cost.currency };
+        } else {
+          ep.cost = { perKchar: e.cost.per_kchar, currency: e.cost.currency };
+        }
       }
       return ep;
     });
@@ -61,7 +78,7 @@ export class ModelRouter {
     return this.endpoints.filter((e) => e.kind === 'chat');
   }
 
-  byName(name: string, kind?: 'chat' | 'embedding'): ResolvedEndpoint | null {
+  byName(name: string, kind?: ModelEndpointKind): ResolvedEndpoint | null {
     const ep = this.endpoints.find((e) => e.name === name);
     if (!ep) return null;
     if (kind && ep.kind !== kind) return null;
@@ -79,6 +96,42 @@ export class ModelRouter {
     const named = this.routes.embedding?.endpoint;
     if (named) return this.byName(named, 'embedding');
     return this.endpoints.find((e) => e.kind === 'embedding') ?? null;
+  }
+
+  /**
+   * The `stt`/`tts` purposes' target (§10.9, §10.6): `routes.<kind>` if
+   * configured, else the first endpoint of that kind, else null. Like
+   * `embedding()` and unlike `resolve()`, this **never throws** — an install
+   * with no transcriber is not a broken install, it is one that cannot take
+   * voice, and the caller turns that into `503 no_speech_endpoint` (App. E)
+   * rather than a stack trace. The one exception is a route that names an
+   * endpoint of the wrong kind, which is a config error worth saying out loud.
+   */
+  speech(kind: 'stt' | 'tts'): ResolvedEndpoint | null {
+    return this.resolveSpeech(kind)?.endpoint ?? null;
+  }
+
+  /** `speech()` plus the half of the answer only the trace cares about: a
+   *  speech `llm_call` row records `resolved_by` like every other row (C.1),
+   *  and "the route said so" and "there was only one" are different facts. */
+  resolveSpeech(
+    kind: 'stt' | 'tts',
+  ): { endpoint: ResolvedEndpoint; resolved_by: 'route' | 'kind_default' } | null {
+    const named = this.routes[kind]?.endpoint;
+    if (named) {
+      const ep = this.byName(named);
+      if (!ep) return null;
+      if (ep.kind !== kind) {
+        throw new UserFacingError(
+          'config_invalid',
+          `routes.${kind} names "${named}", which is kind: ${ep.kind}`,
+          `set routes.${kind} to a kind: ${kind} endpoint, or change that endpoint's kind`,
+        );
+      }
+      return { endpoint: ep, resolved_by: 'route' };
+    }
+    const first = this.endpoints.find((e) => e.kind === kind);
+    return first ? { endpoint: first, resolved_by: 'kind_default' } : null;
   }
 
   /**
@@ -161,7 +214,7 @@ export class ModelRouter {
     );
   }
 
-  private mustByName(name: string, kind: 'chat' | 'embedding'): ResolvedEndpoint {
+  private mustByName(name: string, kind: ModelEndpointKind): ResolvedEndpoint {
     const ep = this.byName(name, kind);
     if (!ep) {
       throw new UserFacingError(

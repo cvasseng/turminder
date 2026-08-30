@@ -193,6 +193,34 @@ body.sidebar-collapsed #expand {
 .conv.archived {
   opacity: 0.6;
 }
+/* The mic glyph rides in the title line, sized to the text around it. */
+.conv-mic {
+  display: inline-block;
+  vertical-align: -0.15em;
+  width: 0.95em;
+  height: 0.95em;
+  margin-right: 0.35em;
+  opacity: 0.7;
+}
+.conv-mic svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+/* A voice field is a select with a play button welded to its right edge. */
+.form-voice {
+  display: flex;
+  gap: 0.4rem;
+  align-items: stretch;
+}
+.form-voice select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.voice-preview {
+  flex: 0 0 auto;
+  padding: 0 0.7rem;
+}
 .conv-actions {
   display: flex;
   flex: 0 0 auto;
@@ -1762,6 +1790,12 @@ body.locked #gate {
   height: 100%;
   min-height: 60vh;
   border: 0;
+}
+
+/* The stop button (App. D chat.stop): present only while a run is in flight,
+   and warm-coloured, because it ends something. */
+#stop {
+  color: var(--warn);
 }
 
 /* Attachments (§26.2): what the next message will carry, and what past ones

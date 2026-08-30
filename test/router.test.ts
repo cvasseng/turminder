@@ -306,3 +306,132 @@ describe('ModelsYamlSchema — kind and routes (M1)', () => {
     expect(parsed.routes?.handler).toEqual({ endpoint: 'main' });
   });
 });
+
+describe('speech endpoints (§10.9, V1.1–1.2)', () => {
+  const SPEECH = {
+    endpoints: [
+      { name: 'main', url: 'http://a/v1', classes: ['fast', 'best'] },
+      { name: 'whisper', url: 'http://b/v1', kind: 'stt', model: 'large-v3', language: 'nb' },
+      { name: 'whisper-2', url: 'http://c/v1', kind: 'stt', model: 'small' },
+      { name: 'piper', url: 'http://d/v1', kind: 'tts', model: 'tts-1', voice: 'alloy' },
+    ],
+  };
+
+  it('answers null when no endpoint of the kind is configured', () => {
+    const r = router({ endpoints: [{ name: 'main', url: 'http://a/v1', classes: ['fast'] }] });
+    expect(r.speech('stt')).toBeNull();
+    expect(r.speech('tts')).toBeNull();
+  });
+
+  it('takes the first endpoint of the kind, in config order', () => {
+    const r = router(SPEECH);
+    expect(r.speech('stt')?.name).toBe('whisper');
+    expect(r.speech('tts')?.name).toBe('piper');
+    expect(r.resolveSpeech('stt')?.resolved_by).toBe('kind_default');
+  });
+
+  it('prefers a configured route and says the route decided', () => {
+    const r = router({ ...SPEECH, routes: { stt: { endpoint: 'whisper-2' } } });
+    expect(r.speech('stt')?.name).toBe('whisper-2');
+    expect(r.resolveSpeech('stt')?.resolved_by).toBe('route');
+  });
+
+  it('refuses a route that names an endpoint of the wrong kind', () => {
+    const r = router({ ...SPEECH, routes: { stt: { endpoint: 'piper' } } });
+    expect(() => r.speech('stt')).toThrow(UserFacingError);
+    try {
+      r.speech('stt');
+    } catch (e) {
+      expect((e as UserFacingError).code).toBe('config_invalid');
+      expect((e as UserFacingError).message).toContain('kind: tts');
+    }
+  });
+
+  it('carries voice, language and the per-kind price onto the resolved endpoint', () => {
+    const r = router({
+      endpoints: [
+        {
+          name: 'whisper',
+          url: 'http://b/v1/',
+          kind: 'stt',
+          language: 'nb',
+          cost: { per_minute: 0.006, currency: 'USD' },
+        },
+        {
+          name: 'piper',
+          url: 'http://d/v1',
+          kind: 'tts',
+          voice: 'nova',
+          cost: { per_kchar: 0.015, currency: 'USD' },
+        },
+      ],
+    });
+    expect(r.speech('stt')).toMatchObject({
+      language: 'nb',
+      url: 'http://b/v1',
+      cost: { perMinute: 0.006, currency: 'USD' },
+    });
+    expect(r.speech('tts')).toMatchObject({
+      voice: 'nova',
+      cost: { perKchar: 0.015, currency: 'USD' },
+    });
+  });
+
+  it('keeps speech endpoints out of every chat surface', () => {
+    const r = router(SPEECH);
+    expect(r.chatEndpoints().map((e) => e.name)).toEqual(['main']);
+    expect(r.resolve({ purpose: 'chat' }).endpoint.name).toBe('main');
+    expect(() =>
+      r.resolve({ purpose: 'chat', pin: { endpoint: 'piper', by: 'override' } }),
+    ).toThrow(UserFacingError);
+  });
+
+  it('refuses classes, caps and efforts on a speech endpoint', () => {
+    const base = { name: 'w', url: 'http://b/v1', kind: 'stt' };
+    expect(parses({ endpoints: [{ ...base, classes: ['fast'] }] })).toBe(false);
+    expect(parses({ endpoints: [{ ...base, caps: ['json'] }] })).toBe(false);
+    expect(parses({ endpoints: [{ ...base, efforts: ['low'] }] })).toBe(false);
+    expect(parses({ endpoints: [base] })).toBe(true);
+  });
+
+  it('pins voice to tts and language to stt', () => {
+    expect(
+      parses({ endpoints: [{ name: 'w', url: 'http://b/v1', kind: 'stt', voice: 'alloy' }] }),
+    ).toBe(false);
+    expect(
+      parses({ endpoints: [{ name: 'p', url: 'http://d/v1', kind: 'tts', language: 'nb' }] }),
+    ).toBe(false);
+    expect(
+      parses({
+        endpoints: [{ name: 'm', url: 'http://a/v1', classes: ['fast'], voice: 'alloy' }],
+      }),
+    ).toBe(false);
+  });
+
+  it('prices each kind in its own unit and refuses the wrong shape', () => {
+    const stt = (cost: unknown) => ({
+      endpoints: [{ name: 'w', url: 'http://b/v1', kind: 'stt', cost }],
+    });
+    expect(parses(stt({ per_minute: 0.006, currency: 'USD' }))).toBe(true);
+    expect(parses(stt({ per_kchar: 0.006, currency: 'USD' }))).toBe(false);
+    expect(parses(stt({ in_per_mtok: 3, out_per_mtok: 15, currency: 'USD' }))).toBe(false);
+
+    const chat = ModelsYamlSchema.safeParse({
+      endpoints: [
+        {
+          name: 'm',
+          url: 'http://a/v1',
+          classes: ['fast'],
+          cost: { per_minute: 1, currency: 'USD' },
+        },
+      ],
+    });
+    expect(chat.success).toBe(false);
+    expect(JSON.stringify(chat.error?.issues)).toContain('in_per_mtok');
+  });
+
+  it('accepts routes.stt/tts as {endpoint} only', () => {
+    expect(parses({ ...SPEECH, routes: { stt: { endpoint: 'whisper' } } })).toBe(true);
+    expect(parses({ ...SPEECH, routes: { tts: { class: 'fast' } } })).toBe(false);
+  });
+});

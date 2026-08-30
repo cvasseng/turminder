@@ -9,6 +9,7 @@ import type { Service } from '../service.js';
 import { readUiFile } from './static.js';
 import { handleCommit, handleProbe, setupErrorBody, setupStatus } from './setup-api.js';
 import { EmbedRoutes } from './embed-api.js';
+import { VoiceRoutes } from './voice-api.js';
 import { mimeForPath } from '../files/store.js';
 import { PageCapturedPayload } from '../core/config-schemas.js';
 import { PathRejected } from '../tools/paths.js';
@@ -135,9 +136,11 @@ export class HttpServer {
   private readonly server: http.Server;
   readonly ws: WsGateway;
   private readonly embeds: EmbedRoutes;
+  private readonly voice: VoiceRoutes;
 
   constructor(private readonly service: Service) {
     this.embeds = new EmbedRoutes(service);
+    this.voice = new VoiceRoutes(service);
     this.server = http.createServer((req, res) => void this.handle(req, res));
     this.ws = new WsGateway(service);
     this.ws.attach(this.server);
@@ -385,6 +388,29 @@ export class HttpServer {
             mime: stored.mime,
             bytes: stored.bytes,
           });
+        }
+
+        /*
+         * Voice (§33.2, App. E). The body is a WAV and the answer is a WAV —
+         * no JSON envelope in either direction, for the same reason uploads
+         * have none: audio does not pass through a string on its way anywhere.
+         */
+        case 'POST /api/voice': {
+          const device = this.deviceFor(req);
+          if (!device) return this.json(res, 401, { error: 'unauthorized' });
+          return await this.voice.utterance(req, res, device);
+        }
+
+        /* One candidate voice, saying App. A's fixed line (§33.5, App. E). */
+        case 'GET /api/voice/preview': {
+          if (!this.authorised(req)) return this.json(res, 401, { error: 'unauthorized' });
+          return await this.voice.preview(res, url);
+        }
+
+        /* The spoken form of a delivery the device holds (§33.3, App. E). */
+        case 'POST /api/speak': {
+          if (!this.authorised(req)) return this.json(res, 401, { error: 'unauthorized' });
+          return await this.voice.speak(req, res);
         }
 
         case 'POST /v1/chat/completions':
