@@ -4,6 +4,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { log } from '../core/logger.js';
 import { errMessage } from '../core/errors.js';
 import { tokenSha256 } from '../core/tokens.js';
+import { toCallFrame } from '../model/feed.js';
 import type { Service } from '../service.js';
 import { ChannelSession } from './session.js';
 
@@ -117,6 +118,10 @@ export class WsGateway {
     const unsubscribeEvents = this.service.eventFeed.subscribe((row) =>
       this.broadcast('chat', 'event.status', { ...row }),
     );
+    // One row per model call, live (§10.8) — same shape as the activity feed.
+    const unsubscribeCalls = this.service.callFeed.subscribe((row) =>
+      this.broadcast('chat', 'call.made', { ...toCallFrame(row) }),
+    );
     // Revocation bites now, not at the next reconnect (§24.1).
     const unsubscribeTokens = this.service.app.tokens.onChanged(() => this.dropRevoked());
     const unsubscribeChat = this.unsubscribe;
@@ -125,6 +130,7 @@ export class WsGateway {
       unsubscribeFiles();
       unsubscribeEmbeds();
       unsubscribeEvents();
+      unsubscribeCalls();
       unsubscribeTokens();
     };
 

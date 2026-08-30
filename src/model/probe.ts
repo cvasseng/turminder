@@ -366,7 +366,7 @@ export async function probeEndpoint(
   // 2. Plain completion — the smoke test.
   try {
     const r = await gateway.turn({
-      selector: {},
+      selector: { purpose: 'probe' },
       priority: 'interactive',
       system: 'Reply with exactly one word.',
       messages: [{ role: 'user', content: 'Say the word: ready' }],
@@ -383,7 +383,7 @@ export async function probeEndpoint(
   // 3. JSON-constrained output.
   try {
     const r = await gateway.turn({
-      selector: {},
+      selector: { purpose: 'probe' },
       priority: 'interactive',
       system: 'Return only JSON matching the schema.',
       messages: [{ role: 'user', content: 'Set ok to true and note to "hello".' }],
@@ -411,7 +411,7 @@ export async function probeEndpoint(
   // 4. Tool-call round trip.
   try {
     const r = await gateway.turn({
-      selector: {},
+      selector: { purpose: 'probe' },
       priority: 'interactive',
       system: 'You have one tool. Use it when asked. Never answer echo requests yourself.',
       messages: [{ role: 'user', content: 'Echo the word "pineapple" using your tool.' }],
@@ -437,7 +437,7 @@ export async function probeEndpoint(
   // endpoint that cannot take image parts errors here rather than guessing.
   try {
     const r = await gateway.turn({
-      selector: {},
+      selector: { purpose: 'probe' },
       priority: 'interactive',
       system: 'Answer with one word.',
       messages: [

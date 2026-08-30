@@ -32,6 +32,7 @@ const ICONS = {
     '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M18.5 6 17.6 20a1 1 0 0 1-1 1H7.4a1 1 0 0 1-1-1L5.5 6"/><path d="M10 11v6M14 11v6"/>',
   chevron: '<path d="m9 18 6-6-6-6"/>',
   activity: '<path d="M3 12h4l3 8 4-16 3 8h4"/>',
+  calls: '<path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/>',
   layout:
     '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/>',
   expand:
@@ -81,6 +82,7 @@ const PAIR_POLL_MS = 2000;
 /** Frames this page needs the server to understand. */
 const REQUIRED_FRAMES = [
   'event.list',
+  'calls.list',
   'chat.send',
   'chat.history',
   'conversation.list',
@@ -99,6 +101,8 @@ const REQUIRED_FRAMES = [
 const EXPECTED_FROM_SERVER = [
   'event.list.result',
   'event.status',
+  'calls.list.result',
+  'call.made',
   'chat.activity',
   'chat.retract',
   'chat.usage',
@@ -201,7 +205,13 @@ const state = {
    */
   activity: { rows: new Map(), deliveries: [] },
   /**
-   * Which of the drawer's three tabs is showing (§9.1), or null for closed —
+   * The request log (§10.8): a live window over `llm_call` rows, newest
+   * first. `rows` is replaced wholesale by `calls.list.result` and kept true
+   * by `call.made` pushes — never the source of truth, always re-derivable.
+   */
+  calls: { rows: [] },
+  /**
+   * Which of the drawer's four tabs is showing (§9.1), or null for closed —
    * one value where there used to be three booleans, because the layout only
    * ever honoured one of them at a time anyway.
    */
@@ -1368,6 +1378,8 @@ function handle(frame) {
       // `event.status` is transient and missed pushes are not replayed
       // (§4.2.1).
       send('event.list', {});
+      // Same reasoning as `event.list`: `call.made` is transient too (§10.8).
+      send('calls.list', {});
       // Cheap, and it is what tells the views tab whether there is a kept
       // shelf to reach when the current conversation has no views of its own.
       send('embed.list', { kind: 'persistent' });
@@ -1602,6 +1614,21 @@ function handle(frame) {
 
     case 'event.status':
       applyEventStatus(p);
+      break;
+
+    // The request log's read and its live half (§10.8) — same shape as the
+    // activity panel above. The list is the truth on arrival; every push
+    // after it prepends one row.
+    case 'calls.list.result':
+      state.calls.rows = p.calls || [];
+      if (state.drawer === 'calls') renderCalls();
+      break;
+
+    case 'call.made':
+      state.calls.rows.unshift(p);
+      // The window is a live view of the last 100 (App. A), not a log.
+      if (state.calls.rows.length > 100) state.calls.rows.length = 100;
+      if (state.drawer === 'calls') renderCalls();
       break;
 
     // The assistant iterated on a view that is on screen (§22.6). Everything
@@ -2205,6 +2232,54 @@ function applyEventStatus(row) {
   if (state.drawer === 'activity') renderActivity();
 }
 
+/**
+ * One row of the request log (§10.8): who asked, which endpoint served it,
+ * tokens, cost, duration. Never any content — the row is what the server
+ * chose to keep, not the call itself.
+ */
+function callRow(row) {
+  const el = document.createElement('div');
+  el.className = `call-row${row.stop_reason === 'error' ? ' bad' : ''}`;
+
+  const what = document.createElement('div');
+  what.className = 'what';
+  what.textContent = `${row.purpose} → ${row.endpoint}`;
+  el.append(what);
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const when = document.createElement('span');
+  when.textContent = whenText(row.at);
+  meta.append(when);
+  const tokens = document.createElement('span');
+  tokens.textContent = `${compact(row.tokens_in)} → ${compact(row.tokens_out)}`;
+  meta.append(tokens);
+  // "est." because it is arithmetic over configured prices, never a bill
+  // (§10.5). A costless endpoint says nothing here rather than "0.00".
+  if (row.cost !== undefined && row.cost !== null && row.currency) {
+    const cost = document.createElement('span');
+    cost.textContent = `est. ${money(row.cost, row.currency)}`;
+    meta.append(cost);
+  }
+  const duration = document.createElement('span');
+  duration.textContent = `${(row.duration_ms / 1000).toFixed(1)}s`;
+  meta.append(duration);
+  el.append(meta);
+  return el;
+}
+
+function renderCalls() {
+  const list = $('calls-list');
+  list.textContent = '';
+  for (const row of state.calls.rows) list.append(callRow(row));
+  if (!state.calls.rows.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No model calls yet.';
+    list.append(empty);
+  }
+}
+
 /** When an unanswered approval turns into a deny, said in the reader's clock. */
 function expiryNote(iso) {
   const at = iso ? new Date(iso) : null;
@@ -2668,13 +2743,13 @@ $('show-archived').onclick = () => {
 };
 
 /* ── the drawer (§9.1) ─────────────────────────────────────────────────────
-   Files (§18.5), views (§22.6) and activity (§4.2.1) are one pane on the right
-   with three tabs, and `state.drawer` — a tab key, or null for closed — is the
-   whole of its state. They were never simultaneously reachable: below
-   `ui_sheet_max` the layout allowed exactly one, so three toggles were
-   describing a state nothing honoured. The rail is a `tablist` for the same
-   reason it is one control: what it selects is one of three, and the arrow
-   keys that come with the role are what make it a single tab stop.
+   Files (§18.5), views (§22.6), activity (§4.2.1) and requests (§10.8) are one
+   pane on the right with four tabs, and `state.drawer` — a tab key, or null
+   for closed — is the whole of its state. They were never simultaneously
+   reachable: below `ui_sheet_max` the layout allowed exactly one, so four
+   toggles were describing a state nothing honoured. The rail is a `tablist`
+   for the same reason it is one control: what it selects is one of four, and
+   the arrow keys that come with the role are what make it a single tab stop.
 
    Each tab's `refresh` is the frame that re-derives it, which is also what the
    shared header's refresh button sends and what a reconnect replays. */
@@ -2683,6 +2758,7 @@ const DRAWER_TABS = {
   files: { title: 'Files', refresh: () => send('files.list', {}) },
   embeds: { title: 'Views', refresh: () => send('embed.list', { kind: 'persistent' }) },
   activity: { title: 'Activity', refresh: () => send('event.list', {}) },
+  calls: { title: 'Requests', refresh: () => send('calls.list', {}) },
 };
 
 /**
@@ -2733,6 +2809,7 @@ function setDrawer(tab, persist = true) {
   // The server half is on its way; the half already in hand draws now.
   if (next === 'embeds') renderEmbedList();
   if (next === 'activity') renderActivity();
+  if (next === 'calls') renderCalls();
 }
 
 /* ── the shell on a narrow screen (§9.1, App. A) ──────────────────────────
@@ -3753,7 +3830,7 @@ for (const tab of document.querySelectorAll('#drawer-tabs [role="tab"]')) {
   tab.onclick = () => setDrawer(state.drawer === tab.dataset.tab ? null : tab.dataset.tab);
 }
 
-/* Arrows move within the rail, which is what makes three buttons one stop on
+/* Arrows move within the rail, which is what makes four buttons one stop on
    the Tab order. Activation follows focus — the ARIA pattern's expensive case
    is a panel that has to be fetched, and each of these is one small list frame
    over a socket that is already open. */
@@ -3776,7 +3853,7 @@ $('drawer-tabs').addEventListener('keydown', (e) => {
 });
 
 $('drawer-close').onclick = () => setDrawer(null);
-/* One refresh for three panels: what it re-derives is whatever tab is showing,
+/* One refresh for four panels: what it re-derives is whatever tab is showing,
    which is the same frame the tab sends when you select it. */
 $('drawer-refresh').onclick = () => {
   const showing = drawerTab();

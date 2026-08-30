@@ -169,7 +169,18 @@ async function save() {
     // arrives. This covers the plain-browser case, where the scaffold's
     // one-time token is the only one anybody has.
     if (res.ui_token) localStorage.setItem(TOKEN_KEY, res.ui_token);
-    location.href = '/';
+    // Say what this endpoint's routing scope is (§10.6) before leaving for the
+    // chat UI — this page is single-endpoint by design (a second one comes
+    // from the `model_endpoint` chat template), so the reader should not
+    // assume there is a picker they missed.
+    $('result').insertAdjacentHTML(
+      'beforeend',
+      '<div class="note">This endpoint serves every purpose until you add another — ' +
+        '<code>turminder models</code> shows the table.</div>',
+    );
+    setTimeout(() => {
+      location.href = '/';
+    }, 1500);
   } catch (e) {
     $('result').insertAdjacentHTML('beforeend', `<div class="note">${e.message}</div>`);
     $('save').disabled = false;

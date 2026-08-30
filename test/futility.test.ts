@@ -25,7 +25,7 @@ describe('the futility backstop (§20.9)', () => {
   });
 
   const base = {
-    selector: {},
+    selector: { purpose: 'chat' as const },
     priority: 'event' as const,
     system: 'system prompt',
     messages: [{ role: 'user' as const, content: 'find the price' }],

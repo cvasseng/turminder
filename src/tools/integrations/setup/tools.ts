@@ -36,6 +36,7 @@ import {
   TEMPLATE_NAMES,
   effectFailure,
   readRaw,
+  templateFields,
   upsertByName,
   writeRaw,
   type TemplateContext,
@@ -199,7 +200,7 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
         }
 
         const fields = fillSecretKeys(
-          mergeFields(template ? template.fields : [], args.fields ?? []),
+          mergeFields(template ? templateFields(template, deps) : [], args.fields ?? []),
         );
         if (!fields.length) {
           return {

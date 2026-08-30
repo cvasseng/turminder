@@ -1,6 +1,8 @@
 import type { ModelCap, ModelClass, ModelEffort } from '../core/config-schemas.js';
+import type { Purpose } from './routes.js';
 
 export type { ModelCap, ModelClass, ModelEffort };
+export type { Purpose };
 
 /** Inference scheduler priorities (§10.3). Strict order, highest first. */
 export type Priority = 'interactive' | 'event' | 'background';
@@ -14,24 +16,33 @@ export const PRIORITY_RANK: Record<Priority, number> = {
 /** Run kinds, mirroring the `runs.kind` check constraint (App. C). */
 export type RunKind = 'ingress' | 'handler' | 'chat' | 'onboarding' | 'distill' | 'maintenance';
 
-/** How a caller asks for a model: by class + required capabilities (§10.2). */
+/**
+ * A caller-supplied override that beats the route (§10.6 steps 1–2): the
+ * conversation's model override, or a handler's frontmatter. `by` says which,
+ * because the two differ in what they may pin — an override always names an
+ * exact endpoint (it came from the model selector, which only ever offers
+ * endpoints), a frontmatter pin may instead name a class.
+ */
+export type Pin =
+  | { endpoint: string; by: 'override' }
+  | { endpoint?: string; class?: ModelClass; by: 'frontmatter' };
+
+/** How a caller asks for a model: who is asking, plus required capabilities
+ *  and an optional pin (§10.6). The router decides everything else. */
 export interface ModelSelector {
-  class?: ModelClass;
+  /** Who is asking (§10.6 vocabulary, `src/model/routes.ts`) — required, so
+   *  a call that forgets to say who it is fails to compile rather than
+   *  silently routing on a guess. */
+  purpose: Purpose;
   caps?: ModelCap[];
-  /** Explicit endpoint by name; bypasses class/caps routing. */
-  endpoint?: string;
   /**
    * Reasoning level to ask for (§10.6). Reaches the wire only if the endpoint
    * that actually serves the call declares it — the selector may resolve
    * somewhere other than where the choice was made.
    */
   effort?: ModelEffort;
-  /**
-   * Why this selector looks the way it does (§10.6). The caller knows — the
-   * router cannot — and every `llm_call` row records it, so "why did the big
-   * model answer this?" is a query rather than archaeology.
-   */
-  resolvedBy?: 'override' | 'frontmatter' | 'kind_default';
+  /** Beats the route when present (§10.6 steps 1–2). */
+  pin?: Pin;
 }
 
 export interface ResolvedEndpoint {
@@ -40,6 +51,10 @@ export interface ResolvedEndpoint {
   apiKey?: string;
   /** Model id sent to the API; llama.cpp ignores it, other providers don't. */
   model: string;
+  /** What this endpoint does (§10.1, §10.6, G.2). A `chat` selector never
+   *  resolves to an `embedding` endpoint — `ModelRouter.chatEndpoints()`
+   *  filters them out before any chat surface sees the list. */
+  kind: 'chat' | 'embedding';
   classes: ModelClass[];
   caps: ModelCap[];
   contextSize?: number;
@@ -55,6 +70,11 @@ export interface ResolvedEndpoint {
    */
   cost?: { inPerMtok: number; outPerMtok: number; currency: string };
 }
+
+/** What `EmbeddingClient` needs from an endpoint (§8.3) — the embedding-kind
+ *  slice of `ResolvedEndpoint`, so `ModelRouter.embedding()`'s result passes
+ *  straight through without a second shape to keep in sync. */
+export type EmbeddingEndpoint = Pick<ResolvedEndpoint, 'url' | 'model' | 'apiKey'>;
 
 /**
  * What a call cost, at the prices configured when it ran (§10.5). Stamping
@@ -113,10 +133,13 @@ export type TraceKind =
 export interface LlmCallTrace {
   model: string;
   priority: Priority;
+  /** Who asked (§10.6). Every row from the M2-and-later gateway carries this;
+   *  rows written before it simply lack it (C.1). */
+  purpose?: Purpose;
   /** The endpoint that served it, and why it was chosen (§10.6, C.1). */
   endpoint?: string;
   requested_class?: string;
-  resolved_by?: 'override' | 'frontmatter' | 'kind_default';
+  resolved_by?: 'override' | 'frontmatter' | 'route' | 'kind_default';
   /** Stamped at call time from the endpoint's G.2 pricing (§10.5). */
   cost?: number;
   currency?: string;

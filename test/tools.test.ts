@@ -3,13 +3,22 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { globMatch, globMatchAny } from '../src/core/glob.js';
+import { Config } from '../src/core/config.js';
 import { openDataHome, type DataHome } from '../src/core/datadir.js';
+import { FormBroker } from '../src/chat/forms.js';
 import { GrantedDispatcher } from '../src/tools/dispatcher.js';
 import { McpConnection } from '../src/tools/mcp/connect.js';
 import type { ToolDefinition, ToolHandle } from '../src/tools/types.js';
 import { configTools } from '../src/tools/integrations/config.js';
 import { resolveWritablePath, PathRejected } from '../src/tools/paths.js';
 import { tmpDir } from './helpers.js';
+
+/** No handler routing exercised in these tests (personality.md, non-handler
+ *  paths) — a real broker with no live model stack is enough. */
+const noRoutingDeps = (home: DataHome) => ({
+  forms: new FormBroker(home, new Config(home)),
+  router: () => null,
+});
 
 describe('glob matching', () => {
   it('matches tool grants and envelope patterns', () => {
@@ -219,7 +228,7 @@ describe('config integration path safety (App. F.6)', () => {
   });
 
   it('writes, commits, and reads back through the tools', async () => {
-    const [read, write] = configTools(home);
+    const [read, write] = configTools(home, noRoutingDeps(home));
     const ctx = { runId: null, eventId: null };
     const result = (await write!.execute(
       {
@@ -247,7 +256,7 @@ describe('config integration path safety (App. F.6)', () => {
   });
 
   it('declares config.write side-effecting and config.read read-only', () => {
-    const tools = configTools(home);
+    const tools = configTools(home, noRoutingDeps(home));
     expect(tools.find((t) => t.name === 'config.read')?.tier).toBe('ro');
     expect(tools.find((t) => t.name === 'config.write')?.tier).toBe('se');
   });

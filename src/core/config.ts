@@ -83,6 +83,40 @@ export function modelApiKeyName(endpoint: string): string {
 }
 
 /**
+ * Pass 1 of `Config.healModelsYaml` (§8.3, §10.6 v2). Mutates `doc` in
+ * place: folds a legacy top-level `embedding:` block into a `kind:
+ * embedding` entry in `doc.endpoints` plus an explicit `routes.embedding`
+ * naming it, and deletes the old block. Returns whether there was anything
+ * to fold. A name collision with an existing endpoint called `embedding`
+ * gets `embedding-2`, `-3`, … — the config keeps both, nothing is dropped.
+ */
+function foldEmbeddingBlock(doc: Record<string, unknown>): boolean {
+  if (!doc.embedding || typeof doc.embedding !== 'object') return false;
+  const embedding = doc.embedding as Record<string, unknown>;
+  const endpoints = Array.isArray(doc.endpoints)
+    ? (doc.endpoints as Record<string, unknown>[])
+    : [];
+  const existingNames = new Set(
+    endpoints
+      .map((e) => (e && typeof e === 'object' ? e.name : undefined))
+      .filter((n): n is string => typeof n === 'string'),
+  );
+  let name = 'embedding';
+  for (let n = 2; existingNames.has(name); n += 1) name = `embedding-${n}`;
+
+  const folded: Record<string, unknown> = { name, kind: 'embedding', url: embedding.url };
+  if (typeof embedding.model === 'string') folded.model = embedding.model;
+  if (typeof embedding.api_key === 'string') folded.api_key = embedding.api_key;
+  endpoints.push(folded);
+  doc.endpoints = endpoints;
+
+  const routes = doc.routes && typeof doc.routes === 'object' ? doc.routes : {};
+  doc.routes = { ...(routes as Record<string, unknown>), embedding: { endpoint: name } };
+  delete doc.embedding;
+  return true;
+}
+
+/**
  * Resolve `${secret:KEY}` references. Done here and only here (G.6) — secrets
  * never appear in traces, logs, or model context because nothing else expands them.
  */
@@ -603,40 +637,67 @@ export class Config {
   }
 
   /**
-   * Fold a plaintext `api_key` in models.yaml into the secret store (§27).
+   * One raw-YAML pass over models.yaml that folds two kinds of pre-this-track
+   * debt into the current shape, in a single read → mutate → write → commit
+   * — a file carrying both gets **one** commit, not two:
    *
-   * The store is total: a credential sitting in the git half of the data dir
-   * because it predates the rule is exactly the exposure §27 exists to close,
-   * and the hosted golden path (§28.5) made a literal key the *normal* thing
-   * to write for a while. So on load the value moves into
-   * `MODEL_API_KEY_<NAME>`, the file is rewritten to the reference, and the
-   * rewrite is committed — the same self-healing the G.4 device tokens and the
-   * legacy Google files get. Returns the endpoints it rewrote.
+   * 1. A legacy `embedding:` block (§8.3, §10.6) becomes a `kind: embedding`
+   *    endpoint plus an explicit `routes.embedding`, run first so its own
+   *    `api_key` (if any) is healed by pass 2 like any other endpoint's,
+   *    rather than needing a second special case.
+   * 2. A plaintext `api_key` (§27) moves into `MODEL_API_KEY_<NAME>`; the
+   *    store is total, and a credential sitting in the git half of the data
+   *    dir because it predates the rule is exactly the exposure §27 exists
+   *    to close — the hosted golden path (§28.5) made a literal key the
+   *    *normal* thing to write for a while.
    *
+   * Both rewrite the file to a reference and commit — the same self-healing
+   * the G.4 device tokens and the legacy Google files get. **Never** called
+   * on `Config.models()`'s output, which has `${secret:}` expanded and would
+   * write a secret to disk; this reads and writes the raw file itself.
    * Comments in models.yaml do not survive the round-trip; that is the trade
    * every config writer here makes (G.1).
    */
-  healPlaintextModelKeys(): string[] {
+  healModelsYaml(): { apiKeys: string[]; embeddingFolded: boolean } {
+    const nothing = { apiKeys: [], embeddingFolded: false };
     const file = this.home.path('config', 'models.yaml');
-    if (!fs.existsSync(file)) return [];
+    if (!fs.existsSync(file)) return nothing;
     let doc: Record<string, unknown>;
     try {
       doc = (YAML.parse(fs.readFileSync(file, 'utf8')) ?? {}) as Record<string, unknown>;
     } catch (e) {
       // A models.yaml that will not parse is already "unconfigured" as far as
       // the loader is concerned; healing it is not this method's business.
-      l.warn({ err: (e as Error).message }, 'models.yaml unparseable, not healing keys');
-      return [];
+      l.warn({ err: (e as Error).message }, 'models.yaml unparseable, not healing it');
+      return nothing;
     }
+
+    const embeddingFolded = foldEmbeddingBlock(doc);
+    const apiKeys = this.healApiKeysInPlace(doc);
+    if (!apiKeys.length && !embeddingFolded) return nothing;
+
+    fs.writeFileSync(file, YAML.stringify(doc), 'utf8');
+    const messages: string[] = [];
+    if (embeddingFolded) messages.push('fold embedding block into a kind: embedding endpoint');
+    if (apiKeys.length) messages.push('move model api keys into the secret store (§27)');
+    this.home.git.commit(`config: ${messages.join('; ')}`, ['config/models.yaml']);
+    if (embeddingFolded)
+      l.info('folded legacy embedding: block into a kind: embedding endpoint');
+    if (apiKeys.length) {
+      l.info({ endpoints: apiKeys }, 'folded plaintext model api keys into the secret store');
+    }
+    return { apiKeys, embeddingFolded };
+  }
+
+  /** Pass 2 of `healModelsYaml` — mutates `doc.endpoints` in place, returns
+   *  the endpoint names it rewrote. */
+  private healApiKeysInPlace(doc: Record<string, unknown>): string[] {
     const blocks: { name: string; block: Record<string, unknown> }[] = [];
     const endpoints = Array.isArray(doc.endpoints) ? doc.endpoints : [];
     for (const endpoint of endpoints) {
       if (!endpoint || typeof endpoint !== 'object') continue;
       const block = endpoint as Record<string, unknown>;
       if (typeof block.name === 'string') blocks.push({ name: block.name, block });
-    }
-    if (doc.embedding && typeof doc.embedding === 'object') {
-      blocks.push({ name: 'embedding', block: doc.embedding as Record<string, unknown> });
     }
 
     const healed: string[] = [];
@@ -664,12 +725,6 @@ export class Config {
       block.api_key = `\${secret:${key}}`;
       healed.push(name);
     }
-    if (!healed.length) return [];
-    fs.writeFileSync(file, YAML.stringify(doc), 'utf8');
-    this.home.git.commit('config: move model api keys into the secret store (§27)', [
-      'config/models.yaml',
-    ]);
-    l.info({ endpoints: healed }, 'folded plaintext model api keys into the secret store');
     return healed;
   }
 

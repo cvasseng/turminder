@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { MemoryTypeSchema } from '../../core/config-schemas.js';
+import type { TraceRepo } from '../../db/repos/trace.js';
 import type { MemoryAgent } from '../../memory/agent.js';
 import type { ProjectScope } from '../../projects/scope.js';
 import type { ToolContext, ToolDefinition } from '../types.js';
@@ -13,7 +14,11 @@ import type { ToolContext, ToolDefinition } from '../types.js';
  * it says otherwise. Neither is the model's discipline — the scope comes from
  * the conversation row.
  */
-export function memoryTools(agent: MemoryAgent, scope: ProjectScope): ToolDefinition[] {
+export function memoryTools(
+  agent: MemoryAgent,
+  scope: ProjectScope,
+  trace: TraceRepo,
+): ToolDefinition[] {
   return [
     {
       name: 'memory.query',
@@ -93,7 +98,7 @@ export function memoryTools(agent: MemoryAgent, scope: ProjectScope): ToolDefini
               : `"${args.project}" is not loaded here — load it first, or pass project: null to remember this generally`,
           };
         }
-        return agent.save({ ...args, project });
+        return agent.save({ ...args, project }, trace.sink({ runId: ctx.runId }));
       },
     },
     {

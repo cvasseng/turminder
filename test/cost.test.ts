@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { ModelRouter } from '../src/model/router.js';
+import { DEFAULT_ROUTES, ROUTABLE_PURPOSES } from '../src/model/routes.js';
 import { ModelsYamlSchema } from '../src/core/config-schemas.js';
 import { callCost } from '../src/model/types.js';
 import { periodWindow } from '../src/tools/integrations/usage.js';
@@ -49,21 +50,63 @@ describe('routing transparency (§10.6)', () => {
     ],
   };
 
-  it('resolves every agent kind to the endpoint the table says (the governance test)', () => {
+  /** First endpoint in config order that declares this class — the same
+   *  first-match rule the router applies, computed independently so this
+   *  test does not just restate `DEFAULT_ROUTES` by hand. */
+  const firstByClass = (cls: 'fast' | 'best'): string =>
+    THREE.endpoints.find((e) => e.classes.includes(cls))!.name;
+
+  it('resolves every routable purpose per DEFAULT_ROUTES (the governance test), replaced with a configured route when one exists', () => {
     const router = new ModelRouter(ModelsYamlSchema.parse(THREE));
-    // §10.6 step 3: the kind → class table, made concrete.
-    const table: { kind: string; class: 'fast' | 'best'; expect: string }[] = [
-      { kind: 'chat', class: 'best', expect: 'big' },
-      { kind: 'handler', class: 'fast', expect: 'quick' },
-      { kind: 'ingress', class: 'fast', expect: 'quick' },
-      { kind: 'distill', class: 'fast', expect: 'quick' },
-    ];
-    for (const row of table) {
-      expect(router.pick({ class: row.class }).name, row.kind).toBe(row.expect);
+    // §10.6 step 5: the kind-default table, made concrete against THREE.
+    // `distill → best`, not fast — the old literal here was wrong (Phase 36).
+    for (const purpose of ROUTABLE_PURPOSES) {
+      if (purpose === 'embedding') continue; // no class default; see below
+      const route = DEFAULT_ROUTES[purpose]!;
+      const resolved = router.resolve({ purpose });
+      expect(resolved.resolved_by, purpose).toBe('kind_default');
+      expect(resolved.endpoint.name, purpose).toBe(
+        firstByClass((route as { class: 'fast' | 'best' }).class),
+      );
     }
-    // Step 4: within a class, capability filter then models.yaml order.
-    expect(router.pick({ class: 'fast', caps: ['tools'] }).name).toBe('quick');
-    expect(router.pick({ endpoint: 'blind' }).name).toBe('blind');
+    // Step 4 (within a class): capability filter, then models.yaml order.
+    expect(router.resolve({ purpose: 'handler', caps: ['tools'] }).endpoint.name).toBe('quick');
+    // Step 1 (override): bypasses class/caps filtering entirely.
+    expect(
+      router.resolve({ purpose: 'chat', pin: { endpoint: 'blind', by: 'override' } }).endpoint
+        .name,
+    ).toBe('blind');
+
+    // A configured route (§10.6 step 4) beats the kind default and says so.
+    const routed = new ModelRouter(
+      ModelsYamlSchema.parse({ ...THREE, routes: { distill: { endpoint: 'quick' } } }),
+    );
+    const r = routed.resolve({ purpose: 'distill' });
+    expect(r).toMatchObject({ resolved_by: 'route' });
+    expect(r.endpoint.name).toBe('quick');
+  });
+
+  it('never lists or accepts the embedding endpoint from a chat surface (§10.6 v2)', async () => {
+    // The default harness config carries a legacy `embedding:` block, healed
+    // on boot into a `kind: embedding` endpoint named "embedding" — a real
+    // fixture for the exclusion, not a contrived one.
+    h = await bootService({ onboarded: true, watchFiles: false });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat']);
+    client.send('models.list', {});
+    const listed = await client.next('models.list.result');
+    expect((listed.payload.endpoints as { name: string }[]).map((e) => e.name)).not.toContain(
+      'embedding',
+    );
+
+    const sent = h.service.chat.send({ text: 'hi' });
+    await drain(h);
+    client.send('conversation.model', {
+      conversation_id: sent.conversationId,
+      endpoint: 'embedding',
+    });
+    expect((await client.next('error')).payload.code).toBe('not_found');
+    client.close();
   });
 
   it('stamps endpoint, requested class and who decided onto every llm_call', async () => {
@@ -425,6 +468,34 @@ describe('the usage ledger (F.17, §10.5)', () => {
     expect(summary.tier).toBe('ro');
   });
 
+  it('groups by purpose (§10.6, F.17)', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    const trace = h.service.repos.trace.sink({ eventId: null, runId: null });
+    trace.append('llm_call', {
+      endpoint: 'main',
+      purpose: 'chat',
+      tokens_in: 100,
+      tokens_out: 50,
+    });
+    trace.append('llm_call', {
+      endpoint: 'main',
+      purpose: 'title',
+      tokens_in: 10,
+      tokens_out: 5,
+    });
+    // A row predating the field groups as "unknown" rather than vanishing.
+    trace.append('llm_call', { endpoint: 'main', tokens_in: 1, tokens_out: 1 });
+
+    const summary = h.service.tools.handles().find((t) => t.name === 'usage.summary')!;
+    const out = (
+      await summary.call({ period: 'all', group_by: 'purpose' }, { runId: null, eventId: null })
+    ).output as any;
+    const byKey = Object.fromEntries(out.groups.map((g: any) => [g.key, g]));
+    expect(byKey.chat).toMatchObject({ calls: 1, tokens_in: 100, tokens_out: 50 });
+    expect(byKey.title).toMatchObject({ calls: 1, tokens_in: 10, tokens_out: 5 });
+    expect(byKey.unknown).toMatchObject({ calls: 1 });
+  });
+
   it('groups mixed currencies rather than adding them', async () => {
     h = await bootService({ onboarded: true, watchFiles: false });
     const trace = h.service.repos.trace.sink({ eventId: null, runId: null });
@@ -483,5 +554,34 @@ describe('the usage ledger (F.17, §10.5)', () => {
     expect(usage.payload.cost.run).toBeCloseTo(2, 6);
     expect(usage.payload.cost.conversation).toBeCloseTo(2, 6);
     client.close();
+  });
+});
+
+describe('the request log window (§10.8)', () => {
+  it('excludes rows older than the caller-supplied cutoff', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    const row = (endpoint: string) =>
+      JSON.stringify({
+        purpose: 'chat',
+        endpoint,
+        tokens_in: 1,
+        tokens_out: 1,
+        duration_ms: 1,
+        stop_reason: 'stop',
+        resolved_by: 'kind_default',
+      });
+    const insertAt = (iso: string, endpoint: string) =>
+      h.app.db
+        .prepare(`INSERT INTO trace (at, kind, data) VALUES (?, 'llm_call', ?)`)
+        .run(iso, row(endpoint));
+
+    const dayAgo = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+    const hourAgo = new Date(Date.now() - 1 * 3600 * 1000).toISOString();
+    insertAt(dayAgo, 'too-old');
+    insertAt(hourAgo, 'within-window');
+
+    const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+    const rows = h.service.repos.trace.recentCalls({ limit: 100, since });
+    expect(rows.map((r) => r.endpoint)).toEqual(['within-window']);
   });
 });

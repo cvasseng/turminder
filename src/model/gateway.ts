@@ -157,7 +157,7 @@ export class ModelGateway {
    * agent loop (§10.4), not here — this is deliberately a single step.
    */
   async turn(req: TurnRequest): Promise<TurnResult> {
-    const ep = this.router.pick(req.selector);
+    const { endpoint: ep, resolved_by, requested_class } = this.router.resolve(req.selector);
     const extraBody = buildExtraBody(req, ep);
     const model = this.model(ep, extraBody);
     const trace = req.trace ?? nullTraceSink;
@@ -269,9 +269,10 @@ export class ModelGateway {
             tokens_in: 0,
             tokens_out: 0,
             stop_reason: 'error',
+            purpose: req.selector.purpose,
             endpoint: ep.name,
-            ...(req.selector.class ? { requested_class: req.selector.class } : {}),
-            ...(req.selector.resolvedBy ? { resolved_by: req.selector.resolvedBy } : {}),
+            resolved_by,
+            ...(requested_class ? { requested_class } : {}),
           };
           trace.append('llm_call', rec);
           throw e;
@@ -287,11 +288,12 @@ export class ModelGateway {
           tokens_in: usageIn ?? 0,
           tokens_out: usageOut ?? 0,
           stop_reason: finishReason,
-          // The §10.6 routing decision, on every row: which endpoint served
-          // this, what was asked for, and who decided.
+          // The §10.6 routing decision, on every row: who asked, which
+          // endpoint served it, what was asked for, and why the router chose it.
+          purpose: req.selector.purpose,
           endpoint: ep.name,
-          ...(req.selector.class ? { requested_class: req.selector.class } : {}),
-          ...(req.selector.resolvedBy ? { resolved_by: req.selector.resolvedBy } : {}),
+          resolved_by,
+          ...(requested_class ? { requested_class } : {}),
           // Stamped at call time (§10.5); absent for a costless endpoint.
           ...(priced ? { cost: priced.cost, currency: priced.currency } : {}),
           // Size only: the content itself is stored nowhere in v1 (§20.1.4).

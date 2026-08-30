@@ -18,7 +18,7 @@ describe('agent loop', () => {
   });
 
   const base = {
-    selector: {},
+    selector: { purpose: 'chat' as const },
     priority: 'event' as const,
     system: 'system prompt',
     messages: [{ role: 'user' as const, content: 'do the thing' }],
@@ -238,7 +238,7 @@ describe('token budget accounting', () => {
   });
 
   const base = {
-    selector: {},
+    selector: { purpose: 'chat' as const },
     priority: 'event' as const,
     system: 'system prompt',
     messages: [{ role: 'user' as const, content: 'do the thing' }],
@@ -316,7 +316,7 @@ describe('reserved markers in fresh output (§20.8)', () => {
   });
 
   const base = {
-    selector: {},
+    selector: { purpose: 'chat' as const },
     priority: 'event' as const,
     system: 'system prompt',
     messages: [{ role: 'user' as const, content: 'add mobile chat to the todo' }],

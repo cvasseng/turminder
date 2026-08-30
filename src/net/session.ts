@@ -1,8 +1,9 @@
 import { newId } from '../core/ids.js';
 import { log } from '../core/logger.js';
 import { errMessage } from '../core/errors.js';
-import { nowIso } from '../core/time.js';
+import { isoPlusSeconds, nowIso } from '../core/time.js';
 import { toStatusRow } from '../ingress/feed.js';
+import { toCallFrame } from '../model/feed.js';
 import type { Service } from '../service.js';
 import type { ResolvedEndpoint } from '../model/types.js';
 
@@ -44,6 +45,7 @@ export const SUPPORTED_FRAMES = [
   'embed.promote',
   'embed.demote',
   'event.list',
+  'calls.list',
   'token.list',
   'token.create',
   'token.revoke',
@@ -86,6 +88,8 @@ export const EMITTED_FRAMES = [
   'embed.changed',
   'event.list.result',
   'event.status',
+  'calls.list.result',
+  'call.made',
   'token.list.result',
   'token.revoked',
   'token.reveal',
@@ -141,9 +145,11 @@ export class ChannelSession {
   private servingEndpoint(override: string | null): ResolvedEndpoint | null {
     const router = this.service.modelStack?.router ?? null;
     if (!router) return null;
-    if (override) return router.byName(override);
     try {
-      return router.pick({ class: 'best' });
+      return router.resolve({
+        purpose: 'chat',
+        ...(override ? { pin: { endpoint: override, by: 'override' as const } } : {}),
+      }).endpoint;
     } catch {
       return null;
     }
@@ -589,6 +595,25 @@ export class ChannelSession {
       }
 
       /*
+       * The request log's live window (§10.8): one row per model call — who
+       * asked, which endpoint served it, tokens, cost, duration, why the
+       * router chose it. Never any content. Modelled on `event.list`.
+       */
+      case 'calls.list': {
+        if (!this.capabilities.includes('chat')) {
+          this.fail('bad_frame', 'calls.list is for chat-capable devices', frame.id);
+          return;
+        }
+        const limit =
+          typeof p.limit === 'number' && p.limit > 0 ? Math.min(Math.floor(p.limit), 200) : 100;
+        const since = isoPlusSeconds(-24 * 3600);
+        this.send('calls.list.result', {
+          calls: this.service.repos.trace.recentCalls({ limit, since }).map(toCallFrame),
+        });
+        return;
+      }
+
+      /*
        * The "keep" button (§22.1, §22.6). Promotion is a user act, and this is
        * the user: the confirm tier on `embeds.promote` exists to stop the
        * *model* deciding, not the person holding the device token.
@@ -721,7 +746,9 @@ export class ChannelSession {
           : null;
         const override = conversation?.model_override ?? null;
         const effort = conversation?.effort_override ?? null;
-        const endpoints = router?.list() ?? [];
+        // Chat-only (§10.6): an embedding endpoint is never something a chat
+        // surface may see or pick.
+        const endpoints = router?.chatEndpoints() ?? [];
         // Which one would serve this conversation right now — the honest
         // answer to "what am I talking to", override or not.
         const serving = this.servingEndpoint(override)?.name ?? null;
@@ -769,7 +796,11 @@ export class ChannelSession {
           return;
         }
         const endpoint = setsEndpoint && typeof p.endpoint === 'string' ? p.endpoint : null;
-        if (setsEndpoint && endpoint && !this.service.modelStack?.router.byName(endpoint)) {
+        if (
+          setsEndpoint &&
+          endpoint &&
+          !this.service.modelStack?.router.byName(endpoint, 'chat')
+        ) {
           this.fail('not_found', `no endpoint named ${endpoint} in models.yaml`, frame.id);
           return;
         }

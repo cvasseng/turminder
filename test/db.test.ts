@@ -58,6 +58,7 @@ describe('database bootstrap', () => {
         `DROP TABLE embeds; DROP TABLE uploads`,
     );
     db.exec(`ALTER TABLE schedules DROP COLUMN on_miss`);
+    db.exec(`DROP INDEX ix_trace_kind_at`);
     db.exec(`CREATE TABLE conversations (
       id TEXT PRIMARY KEY, title TEXT, mode TEXT NOT NULL DEFAULT 'normal',
       status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL,
@@ -87,6 +88,7 @@ describe('database bootstrap', () => {
     db.exec(`ALTER TABLE conversations DROP COLUMN effort_override`);
     db.exec(`ALTER TABLE conversations DROP COLUMN loaded_projects`);
     db.exec(`ALTER TABLE schedules DROP COLUMN on_miss`);
+    db.exec(`DROP INDEX ix_trace_kind_at`);
     db.exec(`CREATE TABLE embeds (
       id TEXT PRIMARY KEY, title TEXT NOT NULL,
       kind TEXT NOT NULL DEFAULT 'ephemeral',
@@ -107,6 +109,21 @@ describe('database bootstrap', () => {
       .prepare(`SELECT bindings, bound_data FROM embeds WHERE id = '01EMBED'`)
       .get() as { bindings: string; bound_data: string };
     expect(row).toEqual({ bindings: '[]', bound_data: '{}' });
+    db.close();
+  });
+
+  it('applies migration 012 on an empty database and on one with existing trace rows (§10.8)', () => {
+    const db = openDb(dbFile());
+    const indexNames = () =>
+      (db.pragma('index_list(trace)') as { name: string }[]).map((r) => r.name);
+    expect(indexNames()).toContain('ix_trace_kind_at');
+    db.prepare(
+      `INSERT INTO trace (at, kind, data) VALUES ('2026-01-01T00:00:00.000Z', 'llm_call', '{}')`,
+    ).run();
+    // Re-running migrate on an already-current database is a no-op, not a
+    // second CREATE INDEX — the same idempotence every migration promises.
+    expect(migrate(db)).toBe(DB_VERSION);
+    expect(indexNames()).toContain('ix_trace_kind_at');
     db.close();
   });
 

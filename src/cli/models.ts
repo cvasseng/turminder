@@ -1,15 +1,8 @@
 import type { Command } from 'commander';
 import { bootstrap } from '../app.js';
 import { ModelRouter } from '../model/router.js';
+import { DEFAULT_ROUTES, ROUTABLE_PURPOSES } from '../model/routes.js';
 import { globalOpts } from './common.js';
-
-/** The kind → class table of §10.6, made concrete against this install. */
-const KIND_DEFAULTS: { kind: string; class: 'fast' | 'best' }[] = [
-  { kind: 'chat', class: 'best' },
-  { kind: 'handler', class: 'fast' },
-  { kind: 'ingress', class: 'fast' },
-  { kind: 'distill', class: 'best' },
-];
 
 /**
  * `turminder models` (§10.6): the endpoints, and who would serve what.
@@ -17,11 +10,14 @@ const KIND_DEFAULTS: { kind: string; class: 'fast' | 'best' }[] = [
  * Routing was correct and invisible; this is the second half of fixing that —
  * the table the spec describes, resolved against the config actually on disk,
  * so "why did the big model answer that" has an answer before the trace does.
+ * The purpose table is derived from `ROUTABLE_PURPOSES`/`DEFAULT_ROUTES`
+ * (`src/model/routes.ts`) and `models.routes` — there is no second copy of
+ * either kept here.
  */
 export function registerModelsCommand(program: Command): void {
   program
     .command('models')
-    .description('list model endpoints and how each agent kind resolves')
+    .description('list model endpoints and how each purpose resolves')
     .action((_o, cmd: Command) => {
       const app = bootstrap(globalOpts(cmd));
       const { models, error } = app.config.modelsOrNull();
@@ -33,7 +29,8 @@ export function registerModelsCommand(program: Command): void {
       const router = new ModelRouter(models);
       const rows = router.list().map((e) => ({
         name: e.name,
-        classes: e.classes.join(','),
+        kind: e.kind,
+        classes: e.classes.join(',') || '-',
         caps: e.caps.join(',') || '-',
         context: e.contextSize ?? '-',
         // Absent means the knob is never sent — the endpoint's own default
@@ -48,6 +45,7 @@ export function registerModelsCommand(program: Command): void {
         Math.max(key.length, ...rows.map((r) => String(r[key]).length));
       const columns: (keyof (typeof rows)[number])[] = [
         'name',
+        'kind',
         'classes',
         'caps',
         'context',
@@ -64,15 +62,37 @@ export function registerModelsCommand(program: Command): void {
         process.stdout.write(`${line(columns.map((c) => String(row[c])))}\n`);
       }
 
-      process.stdout.write('\nresolution by agent kind (§10.6):\n');
-      for (const entry of KIND_DEFAULTS) {
+      process.stdout.write('\nresolution by purpose (§10.6):\n');
+      for (const purpose of ROUTABLE_PURPOSES) {
+        if (purpose === 'embedding') {
+          const configured = models.routes?.embedding;
+          const selector = configured
+            ? `endpoint=${configured.endpoint}`
+            : 'first kind=embedding';
+          const ep = router.embedding();
+          process.stdout.write(
+            `  ${purpose.padEnd(8)} source=${(configured ? 'config' : 'default').padEnd(7)} ` +
+              `${selector.padEnd(22)} → ${ep ? ep.name : '(none — lexical search)'}\n`,
+          );
+          continue;
+        }
+        const configured = models.routes?.[purpose];
+        const route = configured ?? DEFAULT_ROUTES[purpose];
+        const selector = route
+          ? 'class' in route
+            ? `class=${route.class}`
+            : `endpoint=${route.endpoint}`
+          : '(none)';
         let served: string;
         try {
-          served = router.pick({ class: entry.class }).name;
+          served = router.resolve({ purpose }).endpoint.name;
         } catch {
           served = '(nothing qualifies)';
         }
-        process.stdout.write(`  ${entry.kind.padEnd(8)} class=${entry.class}  → ${served}\n`);
+        process.stdout.write(
+          `  ${purpose.padEnd(8)} source=${(configured ? 'config' : 'default').padEnd(7)} ` +
+            `${selector.padEnd(22)} → ${served}\n`,
+        );
       }
       process.stdout.write(
         '\na handler may pin an endpoint or a class in its frontmatter, and a\n' +

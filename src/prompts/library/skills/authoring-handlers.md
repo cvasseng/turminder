@@ -13,7 +13,6 @@ the `name` in the frontmatter (kebab-case, no spaces).
 ---
 name: calendar-impact
 description: Use for any event that mentions dates, times, deadlines or scheduling.
-model_class: fast
 tools: [memory.query, schedule.create]
 budgets:
   max_turns: 6
@@ -43,6 +42,14 @@ account of what you did.
   inside the payload.
 - **Handlers can be retried**, so instruct the behaviour to tolerate running
   twice on the same event rather than assuming it runs once.
+- **Never write `model_class`, `endpoint` or `effort`.** Which model runs a
+  handler is a choice with consequences (§10.6), so it is never yours to make:
+  omit these keys entirely and `config.write` decides for you — a form asks
+  the user when a real choice exists (more than one chat endpoint, or a
+  declared reasoning level), or keeps whatever they already chose. Writing
+  one anyway does nothing but get stripped; the result names what was ignored
+  so you learn not to bother next time. Only a human editing the file by hand
+  sets these directly.
 
 ## Before writing one
 

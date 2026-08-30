@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Config } from '../src/core/config.js';
 import { openDataHome, type DataHome } from '../src/core/datadir.js';
+import { FormBroker } from '../src/chat/forms.js';
 import { configTools } from '../src/tools/integrations/config.js';
 import { validateWrite } from '../src/tools/validate-write.js';
 import { SkillLoader } from '../src/tools/skills.js';
@@ -67,6 +69,33 @@ describe('validateWrite', () => {
     ).toBe(true);
   });
 
+  it('refuses a handler pinning both an endpoint and a class (§10.6)', () => {
+    const result = validateWrite(
+      'handlers/nudge.md',
+      '---\nname: nudge\ndescription: d\nendpoint: main\nmodel_class: best\n---\n\nDo it.\n',
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.detail).toMatch(/not both/);
+    // Either alone is fine.
+    expect(
+      validateWrite(
+        'handlers/nudge.md',
+        '---\nname: nudge\ndescription: d\nendpoint: main\n---\n\nDo it.\n',
+      ).ok,
+    ).toBe(true);
+    expect(
+      validateWrite(
+        'handlers/nudge.md',
+        '---\nname: nudge\ndescription: d\nmodel_class: best\n---\n\nDo it.\n',
+      ).ok,
+    ).toBe(true);
+    // And neither is fine too — absent means the handler route decides.
+    expect(
+      validateWrite('handlers/nudge.md', '---\nname: nudge\ndescription: d\n---\n\nDo it.\n')
+        .ok,
+    ).toBe(true);
+  });
+
   it('catches a turminder.yaml that would stop the service from starting', () => {
     const result = validateWrite('config/turminder.yaml', 'chat:\n  max_tokenz: 100\n');
     expect(result.ok).toBe(false);
@@ -97,8 +126,14 @@ describe('config.write refuses what the loader would reject', () => {
   });
   afterEach(() => t.cleanup());
 
-  // Built per test: `home` only exists once beforeEach has run.
-  const writeTool = () => configTools(home).find((tool) => tool.name === 'config.write')!;
+  // Built per test: `home` only exists once beforeEach has run. No handler
+  // routing exercised below (bad-content refusals, resolved before any form
+  // would be raised) — a real broker with no live model stack is enough.
+  const writeTool = () =>
+    configTools(home, {
+      forms: new FormBroker(home, new Config(home)),
+      router: () => null,
+    }).find((tool) => tool.name === 'config.write')!;
 
   it('does not commit a skill the loader cannot read', async () => {
     const result = (await writeTool().execute(

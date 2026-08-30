@@ -111,7 +111,7 @@ export class IngressAgent {
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
         const result = await runAgent(gateway, {
-          selector: { class: 'fast', caps: ['json'] },
+          selector: { purpose: 'ingress', caps: ['json'] },
           priority: 'event',
           system,
           messages: [{ role: 'user', content: prompt }],

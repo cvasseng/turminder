@@ -190,41 +190,122 @@ export type ModelCap = z.infer<typeof ModelCapSchema>;
 export const ModelEffortSchema = z.enum(['low', 'medium', 'high', 'xhigh']);
 export type ModelEffort = z.infer<typeof ModelEffortSchema>;
 
-export const ModelEndpointSchema = z.strictObject({
-  name: z.string().min(1),
-  url: z.string().min(1),
-  api_key: z.string().optional(),
-  model: z.string().optional(),
-  classes: z.array(ModelClassSchema).min(1),
-  caps: z.array(ModelCapSchema).default([]),
-  context_size: z.number().int().positive().optional(),
-  /**
-   * Reasoning levels this model honors (§10.6). Omitted means the knob is
-   * never sent — an endpoint that has not said it understands
-   * `reasoning_effort` does not get handed it, and its own default stands
-   * unguessed. An empty list is a typo, not a declaration.
-   */
-  efforts: z.array(ModelEffortSchema).min(1).optional(),
-  /** Hard cap on concurrent in-flight calls for this endpoint (§10.3). */
-  concurrency: z.number().int().positive().optional(),
-  /**
-   * Pricing per million tokens (§10.5). Omit the block entirely for a
-   * costless local box: absent means **costless by declaration**, reported as
-   * `local` rather than `0.00`, because free and unpriced are different
-   * statements.
-   */
-  cost: z
-    .strictObject({
-      in_per_mtok: z.number().nonnegative(),
-      out_per_mtok: z.number().nonnegative(),
-      currency: z.string().min(1),
-    })
-    .optional(),
-});
+/** What an endpoint does (§10.1, §10.6, G.2). `stt`/`tts` are §16-deferred —
+ *  not accepted here yet. */
+export const ModelEndpointKindSchema = z.enum(['chat', 'embedding']);
+export type ModelEndpointKind = z.infer<typeof ModelEndpointKindSchema>;
+
+export const ModelEndpointSchema = z
+  .strictObject({
+    name: z.string().min(1),
+    url: z.string().min(1),
+    api_key: z.string().optional(),
+    model: z.string().optional(),
+    kind: ModelEndpointKindSchema.default('chat'),
+    /** Required for a `chat` endpoint; an `embedding` endpoint declares none
+     *  (there is no class to route it by — `routes.embedding` names it directly). */
+    classes: z.array(ModelClassSchema).optional(),
+    caps: z.array(ModelCapSchema).default([]),
+    context_size: z.number().int().positive().optional(),
+    /**
+     * Reasoning levels this model honors (§10.6). Omitted means the knob is
+     * never sent — an endpoint that has not said it understands
+     * `reasoning_effort` does not get handed it, and its own default stands
+     * unguessed. An empty list is a typo, not a declaration.
+     */
+    efforts: z.array(ModelEffortSchema).min(1).optional(),
+    /** Hard cap on concurrent in-flight calls for this endpoint (§10.3). */
+    concurrency: z.number().int().positive().optional(),
+    /**
+     * Pricing per million tokens (§10.5). Omit the block entirely for a
+     * costless local box: absent means **costless by declaration**, reported as
+     * `local` rather than `0.00`, because free and unpriced are different
+     * statements.
+     */
+    cost: z
+      .strictObject({
+        in_per_mtok: z.number().nonnegative(),
+        out_per_mtok: z.number().nonnegative(),
+        currency: z.string().min(1),
+      })
+      .optional(),
+  })
+  .superRefine((e, ctx) => {
+    if (e.kind === 'chat' && !e.classes?.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['classes'],
+        message: 'a chat endpoint needs at least one class',
+      });
+    }
+    if (e.kind === 'embedding') {
+      if (e.classes?.length) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['classes'],
+          message: 'an embedding endpoint takes no classes/caps/efforts/cost',
+        });
+      }
+      if (e.caps.length || e.efforts || e.cost) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['caps'],
+          message: 'an embedding endpoint takes no classes/caps/efforts/cost',
+        });
+      }
+    }
+  });
 export type ModelEndpoint = z.infer<typeof ModelEndpointSchema>;
+
+/**
+ * Purposes that route through `routes:` (G.2, §10.6) — the closed vocabulary
+ * `RoutesSchema` keys against and `src/model/routes.ts`'s `DEFAULT_ROUTES`
+ * table indexes by. `probe` is a purpose too (it shows in traces) but never a
+ * route — it lives in `src/model/routes.ts` with the rest of the `Purpose`
+ * type, not here. This is the one list; `src/cli/models.ts` and the router
+ * tests read it rather than keeping a second.
+ */
+export const ROUTABLE_PURPOSES = [
+  'chat',
+  'handler',
+  'ingress',
+  'distill',
+  'title',
+  'memory',
+  'embedding',
+] as const;
+export const RoutablePurposeSchema = z.enum(ROUTABLE_PURPOSES);
+export type RoutablePurpose = z.infer<typeof RoutablePurposeSchema>;
+
+/** A route names either a class (the router still filters by caps/config
+ *  order within it) or an exact endpoint, bypassing class filtering. */
+export const RouteSchema = z.union([
+  z.strictObject({ class: ModelClassSchema }),
+  z.strictObject({ endpoint: z.string().min(1) }),
+]);
+export type Route = z.infer<typeof RouteSchema>;
+
+/** `routes.<purpose>` (G.2, §10.6). Keys are exactly `ROUTABLE_PURPOSES`;
+ *  `embedding` accepts `{endpoint}` only — there is no class to route it by. */
+export const RoutesSchema = z.strictObject({
+  chat: RouteSchema.optional(),
+  handler: RouteSchema.optional(),
+  ingress: RouteSchema.optional(),
+  distill: RouteSchema.optional(),
+  title: RouteSchema.optional(),
+  memory: RouteSchema.optional(),
+  embedding: z.strictObject({ endpoint: z.string().min(1) }).optional(),
+});
+export type Routes = z.infer<typeof RoutesSchema>;
 
 export const ModelsYamlSchema = z.strictObject({
   endpoints: z.array(ModelEndpointSchema).min(1),
+  routes: RoutesSchema.optional(),
+  /**
+   * Legacy shape, pre-§10.6-v2. Kept in the schema only so a models.yaml
+   * still carrying it can be parsed and healed into a `kind: embedding`
+   * endpoint (`src/core/config.ts healModelKinds`) — never written new.
+   */
   embedding: z
     .strictObject({
       url: z.string().min(1),
@@ -386,50 +467,66 @@ export type Personality = z.infer<typeof PersonalitySchema>;
 
 /* ── handlers/<name>.md (G.7) ────────────────────────────────────────────── */
 
-export const HandlerFrontmatterSchema = z.strictObject({
-  name: z.string().min(1),
-  description: z.string().min(1),
-  match: z
-    .strictObject({
-      types: z.array(z.string()).optional(),
-      sources: z.array(z.string()).optional(),
-    })
-    .optional(),
-  model_class: ModelClassSchema.default('fast'),
-  /**
-   * Pin this handler to one endpoint by name (§10.6) — for the behaviour that
-   * must run local for privacy, or hosted for quality. Mutually exclusive
-   * with `model_class`: two answers to "which model" is how a pin quietly
-   * stops applying.
-   */
-  endpoint: z.string().min(1).optional(),
-  /**
-   * How hard the model should think for this behaviour (§10.6, G.2
-   * `efforts:`). Most handlers are mechanical — file this, notify that — and
-   * do not need a reasoning budget; declaring `low` is how a behaviour says
-   * so. Sent only if the endpoint that serves the run declares the level, so
-   * a handler asking for one on a model that never claimed to understand the
-   * knob costs nothing and changes nothing.
-   */
-  effort: ModelEffortSchema.optional(),
-  tools: z.array(z.string()).default([]),
-  confirm: z.array(z.string()).default([]),
-  /** File-store subscription (§18.4 tier 3): store-relative path globs. */
-  watch: z.array(z.string().min(1)).default([]),
-  /**
-   * Embed binding (§22.5): with no explicit `match:`, this handler fires only
-   * for `embed.action` from this embed — and is deleted with it.
-   */
-  embed: z.string().min(1).optional(),
-  budgets: z
-    .strictObject({
-      max_turns: z.number().int().positive().optional(),
-      max_tokens: z.number().int().positive().optional(),
-      timeout_s: z.number().int().positive().optional(),
-    })
-    .optional(),
-  enabled: z.boolean().default(true),
-});
+export const HandlerFrontmatterSchema = z
+  .strictObject({
+    name: z.string().min(1),
+    description: z.string().min(1),
+    match: z
+      .strictObject({
+        types: z.array(z.string()).optional(),
+        sources: z.array(z.string()).optional(),
+      })
+      .optional(),
+    /**
+     * §10.6 step 2. Absent means the `handler` route decides (default
+     * `fast`, G.2 `routes.handler`) — no `.default()` here any more, because
+     * "said nothing" and "asked for fast" must trace differently
+     * (`resolved_by: "route"|"kind_default"` vs `"frontmatter"`).
+     */
+    model_class: ModelClassSchema.optional(),
+    /**
+     * Pin this handler to one endpoint by name (§10.6) — for the behaviour that
+     * must run local for privacy, or hosted for quality. Mutually exclusive
+     * with `model_class`: two answers to "which model" is how a pin quietly
+     * stops applying.
+     */
+    endpoint: z.string().min(1).optional(),
+    /**
+     * How hard the model should think for this behaviour (§10.6, G.2
+     * `efforts:`). Most handlers are mechanical — file this, notify that — and
+     * do not need a reasoning budget; declaring `low` is how a behaviour says
+     * so. Sent only if the endpoint that serves the run declares the level, so
+     * a handler asking for one on a model that never claimed to understand the
+     * knob costs nothing and changes nothing.
+     */
+    effort: ModelEffortSchema.optional(),
+    tools: z.array(z.string()).default([]),
+    confirm: z.array(z.string()).default([]),
+    /** File-store subscription (§18.4 tier 3): store-relative path globs. */
+    watch: z.array(z.string().min(1)).default([]),
+    /**
+     * Embed binding (§22.5): with no explicit `match:`, this handler fires only
+     * for `embed.action` from this embed — and is deleted with it.
+     */
+    embed: z.string().min(1).optional(),
+    budgets: z
+      .strictObject({
+        max_turns: z.number().int().positive().optional(),
+        max_tokens: z.number().int().positive().optional(),
+        timeout_s: z.number().int().positive().optional(),
+      })
+      .optional(),
+    enabled: z.boolean().default(true),
+  })
+  .superRefine((h, ctx) => {
+    if (h.endpoint && h.model_class) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['model_class'],
+        message: 'a handler pins an endpoint or a class, not both',
+      });
+    }
+  });
 export type HandlerFrontmatter = z.infer<typeof HandlerFrontmatterSchema>;
 
 /* ── skills/<name>.md (G.8) ──────────────────────────────────────────────── */

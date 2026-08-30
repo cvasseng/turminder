@@ -52,7 +52,7 @@ export async function suggestTitle(
 ): Promise<TitleResult> {
   try {
     const result = await runAgent(gateway, {
-      selector: { class: 'fast', caps: ['json'] },
+      selector: { purpose: 'title', caps: ['json'] },
       priority: 'background',
       system:
         'You name conversations. Given the opening exchange, return a short title — ' +
