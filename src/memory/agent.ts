@@ -3,6 +3,7 @@ import { log } from '../core/logger.js';
 import { errMessage } from '../core/errors.js';
 import type { MemoryType } from '../core/config-schemas.js';
 import type { ModelGateway } from '../model/gateway.js';
+import type { TraceSink } from '../model/types.js';
 import type { RagIndex, RetrievalHit } from '../rag/index-store.js';
 import { MemoryStore, type MemoryRecord } from './store.js';
 
@@ -75,8 +76,14 @@ export class MemoryAgent {
     return { results: hits, mode };
   }
 
-  async save(input: SaveInput): Promise<SaveResult> {
-    const existing = await this.findDuplicate(input);
+  /**
+   * `trace` is the caller's run trace (§10.6): a save's dedupe check is a
+   * real model call and was invisible before it — every caller (the
+   * `memory.save` tool, the distiller) has a run and threads its sink
+   * through rather than the agent guessing one.
+   */
+  async save(input: SaveInput, trace?: TraceSink): Promise<SaveResult> {
+    const existing = await this.findDuplicate(input, trace);
     if (existing) {
       const merged = this.store.update(existing.name, {
         content: existing.mergedContent,
@@ -140,6 +147,7 @@ export class MemoryAgent {
    */
   private async findDuplicate(
     input: SaveInput,
+    trace?: TraceSink,
   ): Promise<{ name: string; mergedContent: string } | null> {
     // Dedupe only within the island being written to (§31.5). Merging across
     // the boundary would fold project content into a general memory — a leak
@@ -174,7 +182,7 @@ export class MemoryAgent {
       .join('\n');
     try {
       const turn = await this.gateway.turn({
-        selector: { class: 'fast', caps: ['json'] },
+        selector: { purpose: 'memory', caps: ['json'] },
         priority: 'background',
         system:
           "You maintain a personal assistant's memory store. Decide whether a new fact is already covered by an existing memory.\n" +
@@ -191,6 +199,7 @@ export class MemoryAgent {
           schema: Record<string, unknown>;
         },
         maxOutputTokens: 4096,
+        ...(trace ? { trace } : {}),
       });
       const parsed = DedupeVerdict.safeParse(JSON.parse(turn.text.trim()));
       if (!parsed.success) return null;

@@ -37,14 +37,17 @@ export function usageTools(deps: UsageDeps): ToolDefinition[] {
     {
       name: 'usage.summary',
       description:
-        'What the language models have cost, over a period, grouped by endpoint or by what kind of run it was. Endpoints with no configured price report tokens and no money — that is "local", not free. Costs are estimates from the prices in the config, never a bill.',
+        'What the language models have cost, over a period, grouped by endpoint, by purpose (chat, handler, distill, …), or by what kind of run it was. Endpoints with no configured price report tokens and no money — that is "local", not free. Costs are estimates from the prices in the config, never a bill.',
       tier: 'ro',
       isEmpty: (result) => ((result as { groups?: unknown[] }).groups ?? []).length === 0,
       args: z.object({
         period: z.enum(['day', 'week', 'month', 'all']).optional(),
-        group_by: z.enum(['endpoint', 'kind', 'none']).optional(),
+        group_by: z.enum(['endpoint', 'kind', 'purpose', 'none']).optional(),
       }),
-      async execute(args: { period?: Period; group_by?: 'endpoint' | 'kind' | 'none' }) {
+      async execute(args: {
+        period?: Period;
+        group_by?: 'endpoint' | 'kind' | 'purpose' | 'none';
+      }) {
         const period = args.period ?? 'month';
         const groupBy = args.group_by ?? 'endpoint';
         const window = periodWindow(period, now());

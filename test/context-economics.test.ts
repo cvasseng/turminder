@@ -89,7 +89,7 @@ describe('llama.cpp cache visibility (§21.1)', () => {
       });
       const trace = new MemoryTraceSink();
       const r = await gw.turn({
-        selector: { class: 'fast' },
+        selector: { purpose: 'chat' },
         priority: 'interactive',
         system: 'be brief',
         messages: [{ role: 'user', content: 'hi' }],
@@ -114,7 +114,7 @@ describe('llama.cpp cache visibility (§21.1)', () => {
       );
       const call = () =>
         gw.turn({
-          selector: { class: 'fast' },
+          selector: { purpose: 'chat' },
           priority: 'interactive',
           system: 's',
           messages: [{ role: 'user', content: 'hi' }],
@@ -916,7 +916,12 @@ describe('prompt and schema economics (§21.3, §21.4)', () => {
       // is in the skill, which is the split this ceiling exists to enforce.
       'schedule.create': 860,
       'deliver.notify': 800,
-      'config.write': 600,
+      // Raised 600 → 692 when the handler-routing carve-out landed (§10.6,
+      // §19.2, F.6): a new `rechoose_routing` arg and a short clause saying
+      // routing keys are the user's choice, not the model's. Capability, not
+      // prose — the *why* is in the `authoring-handlers` skill, which is the
+      // split this ceiling exists to enforce.
+      'config.write': 692,
     };
     for (const [name, ceiling] of Object.entries(ceilings)) {
       expect(size(name), `${name} is ${size(name)} chars`).toBeLessThanOrEqual(ceiling);

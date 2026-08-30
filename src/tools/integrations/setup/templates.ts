@@ -32,12 +32,22 @@ export interface TemplateSubmission {
 export interface ConnectorTemplate {
   name: TemplateName;
   title: string;
-  fields: FieldSpec[];
+  /**
+   * Static for most templates. `model_endpoint`'s `classes` prefill depends on
+   * whether this install already has a chat endpoint (§10.6) — a function
+   * form is resolved with the ctx at the moment the form is requested.
+   */
+  fields: FieldSpec[] | ((ctx: TemplateContext) => FieldSpec[]);
   /**
    * Deterministic code, not the model (§19.3): validate, write config, connect,
    * probe, report. Throwing is fine — the caller reports the failure to the run.
    */
   effect(submission: TemplateSubmission, ctx: TemplateContext): Promise<unknown>;
+}
+
+/** Resolve a template's fields against the ctx it is being requested with. */
+export function templateFields(template: ConnectorTemplate, ctx: TemplateContext): FieldSpec[] {
+  return typeof template.fields === 'function' ? template.fields(ctx) : template.fields;
 }
 
 /* ── Raw YAML I/O ─────────────────────────────────────────────────────────── */
@@ -302,27 +312,44 @@ const CLASS_CHOICES: Record<string, ('fast' | 'best')[]> = {
 const modelEndpoint: ConnectorTemplate = {
   name: 'model_endpoint',
   title: 'Add a model endpoint',
-  fields: [
-    { name: 'name', label: 'Short name for this endpoint', type: 'text' },
-    {
-      name: 'url',
-      label: 'OpenAI-compatible base URL, e.g. http://localhost:8080/v1',
-      type: 'url',
-    },
-    {
-      name: 'api_key',
-      label: 'API key, if the endpoint needs one — stored in secrets/secrets.yaml',
-      type: 'secret',
-      required: false,
-    },
-    {
-      name: 'classes',
-      label: 'What to use it for',
-      type: 'select',
-      options: Object.keys(CLASS_CHOICES),
-      value: 'fast and best',
-    },
-  ],
+  /**
+   * The `classes` prefill is only honest on an install with no other chat
+   * endpoint (§10.6): "fast and best" is a reasonable default for the first
+   * one, and furniture — or actively wrong — for a second, where the whole
+   * point is usually to split fast from best. So a second endpoint gets no
+   * prefill; the human chooses.
+   */
+  fields: (ctx) => {
+    const doc = readRaw(ctx.home.path('config', 'models.yaml'));
+    const hasChatEndpoint = Array.isArray(doc.endpoints)
+      ? (doc.endpoints as Record<string, unknown>[]).some(
+          (e) => e && typeof e === 'object' && (e.kind ?? 'chat') === 'chat',
+        )
+      : false;
+    return [
+      { name: 'name', label: 'Short name for this endpoint', type: 'text' },
+      {
+        name: 'url',
+        label: 'OpenAI-compatible base URL, e.g. http://localhost:8080/v1',
+        type: 'url',
+      },
+      {
+        name: 'api_key',
+        label: 'API key, if the endpoint needs one — stored in secrets/secrets.yaml',
+        type: 'secret',
+        required: false,
+      },
+      {
+        name: 'classes',
+        label: hasChatEndpoint
+          ? 'What to use it for — this install already has a chat endpoint, so choose deliberately (e.g. split fast from best) rather than accept a default'
+          : 'What to use it for — the first endpoint usually serves everything',
+        type: 'select',
+        options: Object.keys(CLASS_CHOICES),
+        ...(hasChatEndpoint ? {} : { value: 'fast and best' }),
+      },
+    ];
+  },
   /**
    * Probe, don't ask (plan §3b): the same suite the first-run setup page uses,
    * so capability tags come from what the endpoint actually did.
@@ -344,6 +371,7 @@ const modelEndpoint: ConnectorTemplate = {
 
     const endpoint = ModelEndpointSchema.parse({
       name,
+      kind: 'chat',
       url,
       ...(probe.model_id ? { model: probe.model_id } : {}),
       ...(ref ? { api_key: ref } : {}),
@@ -355,11 +383,14 @@ const modelEndpoint: ConnectorTemplate = {
     const file = ctx.home.path('config', 'models.yaml');
     const doc = readRaw(file);
     const existing = Array.isArray(doc.endpoints) ? (doc.endpoints as { name: string }[]) : [];
+    // No embedding auto-add here (§10.6 v2): this template adds `kind: chat`
+    // endpoints only — an embedding endpoint is added by the first-run setup
+    // wizard or by hand; there is deliberately no chat-driven route to one
+    // (multi-endpoint setup UI is out of scope, LIMITS.md).
     const next: Record<string, unknown> = {
       ...doc,
       endpoints: upsertByName(existing, endpoint as { name: string }),
     };
-    if (!next.embedding) next.embedding = { url: normaliseEndpointUrl(url).root };
     writeRaw(ctx.home, 'config/models.yaml', next, `setup: add model endpoint ${name}`);
 
     const loaded = ctx.reloadModels();

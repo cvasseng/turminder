@@ -5,6 +5,7 @@ import { log } from '../core/logger.js';
 import { errMessage } from '../core/errors.js';
 import { ModelEndpointSchema } from '../core/config-schemas.js';
 import { modelApiKeyName } from '../core/config.js';
+import { DEFAULT_ROUTES } from '../model/routes.js';
 import { normaliseEndpointUrl, probeEmbeddings, probeEndpoint } from '../model/probe.js';
 import type { Service } from '../service.js';
 
@@ -90,7 +91,7 @@ export function handleCommit(
    * gets a reference (§19.2, §27) — the hosted golden path of §28.5 must not
    * be the one place a key sits in a config file in the clear.
    */
-  const endpoints = req.endpoints.map((e) => {
+  const endpoints: Record<string, unknown>[] = req.endpoints.map((e) => {
     let apiKey = e.api_key;
     if (apiKey && !apiKey.startsWith('${secret:')) {
       const key = modelApiKeyName(e.name);
@@ -101,6 +102,10 @@ export function handleCommit(
     }
     return {
       name: e.name,
+      // First-run onboarding writes only chat endpoints (§10.6, §10.1); an
+      // embedding endpoint, if any, is appended below as its own `kind:
+      // embedding` entry, never a second block.
+      kind: 'chat' as const,
       url: e.url,
       ...(e.model ? { model: e.model } : {}),
       ...(apiKey ? { api_key: apiKey } : {}),
@@ -109,7 +114,6 @@ export function handleCommit(
       ...(e.context_size ? { context_size: e.context_size } : {}),
     };
   });
-  const doc: Record<string, unknown> = { endpoints };
   // Declining is a real answer (§28.5): only guess an embedding URL when the
   // user did not say no, and never point a hosted endpoint at one implicitly.
   const derived = req.endpoints[0] ? normaliseEndpointUrl(req.endpoints[0].url).root : null;
@@ -126,10 +130,38 @@ export function handleCommit(
      */
     const sameHost = embeddingUrl === derived;
     const key = sameHost ? endpoints[0]?.api_key : undefined;
-    doc.embedding = { url: embeddingUrl, ...(key ? { api_key: key } : {}) };
+    endpoints.push({
+      name: 'embedding',
+      kind: 'embedding',
+      url: embeddingUrl,
+      ...(key ? { api_key: key } : {}),
+    });
   }
+  const doc: Record<string, unknown> = { endpoints };
+  /**
+   * Written explicitly, from day one (Christer, 2026-08-30) — the file shows
+   * what goes where rather than making a reader derive it from the
+   * kind-default table in code (§10.6). `routes.embedding` rides along only
+   * when there is an embedding endpoint to name.
+   */
+  const routes: Record<string, unknown> = {
+    chat: DEFAULT_ROUTES.chat,
+    handler: DEFAULT_ROUTES.handler,
+    ingress: DEFAULT_ROUTES.ingress,
+    distill: DEFAULT_ROUTES.distill,
+    title: DEFAULT_ROUTES.title,
+    memory: DEFAULT_ROUTES.memory,
+  };
+  if (embeddingUrl) routes.embedding = { endpoint: 'embedding' };
+  doc.routes = routes;
 
-  fs.writeFileSync(file, YAML.stringify(doc), 'utf8');
+  const yamlDoc = new YAML.Document(doc);
+  const routesNode = yamlDoc.get('routes', true);
+  if (routesNode && typeof routesNode === 'object') {
+    (routesNode as { commentBefore?: string | null }).commentBefore =
+      ' purpose -> class or endpoint; `turminder models` prints the resolved table';
+  }
+  fs.writeFileSync(file, yamlDoc.toString(), 'utf8');
   home.git.commit('initial model config', ['config/models.yaml']);
   const ok = service.loadModels();
   if (!ok) {

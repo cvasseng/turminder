@@ -364,6 +364,11 @@ capability set (e.g. `["notify.actions", "chat.stream"]`). V1 ships one
 channel implementation: the desktop daemon. Multiple simultaneous daemons
 are supported; v1 policy is deliver-to-all, any ack settles.
 
+A **`voice`**-capable device (§33.3, §28.6) additionally reads deliveries
+aloud. It does not compose what it says: the spoken form of a delivery is
+the server's (`POST /api/speak`, App. E), exactly as every word of a
+`confirm` already is (D.3).
+
 ### 7.3 Desktop daemon
 
 - A small library — "hold deliveries, render notifications, emit interaction
@@ -457,6 +462,14 @@ are supported; v1 policy is deliver-to-all, any ack settles.
   `setup.rebuild_index` (form-confirmed, F.9) — excluded from backup and
   git, never precious. Changing the embedding model always means a rebuild:
   vectors from different models do not mix.
+- **The embedding endpoint is `routes.embedding`'s target** (§10.6, G.2): the
+  first `kind: embedding` endpoint in `endpoints[]` by default, or the one
+  `routes.embedding` names. Absent, `EmbeddingClient` reports itself
+  unavailable without a network call and every corpus falls back to lexical
+  search — a normal state, not an error. A models.yaml reload
+  (`Service.loadModels()`) reconfigures the same `EmbeddingClient` instance in
+  place — the indexes holding it are never rebuilt — and a changed URL logs a
+  warning that stored vectors are stale until the next `setup.rebuild_index`.
 
 ---
 
@@ -508,6 +521,9 @@ are supported; v1 policy is deliver-to-all, any ack settles.
   introduction (§3c).
 - **Searching past conversations** is §25 (`history.search`); **image
   attachments** are §26. Both ride the ordinary chat rails described here.
+  So does **voice** (§33): a spoken utterance is a `chat.message` on a
+  conversation a device owns (`voice_device`, App. C), listed and labelled
+  like any other, answered by an ordinary run whose reply is read aloud.
 - With more than one endpoint configured the UI shows a **model
   selector** (per-conversation force-override, persisted; §10.6) and the
   usage line carries the conversation's **estimated cost** (§10.5). When
@@ -675,6 +691,21 @@ so does widening past the phone breakpoint.
   OpenAI-compatible providers work by construction.
 - Grammar-constrained output (llama.cpp) is used wherever the system needs
   guaranteed-valid JSON (ingress verdicts, memory ops, matcher proposals).
+- **Every endpoint declares a `kind`** (G.2): `chat` (an LLM the router may
+  pick for a purpose, §10.6) or `embedding` (a vector server, §8.3). An
+  embedding endpoint declares no `classes`, `caps`, `efforts` or `cost` — there
+  is no class to route it by, `routes.embedding` (§10.6) names it directly.
+  `kind: stt | tts` is designed-for, not built (§16). A chat endpoint never
+  appears where a chat surface picks a model: `models.list`, the chat
+  override, or a handler's `endpoint:` pin (§10.6) all filter to `kind: chat`.
+- **A pre-this-track `embedding:` block heals itself on load** (Christer,
+  2026-08-30): `src/core/config.ts healModelsYaml()` reads the raw YAML (never
+  `Config.models()`'s output, which has `${secret:}` expanded) and, in the same
+  pass as the pre-existing plaintext-`api_key` heal, folds a legacy top-level
+  `embedding:` block into a `kind: embedding` endpoint named `embedding` —
+  `embedding-2`, `-3`, … on a name collision — plus an explicit
+  `routes.embedding: {endpoint: <name>}` naming it, and deletes the old block.
+  One commit for whichever heals apply, never two.
 
 ### 10.2 Classes and capabilities
 
@@ -765,7 +796,17 @@ Which model serves which run is currently decided correctly and
 invisibly. Both halves get fixed: the decision becomes **inspectable**,
 and for chat, **overridable**.
 
-**The resolution order, normative:**
+**Purpose — who is asking.** Every call names a `purpose`: `chat`, `handler`,
+`ingress`, `distill`, `title`, `memory`, `embedding`, plus the non-routable
+`probe`. The vocabulary is closed and lives in code (`src/model/routes.ts`,
+`ROUTABLE_PURPOSES`) — there is no second copy, and `turminder models`
+(below) derives its printed table from that same list plus the live config,
+never a hand-maintained one. `probe` shows up in traces like any other
+purpose but is never a route: the capability prober builds its own
+one-endpoint router before any routing config exists to read, so
+`routes.probe` would be a route to nowhere.
+
+**The resolution order, normative** (`ModelRouter.resolve`):
 
 1. **Conversation override** (chat runs only): the conversation's
    `model_override` (C) names an endpoint; it wins absolutely — over
@@ -775,36 +816,62 @@ and for chat, **overridable**.
    gated. The override covers the conversation's chat turns only — the
    system agents a chat run triggers (memory retrieval, distillation,
    ingress) keep their own resolution.
-2. **Handler frontmatter**: `model_class: fast|best` (existing, G.7 —
-   default `fast`) or `endpoint: <name>` (exact pin, new — for the
-   handler that must run local for privacy or hosted for quality;
-   mutually exclusive with `model_class`, load error otherwise).
-3. **Agent-kind defaults**, now a normative table instead of folklore:
-   `chat → best`, `handler → fast` (G.7's frontmatter default),
-   `ingress → fast`, `distill → best` (background priority makes the
-   latency free; the judgment quality is the whole point — §8.2).
+2. **Handler frontmatter**: `endpoint: <name>` (exact pin — for the handler
+   that must run local for privacy or hosted for quality) or
+   `model_class: fast|best` (G.7 — absent means step 3 decides; mutually
+   exclusive with `endpoint`, load error otherwise).
+3. **Routes**, then the kind-default table. `routes.<purpose>` in G.2, keyed
+   by purpose, is either `{class: fast|best}` or `{endpoint: <name>}` (an
+   `embedding` route accepts `{endpoint}` only). Configured routes beat the
+   kind-default table below, which now reads:
+
+   | Purpose | Default |
+   |---|---|
+   | `chat` | `best` |
+   | `handler` | `fast` |
+   | `ingress` | `fast` |
+   | `distill` | `best` (background priority makes the latency free; the
+     judgment quality is the whole point — §8.2) |
+   | `title` | `fast` |
+   | `memory` | `fast` |
+   | `embedding` | the first `kind: embedding` endpoint (§8.3) — there is no
+     class to default to |
+
    Shipped handlers state their class explicitly (§30.5) rather than
    leaning on the default.
 4. Within the selected class: capability filter (§10.2), then
    **models.yaml order** — first match wins, deterministically. Listing
    order is priority order; the spec says it so reordering is a
-   deliberate act.
+   deliberate act. A `{class}` route or the kind-default table both resolve
+   this way; a `{endpoint}` route or pin resolves directly, still checked
+   against required caps.
 
-**Every `llm_call` trace row records the resolution** (C.1):
-`endpoint` (the name that served it), `requested_class`,
-`resolved_by: "override" | "frontmatter" | "kind_default"`. "Why did the
-big model answer this?" is a query, never archaeology.
+**Every `llm_call` trace row records the resolution** (C.1): `purpose`,
+`endpoint` (the name that served it), `requested_class` (when a class was
+the selector), `resolved_by: "override" | "frontmatter" | "route" | "kind_default"`
+— the **router** stamps this, never the caller. "Why did the big model
+answer this?" is a query, never archaeology.
 
-**The chat selector** (§9, App. D): when more than one endpoint is
-configured, the chat UI shows a model selector. `models.list` (D.1)
-returns the endpoints with classes, caps, pricing, and which would serve
-this conversation now; `conversation.model` (D.1) sets or clears the
-override, persisted on the conversation row — it survives reconnects and
-restarts. An override naming an endpoint that has since left models.yaml
-is cleared on next use with a visible notice (fail-open, honest), never a
-dead conversation. Changing models mid-conversation forfeits the prefix
-cache for the next turn (§21.1 makes the cost visible); that is the
-user's trade to make.
+**The chat selector** (§9, App. D): when more than one **chat** endpoint is
+configured, the chat UI shows a model selector — an embedding endpoint never
+appears here, in `conversation.model`, or in a handler's `endpoint:` pin
+(§10.1). `models.list` (D.1) returns the chat endpoints with classes, caps,
+pricing, and which would serve this conversation now; `conversation.model`
+(D.1) sets or clears the override, persisted on the conversation row — it
+survives reconnects and restarts. An override naming an endpoint that has
+since left models.yaml, or that is no longer `kind: chat`, is cleared on
+next use with a visible notice (fail-open, honest), never a dead
+conversation. Changing models mid-conversation forfeits the prefix cache for
+the next turn (§21.1 makes the cost visible); that is the user's trade to
+make.
+
+**Which model runs a handler is never the model's own choice** (§19, F.6):
+`config.write` strips `model_class`/`endpoint`/`effort` from anything it
+writes to `handlers/*.md` and, when a real choice exists (more than one chat
+endpoint, or a declared reasoning level), raises a form so the human picks —
+the `setup.pricing` pattern (§10.5) applied to routing. See F.6 for the full
+rule and the form's shape; only a human editing the file by hand sets these
+keys directly.
 
 **Reasoning effort rides the same override surface.** An endpoint may
 declare the effort levels its model honors (G.2 `efforts:`, drawn from
@@ -819,6 +886,22 @@ the same way. Absent an override, no `reasoning_effort` is sent — the
 endpoint's own default stands, undeclared and unguessed. Effort is a
 request parameter, not prompt content: the prefix cache is untouched.
 
+**`none` is an effort level.** A model that thinks by default cannot serve
+a voice turn (§33): measured against the reference install 2026-08-30, the
+endpoint's default effort spent its whole output budget reasoning and never
+answered, `low` still reasoned for 1.3 s before the first word, and
+thinking off answered in 52 ms. So the `efforts` vocabulary gains `none`,
+declared like the others, and an endpoint that declares it also says how
+it is sent — `no_think:` in G.2, a request-body fragment merged in when
+`none` is selected (default `{"reasoning_effort": "none"}`; Qwen on vLLM
+and llama.cpp want `{"chat_template_kwargs": {"enable_thinking": false}}`).
+The probe for `none` is a call that must come back with **zero** reasoning
+content; an endpoint whose knob does not actually stop the thinking is not
+tagged with it. Still a request parameter, still no prompt change, still
+cache-safe. A voice conversation (§33.1) pins `none` when its serving
+endpoint declares it and otherwise sends nothing — slow, and honest about
+it in the trace, rather than pretending.
+
 **Handlers ask for a level in frontmatter** (`effort:`, G.7), the way they
 already ask for a class or pin an endpoint. Most behaviours are mechanical
 — file this, notify that, summarise a page — and a reasoning budget spent
@@ -830,9 +913,13 @@ sends no `reasoning_effort` at all. There is no kind default — the class
 table has one because every run needs *a* model, and no run needs a
 declared reasoning level: the endpoint's own is the honest fallback.
 
-CLI: `turminder models` prints the endpoints (classes, caps, pricing,
-declared efforts, context size) and the kind-default resolution as of the
-current config — the §10.6 table made concrete against this install.
+CLI: `turminder models` prints the endpoints (kind, classes, caps, pricing,
+declared efforts, context size) and, for every routable purpose, its source
+(`config` when a route names it, `default` otherwise), the selector that
+applied, and which endpoint it resolves to today — the table above made
+concrete against this install. `turminder ask` takes `--purpose <p>`
+(default `chat`) and `--endpoint <name>` (an override pin), replacing the
+former `--class`.
 
 ### 10.7 Config drift detection
 
@@ -863,6 +950,72 @@ makes "configured ≠ served" a structural fact the system checks:
 - Unreachable endpoints at startup are not drift — they are the §8.3/
   degradation story and already logged; drift is the server *answering
   differently than configured*.
+
+### 10.8 The request log
+
+Every `llm_call` trace row (C.1) already carries who asked, which endpoint
+served it, and why (§10.6). What is missing is a way to *see* it, the same
+gap §4.2.1 closed for the event lifecycle — one list frame and one push
+frame over rows that were already being written, nothing else changes.
+
+- **What it shows** is one row per model call: `seq`, `at`, `purpose`,
+  `endpoint`, `tokens_in`, `tokens_out`, `cost`/`currency` (absent for a
+  costless endpoint, never `0.00` — §10.5), `duration_ms`, `stop_reason`,
+  `resolved_by`. **Nothing else, ever** — no prompt text, no tool args, no
+  result excerpts, no `model` id. A row is what the gateway wrote about the
+  call, never the call's content.
+- **It is a live window, not a log browser.** Recent N (App. A: last 100),
+  recent 24h. A full auditing surface — tool calls, filters, arbitrary
+  history search — is a different and larger feature, and is deliberately
+  not this one. Do not grow this into it.
+- **Push, not poll.** Every `llm_call` row written emits `call.made` to
+  `chat`-capable devices as it happens (App. D.2); the frame is transient
+  like `chat.activity` — a reconnecting client re-derives with `calls.list`,
+  requested on `welcome` alongside `event.list`.
+- The chat UI renders it as a "Requests" tab beside Files, Views and
+  Activity (§9.1) — same panel machinery, a different feed.
+
+### 10.9 Speech endpoints
+
+Speech is a model-layer concern like embeddings (§8.3): an endpoint of
+**kind `stt`** turns audio into text, one of **kind `tts`** turns text into
+audio, and both are entries in `models.yaml` (G.2) routed by purpose
+(§10.6 — `routes.stt`, `routes.tts`, `{endpoint}` only; default: the first
+endpoint of that kind). Neither is welded to a product: the wire dialect is
+the **OpenAI audio API** — `POST <url>/audio/transcriptions` (multipart
+`file` + `model`, optional `language`) and `POST <url>/audio/speech`
+(`{model, input, voice, response_format: "wav"}`) — which Speaches,
+openedai-speech, whisper.cpp's server, OpenAI and Groq all speak, so
+swapping a local whisper for a hosted transcriber is a URL and a key.
+(Christer, 2026-08-30.)
+
+- **Probed like every endpoint (§10.2), with a validated stimulus.** `stt`:
+  a checked-in 16 kHz WAV fixture with a known transcript, its RIFF header
+  and length walked by a guard test (the §26.3 lesson); the probe passes on
+  normalised word overlap with the transcript. `tts`: one short sentence;
+  the probe passes when the reply is a RIFF/WAVE body with a sane sample
+  rate and more than a few hundred milliseconds of samples. `turminder
+  models` lists both kinds; §10.7's drift check runs `GET /v1/models`
+  against them exactly as against chat endpoints.
+- **Every speech call goes through the gateway** (`transcribe`, `speak`),
+  so it is queued (§10.3) and traced. Speech rows are `llm_call` trace rows
+  (C.1) with `purpose: stt|tts`, zero tokens, and `audio_s` (seconds
+  transcribed or produced) or `chars` (characters spoken); they appear in
+  the request log (§10.8) and in `usage.summary` like any other call. No
+  second trace kind: a call to a model is a call to a model.
+- **Pricing is per kind** (G.2): `cost.per_minute` for `stt`,
+  `cost.per_kchar` for `tts`; absent means costless, reported as `local`,
+  never `0.00` (§10.5).
+- **Language rides from identity unless chosen:** `stt` is asked for the
+  endpoint's own `language` when one is set (by `setup.voice`, §33.5), else
+  the G.3 `locale`. A transcriber whose loaded model is monolingual is a
+  deployment fact the probe reports (its `/v1/models` row says so), not one
+  the assistant can fix.
+- **Configured by form, never by dictation** (§19): the `speech_endpoint`
+  template (F.9) collects kind, URL, key, model and voice, probes, then
+  writes G.2 through the same single writer the other templates use; the
+  transcriber's language and the speaking voice are changed afterwards by
+  `setup.voice` (§33.5), with a preview of each candidate voice.
 
 ---
 
@@ -1092,6 +1245,11 @@ it sits behind a per-command allowlist in the **daemon's own config**,
 enforced daemon-side — the server must never be able to grant itself
 execution on a client machine.
 
+Listening is not executing. A device that captures audio (§28.6) sends the
+server one utterance per trigger and receives audio back; the server still
+cannot make it do anything, and a spoken word cannot approve a `confirm`
+(§33.1) — a microphone in a room is not a device the user holds.
+
 ### 14.4 Setup and file-store containment
 
 1. **A stdio MCP server definition is arbitrary code execution.** Therefore
@@ -1267,6 +1425,26 @@ under their own grants.
   tunnel with a real name. Written down here so the next person to think "mDNS
   would be a nice touch" finds the argument rather than rediscovering it.
   (§28.2, §24.3)
+- **Voice approval of confirms** — a spoken "yes" approving a side effect.
+  Ruled out for v1 (Christer, 2026-08-30): a microphone in a room is not a
+  device the user holds (§14.3); a `confirm` raised by a voice turn is
+  *spoken* and approved on a screen (§33.3). Revisit with speaker
+  identification, not before.
+- **Barge-in** (interrupting the speaker by saying the wake word) and
+  **wake-word detectors beyond rustpotter** — openWakeWord via ONNX Runtime
+  is the candidate when accuracy on a trained phrase proves insufficient;
+  Porcupine is ruled out by its licence. (§28.6)
+- **Voice satellites** (an M5Stack Atom on an Echo Base, or a Wyoming-style
+  satellite) — the server half is device-agnostic by construction (§33): a
+  satellite is one more consumer of `/api/voice` and `/api/speak`, built when
+  someone owns the hardware. Parked 2026-08-30 for want of it.
+- **The browser UI's microphone button** — the second consumer of
+  `/api/voice`; lands once the shell's voice (§28.6) has soaked.
+- **Routing editable from chat** (a `setup.route` form rewriting
+  `routes:`) — the handler-routing form (F.6) covers the one place a model's
+  own choice had to be fenced; editing the purpose→route table itself is
+  hand-edited config for now, and `turminder models` is the read side.
+  (§10.6)
 
 ## 17. Decisions adopted with a flag
 
@@ -1482,6 +1660,16 @@ changes. Pasting a credential into the chat *text* box remains possible and
 remains wrong; the assistant's base prompts instruct it to request a form
 for credentials rather than accept them in conversation.
 
+**The principle this generalises:** a choice with consequences — a
+credential, a price, which model runs a behaviour — is collected by a form
+the code raises, never dictated by the model into tool arguments. The
+anti-telephone rule (§14.4.2) has a second reading here: the server composes
+what the human sees and what the code writes; the model only ever picks
+from a menu the form built. `setup.pricing` (F.9, §10.5) and the
+handler-routing form (F.6, §10.6) are both this principle applied, not two
+separate ideas — and it is what rules out `setup.route` (§16) as a bare
+tool taking `routes` as an argument.
+
 ### 19.3 Connector templates
 
 Shipped form definitions compiled into the service (like base prompts):
@@ -1493,8 +1681,13 @@ optional `description:` the §21.2.2 catalog reads), connect, probe the
 server's tool list, and return the outcome to the resumed run.
 The agent never writes `config/mcp.yaml` by any path (§14.4.1); the human
 submitting the template form — exact command/URL visible — is the install
-gate. `model_endpoint` reuses the §3b probe suite and appends to
-`models.yaml`.
+gate. `model_endpoint` reuses the §3b probe suite and appends a `kind: chat`
+entry to `models.yaml` — this template never writes `kind: embedding` or the
+legacy `embedding:` block (§10.1, §8.3). Its `classes` field prefills
+`fast and best` only when the file has no other chat endpoint yet; with one
+already configured the field opens with no prefill, because "fast and best"
+is a reasonable default for the first endpoint and furniture — or wrong —
+for a second, where the point is usually to split them (§10.6).
 
 ### 19.4 Access is granted, never assumed
 
@@ -3114,8 +3307,12 @@ page loads leaves a screen that claims to still be working.
 
 - **The webview loads the UI from the service** (`GET /`), never a
   bundled copy — one UI, zero drift, and every UI improvement reaches the
-  app with the service. The shell's own chrome is the tray, the connect
-  screen, and nothing else.
+  app with the service. The shell's own chrome is the tray and its menu,
+  the connect screen, and — when voice is enabled (§28.6) — the listening
+  overlay and the wake-word enrolment screen; nothing else. The connect
+  screen is reachable from the tray in every mode, not only on first run,
+  because the box with the GPU is often not the box with the microphone
+  (Christer, 2026-08-30).
 - **Auth bootstrap, bundled mode**: on first run the shell invokes the
   sidecar CLI `token create app` (§24.1) — in its own short-lived process,
   *before* the server starts, so the data dir is scaffolded once
@@ -3333,6 +3530,66 @@ here (§12.2): versioning is silently off, doctor says so, nothing
 prompts for Xcode. llama.cpp remains the primary *architecture* target
 (§10.1); this section is about the first five minutes of a user who
 will never compile anything.
+
+### 28.6 Voice in the shell
+
+The shell is the first voice device (§33): it has a microphone, a speaker,
+a Rust core holding the device token, and it sits on the desk all day.
+Voice is **opt-in** and lives in the shell's own state —
+`<app_config_dir>/voice.json`: enabled, wake word on/off, quiet mode, input
+and output device names, hotkey, sensitivity — shell state, never service
+config, the `mode.json` precedent of §28.1. (Christer, 2026-08-30.)
+
+- **Capture and playback are native**, in the Rust core (`cpal` in, `rodio`
+  out), never the webview: `getUserMedia` inside WKWebView and WebKitGTK is
+  inconsistent about permission and device choice, and control over both
+  is the point. **Input and output devices are chosen explicitly** — tray
+  submenus list what `cpal` enumerates and remember the choice by name;
+  when a remembered device is absent the shell falls back to the system
+  default and says so in the tray, rather than listening to nothing. A
+  machine with several audio devices is the normal case, not the edge.
+- **Two triggers.** *Push-to-talk*: a global hotkey
+  (`tauri-plugin-global-shortcut`); press, speak, release — the release is
+  the end of the utterance, no silence detection, the fastest path. *Wake
+  word*: a detector on the microphone stream in the Rust core, **on-device**
+  — `rustpotter`, trained from a handful of the user's own recordings of the
+  phrase, by default the instance's own name (G.3): pure Rust, no runtime,
+  no model download, no language, so a Norwegian name works as well as an
+  English one. Enrolment ("say the name five times") is a shell screen.
+  After the wake word: a short chime, then capture until
+  `voice_endpoint_silence_ms` of silence or `voice_max_utterance_s`
+  (App. A). A **follow-up window** of `voice_followup_s` after a reply
+  listens again without the wake word.
+- **The tray menu** gains *Wake word* (on/off — off leaves push-to-talk
+  working), *Quiet mode* (on/off), *Input device ▸*, *Output device ▸*, and
+  *Connect to another instance…* (§28.1). The tray icon shows the state:
+  idle, listening, thinking, speaking, quiet.
+- **Quiet mode** is do-not-disturb for the whole shell: no spoken replies to
+  deliveries, no native notifications, no chime. The hotkey still works —
+  the user pressing it is the opposite of being disturbed. Deliveries that
+  arrive while quiet are **held, not acked** (§7.1: a delivery nobody could
+  see stays unacked) and are rendered — and spoken, if voice is on — when
+  quiet mode ends, unless they have expired by then. Nothing is lost and
+  nothing is faked.
+- **Containment**, in the spirit of §28.3 and §14.3: audio lives in a ring
+  buffer in memory and is written nowhere; before a trigger fires nothing
+  leaves the machine — the detector runs locally and the stream is
+  discarded; after it, exactly one utterance goes to `POST /api/voice`
+  over the shell's ordinary bearer connection. The OS microphone indicator
+  is never suppressed; the macOS bundle carries
+  `NSMicrophoneUsageDescription`. The shell has no execute capability and
+  voice adds none: listening is input, like a keyboard.
+- **Spoken deliveries** (§33.3): with voice on and quiet off, a `delivery`
+  frame is rendered natively as today *and* fetched as speech via
+  `POST /api/speak` and played; the ack is sent once, after display, as
+  today. The shell says `voice` in its `hello` capabilities when voice is on.
+- **Both modes.** Voice works identically in bundled and connect mode; the
+  routes are the service's and the token is the shell's. Connect mode is
+  what puts the model on the box with the GPU and the microphone on the desk.
+- **Dependencies** are app-tier (App. J): `cpal`, `rodio`, `rustpotter`,
+  `tauri-plugin-global-shortcut`, pinned in `app/Cargo.lock`. Linux first,
+  as §28 says — PipeWire and PulseAudio through `cpal`. Barge-in, voice
+  approval of confirms, and detectors beyond rustpotter are §16.
 
 ---
 
@@ -3998,6 +4255,126 @@ dated tags buries the releases people want among three hundred they do not.
 
 ---
 
+## 33. Voice
+
+Speaking to the assistant is chat with a different mouth. The audio is
+moved by the server and never narrated by the model (§26's rule), the
+transcript is an ordinary `chat.message` on an ordinary conversation, the
+reply is an ordinary run, and what the speaker hears is that reply read
+aloud by a `tts` endpoint (§10.9). Nothing here is a second loop. The first
+voice device is the desktop shell (§28.6); the browser UI's microphone
+button and any satellite are further consumers of the same two routes
+(§16). Push-to-talk is the v1 trigger; a wake word is the device's concern.
+(Christer, 2026-08-29/30.)
+
+### 33.1 The voice conversation
+
+- Each voice device owns **one open voice conversation at a time**:
+  `conversations.voice_device` (App. C, migration 013) names it. A new
+  utterance goes to that conversation unless it has been idle longer than
+  `voice_idle_min` (App. A), in which case a fresh one is opened — the
+  follow-up window at the conversation level. The chat UI lists it like
+  any other, labelled (`conversation.mode` reports `voice`, derived from
+  the column, D.2), so what the room heard and what it answered is
+  readable, searchable (§25) and distilled (§8.2) like everything else.
+  Only the user closes it (§9).
+- **Voice conversations speak differently.** The `chat` base prompt gains
+  the `{{voice}}` fragment (H.5) — plain speech, one or two sentences, no
+  markdown, lists, links or embeds, say when you used a tool — for the
+  life of the conversation, so the system prompt stays byte-stable and the
+  prefix cache holds (§20.5). Effort pins `none` where the serving endpoint
+  declares it (§10.6). Routing is otherwise the `chat` route; a voice
+  conversation may carry a model override like any other.
+- **Nothing about tools changes.** The voice turn has the chat grant; the
+  tiers and confirms of §11.3 apply. A `confirm` raised by a voice turn is
+  delivered and *spoken* (§33.3) but **never approved by voice** in v1 —
+  a microphone in a room is not a device the user holds (§14.3, §16).
+
+### 33.2 `POST /api/voice` — one utterance in, one reply out
+
+The request/reply adapter (App. E): bearer device token; the body is
+`audio/wav` (16 kHz mono 16-bit preferred; the server accepts what its
+`stt` endpoint accepts) up to `voice_max_utterance_s`; the response is
+`audio/wav` streamed as it is produced, with the transcript and the
+conversation id in response headers so a client can show what was heard.
+
+1. **Transcribe** via the `stt` route. Empty text, audio shorter than
+   `stt_min_audio_ms`, or a known silence hallucination (the "Thank you."
+   family — a short list in code) → `422 {error: "nothing_heard"}`: nothing
+   is written, no run starts. A transcriber hallucinating on silence is not
+   a message from the user.
+2. **One `chat.message`** on the device's voice conversation (§33.1), source
+   = the authenticated device, `chat.accepted` semantics as D.1, interactive
+   priority.
+3. **Sentence-chunked speech.** As `chat.delta`s arrive the adapter splits
+   on sentence boundaries, sends each sentence to the `tts` route, and
+   appends the audio to the response the moment it is back — the speaker
+   starts after the first sentence, not after the whole answer. Piper
+   renders at several times real time; generation runs at tens of tokens
+   per second; speech plays at about 2.5 words per second, so after the
+   first sentence the stream never starves. Reasoning is never spoken
+   (§20.1); reserved markers are stripped before speech (§20.8).
+4. A run that fails mid-way ends the stream with the spoken sentence
+   "Sorry, that went wrong" and the ordinary `chat.error`; a run suspended
+   for a `confirm` speaks that it is waiting for approval on a screen, and
+   ends.
+
+### 33.3 Spoken deliveries
+
+A `voice`-capable device (§7.2) reads deliveries aloud. **What it says is
+the server's composition**, never the device's: `POST /api/speak
+{delivery_id}` (App. E) returns the spoken form of a delivery the device
+holds, as WAV. For `notify`, the spoken form is the payload's `spoken` when
+the handler supplied one (F.3 — a handler knows that "Invoice from
+Hafslund, two thousand three hundred kroner, due Friday — filed under
+bills" and the three-line body it wrote are different sentences), else
+`"<title>. <body>"`. `spoken` is capped at `spoken_max_chars` (App. A) and
+is assistant-authored, as notifications already are. For `confirm`, the
+spoken form is composed entirely server-side like the rest of D.3: the
+title, then `args_summary`, then "Approve or deny on a screen." Spoken text
+never carries a secret (§27) because `args_summary` never does. A device
+speaks a delivery at most once and acks it as it does today; quiet mode
+(§28.6) is the device's business.
+
+### 33.4 Latency, measured
+
+Voice is judged from the moment the user stops talking to the first word
+back. Measured against the reference install 2026-08-30 (Qwen3.8-27B on
+vLLM, Speaches, openedai-speech with piper): end-pointing 0.6–0.8 s,
+upload ~0.05 s, transcription 0.3–0.5 s with the transcriber on the GPU
+(3.9–5.3 s when it is not), intake and recall ~0.2 s (the embedding call is
+~30 ms), first token 0.1–0.3 s with a warm prefix cache (2.2–2.4 s without
+one, for a 6.5k-token prompt), first sentence ~0.35 s at ~55 tok/s, first
+speech ~0.1 s. **Budget: ≤ 3 s to the first spoken word on the reference
+box with no tools**, which holds only with the transcriber on the GPU and
+prefix caching on; each tool call adds ~1–1.5 s (a second prefill and
+decode). Thinking must be off (§10.6 `none`). The phase's exit criterion
+re-measures this; the number is not carried on faith.
+
+### 33.5 Configuring voice from chat
+
+Which language the transcriber listens for and which voice the assistant
+speaks with are choices with consequences, so they are **collected by a
+form the code raises** (§19) and reachable by asking — "speak Norwegian",
+"use a different voice" (Christer, 2026-08-30). `setup.voice` (F.9) opens
+one form: `language`, a select of the transcriber's languages with the
+identity's `locale` (G.3) preselected, written to the `stt` endpoint's
+`language` (G.2; absent means the locale, `auto` means let the transcriber
+detect); and `voice`, a `voice`-typed field (D.5) — a select of the voices
+the `tts` endpoint lists, or the OpenAI six when it lists none, the
+configured voice always among them — with a **preview** button beside it
+that plays `GET /api/voice/preview?voice=<name>` (App. E): the fixed
+sentence of App. A in that voice, through the same `tts` route, traced and
+priced like any speech call. Submit writes both entries in `models.yaml`
+through the templates' one writer and reloads; cancel writes nothing.
+Adding or replacing a speech endpoint is the `speech_endpoint` template
+(§10.9). **Shell-side settings are not reachable from chat** — wake word,
+quiet mode, audio devices and the hotkey are shell state (§28.6, §28.1):
+the daemon is display-and-ack (§14.3) and the server does not flip
+switches on a client machine; the assistant can say where the tray menu is.
+
+---
+
 # Appendices — normative implementation detail
 
 These appendices are binding. Where an appendix is more specific than the
@@ -4064,6 +4441,14 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Upload TTL (`upload_ttl_days`) | 30 days | §26.1 |
 | Upload accepted types | png, jpeg, webp, gif | §26.1 |
 | Image context window (`image_context_turns`) | last 2 user turns, then marker | §26.3 |
+| `voice_max_utterance_s` | 30s | §33.2 — longer audio is refused `413` |
+| `stt_min_audio_ms` | 300ms | §33.2 — shorter is `nothing_heard` |
+| `voice_idle_min` | 10 min | §33.1 — a quiet voice conversation rolls over to a new one |
+| `spoken_max_chars` | 300 chars | §33.3 — cap on `deliver.notify` `spoken` |
+| `voice_endpoint_silence_ms` | 700ms | §28.6 — shell end-pointing (shell state, not G.1) |
+| `voice_followup_s` | 8s | §28.6 — shell follow-up window (shell state, not G.1) |
+| Voice first-word budget | ≤ 3s on the reference box, no tools | §33.4 — an exit criterion, measured, not enforced |
+| Voice preview sentence | "Hello — I'm <instance name>. This is how I sound." | §33.5 — the only text `GET /api/voice/preview` ever speaks |
 | Secret value cap (`secret_value_max_kb`) | 64 KB per value (JSON blobs welcome) | §27.1 |
 | Capture content cap (`capture_max_chars`) | 100,000 chars | §29.3 |
 | Capture field cap (`capture_field_max_chars`) | 4000 chars per matcher field | §29.3 |
@@ -4074,6 +4459,7 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Watcher failure threshold (`watch_failure_threshold`) | 5 consecutive poll failures → `watch.failed`, edge-triggered | §30.2 |
 | Watcher poll timeout | the §23.2 binding call timeout (10s), same constant | §30.1 |
 | SPA text floor (`spa_text_floor_chars`) | 500 chars extracted (with markup > 10×) → JS-rendered note | §20.9, App. F.5 |
+| Request log window (`request_log_window`) | last 100 calls, 24h; `limit` clamps to 200 | §10.8 |
 
 All of these are overridable in `config/turminder.yaml` (Appendix G.1) under
 the keys named there; the table above is the shipped default set.
@@ -4350,18 +4736,46 @@ Added by the effort-override migration (§10.6; migration 009):
 ALTER TABLE conversations ADD COLUMN effort_override TEXT;  -- low|medium|high|xhigh or NULL
 ```
 
+Added by migration 012 (§10.8):
+
+```sql
+CREATE INDEX ix_trace_kind_at ON trace(kind, at);
+```
+
+The request log's `recentCalls()` and the existing `usage()` query both
+filter `trace` by `kind` and `at`; the table had only `ix_trace_event`
+(`event_id`), which most `llm_call` rows lack.
+
+Added by the voice migration (§33.1; migration 013):
+
+```sql
+ALTER TABLE conversations ADD COLUMN voice_device TEXT;  -- device id that speaks this conversation; NULL for typed ones
+```
+
+A voice conversation is an ordinary conversation with a mouth: `mode`
+stays `normal`, and D.2's `conversation.mode` reports `voice` by
+derivation. A column rather than a new `mode` value, because SQLite cannot
+widen a CHECK without rebuilding the table, and because the device name is
+the fact worth keeping.
+
 ### C.1 Trace `data` shapes (by `kind`)
 
 - `verdict` — `{handler, offered: true, matched: bool, reason}` (one row per
   handler offered; §5.3)
-- `llm_call` — `{model, priority, queue_wait_ms, duration_ms, tokens_in,
-  tokens_out, stop_reason, prompt_evaluated?, endpoint, requested_class,
-  resolved_by, cost?, currency?}` — `prompt_evaluated` is
+- `llm_call` — `{model, priority, purpose, queue_wait_ms, duration_ms,
+  tokens_in, tokens_out, stop_reason, prompt_evaluated?, endpoint,
+  requested_class?, resolved_by, cost?, currency?}` — `prompt_evaluated` is
   llama.cpp `timings.prompt_n` when the endpoint sent it (§21.1); absent
-  otherwise. `endpoint`/`requested_class`/`resolved_by` record the §10.6
-  routing decision; `cost` is stamped at call time from the endpoint's
+  otherwise. `purpose`/`endpoint`/`requested_class`/
+  `resolved_by: "override"|"frontmatter"|"route"|"kind_default"` record the
+  §10.6 routing decision; `cost` is stamped at call time from the endpoint's
   G.2 pricing (§10.5), absent for costless endpoints. Rows predating
-  these fields simply lack them.
+  these fields simply lack them — the request log (§10.8) and `usage.summary`
+  (F.17) both read a missing `purpose`/`resolved_by` as `"unknown"` rather
+  than guessing. Speech calls (§10.9) are the same kind with
+  `purpose: stt|tts`, zero tokens, and `audio_s` (seconds transcribed or
+  produced) or `chars` (characters spoken); `cost` is stamped from the
+  per-kind price.
 - `tool_call` — `{tool, args, ok: bool, result_excerpt, duration_ms,
   denied?: 'not_granted'|'confirm_denied'|'confirm_timeout',
   implicit_open?: string, futile_streak?: int}` — `result_excerpt` is
@@ -4425,7 +4839,7 @@ server closes.
 | `token.list` | `{}` | `token.list.result {devices: [{device, label?, created_at?, last_seen}]}` — metadata only, **never token values** (§24.1) |
 | `token.create` | `{device, label?}` | `token.reveal` (D.2) — the UI's "connect a device" (§24.3), driving the same create-blind machinery as `setup.token_create` rather than a second writer of G.4. The value is in the reveal and nowhere else; a duplicate name → `error(bad_frame)` naming the clash |
 | `token.revoke` | `{device}` | `token.revoked {device}` — removes the row and closes that device's live sessions immediately (§24.1); the user holding a device token is the confirmation, per the `embed.promote` precedent |
-| `conversation.list` | `{}` | `conversation.list.result {conversations: [{id, title, status, mode, last_activity_at}]}` |
+| `conversation.list` | `{}` | `conversation.list.result {conversations: [{id, title, status, mode, last_activity_at, voice_device?}]}` — `voice_device` names the device speaking to a voice conversation (§33.1); `mode` reads `voice` for those, by derivation |
 | `conversation.close` | `{conversation_id}` | `conversation.closed {conversation_id}` |
 | `files.list` | `{dir?, glob?}` | `files.list.result {dir, entries}` — the F.8 listing shape, for the file panel (§18.5). Catalogued retroactively: these four frames shipped with phase 12 and D.1 never recorded them |
 | `files.read` | `{path}` | `files.read.result` — the F.8 read shape (including `mime`, F.8) |
@@ -4441,8 +4855,11 @@ server closes.
 | `embed.promote` | `{embed_id}` | `embed.promoted {embed_id, kind: "persistent"}` — the UI's "keep" action (§22.1). The user holding the device token *is* the confirmation; the `confirm` tier on `embeds.promote` gates the model, not them |
 | `embed.demote` | `{embed_id}` | `embed.demoted {embed_id, kind: "ephemeral"}` — the UI's "unkeep" action (§22.1), the mirror of `embed.promote` and authorised the same way. Not a delete: the view and its scoped link keep working, the file returns to the gitignored `tmp/` (so the commit records a removal), and the row is once again reapable. Idempotent — unkeeping something already ephemeral is a no-op that reports success |
 | `event.list` | `{status?: "pending"\|"dead_letter"\|"all", limit?=50}` | `event.list.result` (D.2) — the activity panel's read over the event lifecycle (§4.2.1). `pending` (the default) is everything unsettled — `received\|matched\|processing\|failed` **and** `dead_letter`, because both are outcomes still owed; `dead_letter` narrows to the bucket that does not clear itself; `all` adds recently settled rows within the window. `chat`-capable devices only. **No event payload crosses this frame** — an event payload is untrusted content (§1.1, H.2) and the row carries the ingress-written `summary` instead |
+| `calls.list` | `{limit?=100}` | `calls.list.result` (D.2) — the request log's read over `llm_call` rows (§10.8): last 100 within 24h (App. A), `limit` clamped to 200. `chat`-capable devices only, else `error(bad_frame)` |
 
-`capabilities` values (v1): `"notify.actions"`, `"chat"`, `"forms"`.
+`capabilities` values (v1): `"notify.actions"`, `"chat"`, `"forms"`,
+`"voice"` — the last marks a device that reads deliveries aloud via
+`POST /api/speak` (§33.3, §28.6); it changes nothing about what it is sent.
 `last_seen` is the
 highest delivery `seq` the device has ever acked (0 for never). On
 `welcome`, the server replays all deliveries with `seq > last_seen`,
@@ -4462,12 +4879,14 @@ expired is marked `expired` at that moment.
 | `chat.activity` | `{conversation_id, run_id, activity}` — what the run is doing now (queued, thinking, reasoning, tool_call, tool_result, usage, stopped); transient, never persisted |
 | `chat.usage` | `{conversation_id, run_id, model, turns, context_used, prompt_evaluated, billed_with_timings, tokens_in, tokens_out, context_size, conversation_tokens_in, conversation_tokens_out, duration_ms, queue_wait_ms, cost: {run, conversation, currency}\|null}` — `cost` per §10.5 (null when every call in scope was costless; always an estimate from configured prices, rendered as "est."). §21.1: `context_used` is the peak single-turn prompt (the headline), `tokens_in`/`tokens_out` are cumulative billing (secondary). `prompt_evaluated` is null when the endpoint sent no `timings`; `billed_with_timings` is the prompt total those turns account for, so cache-hit % is computed over the turns it actually covers rather than over the whole run |
 | `chat.error` | `{conversation_id, message}` |
-| `conversation.mode` | `{conversation_id, mode}` — sent when a conversation is in `onboarding` mode so the UI can label it |
+| `conversation.mode` | `{conversation_id, mode}` — sent when a conversation is in `onboarding` mode, or is a voice conversation (`mode: "voice"`, derived from `voice_device`, §33.1), so the UI can label it |
 | `form.request` | `{form_id, run_id, conversation_id, title, template?, fields: [FieldSpec]}` — see D.5 |
 | `embed.resolve.result` / `embed.manifest.result` / `embed.list.result` / `embed.promoted` / `embed.demoted` | as in D.1 |
 | `embed.changed` | `{embed_id}` — the embed's content or bound data changed and anything rendering it is a version behind (§22.6); sent to `chat`-capable devices, transient like `files.changed`. Not sent for state-pouch writes |
 | `event.list.result` | `{events: [{id, type, source, summary, status, attempts, next_attempt_at, received_at, last_error}], deliveries: [{delivery_id, intent, title, status, expires_at}]}` — what the system owes you an outcome for, and what owes it a click (§4.2.1). `deliveries` are the `queued\|delivered` rows carrying actions: a `confirm` raised while you were reading another conversation is otherwise a thing you have to remember. `summary` and `last_error` are server-written; **no payload, ever** |
 | `event.status` | `{id, type, source, summary, status, attempts, next_attempt_at, received_at, last_error}` — one event moved (§4.2.1), pushed to `chat`-capable devices as it happens rather than polled, exactly like `chat.activity`. Transient: a client that missed one re-derives with `event.list`. Sent for **every** transition the lifecycle defines, `dead_letter` included, and for arrival — a row that appears only once it is already running cannot show you a queue |
+| `calls.list.result` | `{calls: [row]}` — the request log's live window (§10.8), newest first. `row = {seq, at, purpose, endpoint, tokens_in, tokens_out, cost?, currency?, duration_ms, stop_reason, resolved_by}`. **Nothing else, ever** — no prompt text, no tool args, no result excerpts, no `model` id |
+| `call.made` | one `row` (same shape as `calls.list.result`'s), pushed to `chat`-capable devices as each `llm_call` trace row is written (§10.8), exactly like `event.status`. Transient: a client that missed one re-derives with `calls.list` |
 | `token.list.result` / `token.revoked` | as in D.1 |
 | `files.list.result` / `files.read.result` / `files.saved` | as in D.1 |
 | `models.list.result` / `conversation.model.set` | as in D.1 |
@@ -4479,7 +4898,9 @@ Error codes: `auth_failed`, `not_ready`, `bad_frame`, `unknown_type`,
 
 ### D.3 Delivery payload shapes
 
-- `notify`: `{title, body, actions?: [{id, label}], data?}`
+- `notify`: `{title, body, spoken?, actions?: [{id, label}], data?}` —
+  `spoken` is the handler-authored sentence a `voice` device reads instead
+  of title and body (§33.3, F.3); devices without a voice ignore it
 - `confirm`: `{title, body, run_id, tool, args_summary,
   details: [{label, value}],
   actions: [{id:"approve", label:"Approve"}, {id:"deny", label:"Deny"}]}`
@@ -4520,10 +4941,14 @@ code path above the transport interface (§7.3).
 ### D.5 Forms (§19)
 
 `FieldSpec`: `{name, label,
-type: "text"|"url"|"number"|"select"|"secret"|"choice",
-required?: bool=true, value?: prefill, options?: [string] (select and
-choice), secret_key?: string (required for secret fields — the target key
-in secrets/secrets.yaml)}`. A `choice` renders its options as a **button
+type: "text"|"url"|"number"|"select"|"secret"|"choice"|"voice",
+required?: bool=true, value?: prefill, options?: [string] (select, choice
+and voice), secret_key?: string (required for secret fields — the target key
+in secrets/secrets.yaml)}`. A `voice` field is a select whose current
+option can be **previewed**: a play button fetches
+`GET /api/voice/preview?voice=<value>` with the device token and plays it
+inline (§33.5); validation is select's, and a surface that cannot play
+audio renders it as a plain select. A `choice` renders its options as a **button
 row** — one click sets the value and submits the form (the UI hides the
 Submit button when every field is a choice); validation is select's:
 the submitted value must be one of the options.
@@ -4581,6 +5006,9 @@ localStorage and uses it for `/ws`.
 | `GET /api/files/raw?path=` | bearer auth; serves a file-store file `Content-Disposition: inline`, `X-Content-Type-Options: nosniff` — the §18.5 preview source. Images and PDFs get their real Content-Type; **HTML is never served as HTML** and SVG carries `Content-Security-Policy: default-src 'none'` — a store file may be assistant-authored and this route answers on the origin holding the device token, so anything else is served `text/plain` (assistant-authored pages run in the §22.3 embed sandbox, never here). Path normalization + symlink rules are F.8's, through the same resolution code (one door); traversal → 403, unknown or a directory → 404, no `path` → 400. The UI fetches with the bearer token and object-URLs the blob (an `<img>`/`<embed>` src cannot carry an Authorization header) |
 | `POST /api/uploads` | bearer auth; body = the file (`Content-Type` + `X-Upload-Name` headers) → `{upload_id, sha256, mime, bytes}` (§26.1). Type outside the whitelist → 415 `{error: "unsupported_media_type"}`; over `upload_max_mb` → 413 `{error: "too_large"}` |
 | `GET /api/uploads/<id>` | bearer auth; the stored bytes, real Content-Type, inline — transcript re-display (§26.2). Expired/unknown → 404 |
+| `POST /api/voice` | bearer auth; body `audio/wav` (16 kHz mono preferred) up to `voice_max_utterance_s` → `audio/wav`, chunked, produced sentence by sentence (§33.2); response headers `X-Turminder-Conversation` (the voice conversation id) and `X-Turminder-Transcript` (what was heard, RFC 8187-encoded). `413 {error: "too_long"}`, `415 {error: "unsupported_media_type"}`, `422 {error: "nothing_heard"}` (empty, too short, or a silence hallucination — nothing written, no run), `503 {error: "no_speech_endpoint", kind}` naming the missing kind |
+| `POST /api/speak` | bearer auth; `{delivery_id}` → `audio/wav`, the server-composed spoken form of a delivery (§33.3). `404` unknown, `410 {error: "expired"}`, `503 {error: "no_speech_endpoint", kind: "tts"}`. Takes an id, never free text: the shell is not a text-to-speech proxy |
+| `GET /api/voice/preview?voice=<name>` | bearer auth → `audio/wav`: the App. A preview sentence spoken in that voice by the `tts` route (§33.5). The text is the server's; the voice name is the only input. `400 {error: "unknown_voice"}` when the endpoint lists voices and this is not one; `503 {error: "no_speech_endpoint", kind: "tts"}` |
 
 The `/embed*` routes are authenticated by the per-embed scoped token in `t`
 (§22.3.4) and **never** by a device token — the two auth models must not meet.
@@ -4649,7 +5077,7 @@ Every `se` call performs a git commit; commit message =
 
 | tool | tier | args | returns |
 |---|---|---|---|
-| `deliver.notify` | se | `{title: string, body: string, actions?: [{id, label}], ttl_s?: int}` | `{delivery_id}` |
+| `deliver.notify` | se | `{title: string, body: string, spoken?: string (≤ `spoken_max_chars`; the one sentence a speaker says instead of title and body, §33.3), actions?: [{id, label}], ttl_s?: int}` | `{delivery_id}` |
 
 `confirm` deliveries are NOT a tool — they are created by the dispatcher
 itself during the §11.3 confirmation round-trip. No model ever requests one.
@@ -4719,7 +5147,7 @@ itself during the §11.3 confirmation round-trip. No model ever requests one.
 
 | tool | tier | args | returns |
 |---|---|---|---|
-| `config.write` | se | `{path: string, content: string, message: string}` | `{path, committed: true}` |
+| `config.write` | se | `{path: string, content: string, message: string, rechoose_routing?: bool}` | `{path, committed: true}`, or for `handlers/*.md`: `{path, committed, routing: {chosen_by: "user"\|"table"\|"kept", endpoint?, class?, effort?, note?}, ignored: string[]}` |
 | `config.read` | ro | `{path: string}` | `{path, content}` |
 
 `path` is data-dir-relative and MUST resolve (after normalization, symlinks
@@ -4732,6 +5160,32 @@ form flow, §14.4.1), **`config/integrations.yaml`** (written only by the
 activation flows, §19.6), **`config/grants.yaml`** (written only by
 `setup.request_access`, §19.4), and **`config/channels.yaml`** (device tokens
 are CLI-managed, App. E). `message` becomes the git commit message.
+
+**`handlers/*.md` is the one carve-out with logic, not just a path fence**
+(§10.6, §19.2): `model_class`, `endpoint` and `effort` are never accepted
+from the model. Every write to a handler file strips those three keys from
+whatever the model sent (`ignored` names which of them it found, so the
+model learns to stop) and decides them itself:
+
+- **No real choice, or a choice already made and not being reconsidered** —
+  the file is written with no routing keys (`chosen_by: "table"`, the
+  purpose route or kind-default table decides at call time) or with
+  whatever a human already chose, unchanged (`chosen_by: "kept"`). Neither
+  case raises a form.
+- **A real choice exists** — more than one `kind: chat` endpoint configured,
+  or the endpoint that would serve declares a reasoning effort — **and**
+  either the file is new, it currently carries no routing keys, or the call
+  passed `rechoose_routing: true`: a form is raised (D.5 `select` fields:
+  which model, and — only when some chat endpoint declares one — which
+  effort, `"endpoint default"` first). `chosen_by: "user"`; an effort the
+  chosen endpoint does not declare is silently dropped, said in `note`.
+- **No conversation to raise a form in** → `{error: "no_conversation"}`; no
+  run to suspend → `{error: "no_run"}`. Both refusals **write nothing**.
+- **Cancelled or timed out** → `{submitted: false, reason}`, and the file is
+  untouched — absent if it was new, byte-identical if it already existed.
+
+Only a human editing `handlers/*.md` directly sets these keys without the
+form; `HandlerFrontmatterSchema` and `validateWrite` are unchanged (G.7).
 
 ### F.7 Dispatcher mechanics (§11.4, normative)
 
@@ -4785,7 +5239,7 @@ committing flow (memory, config, embeds).
 
 | tool | tier | args | returns |
 |---|---|---|---|
-| `setup.form` | se | `{template?: "mcp_stdio"\|"mcp_http"\|"model_endpoint", title: string, embed_id?: string (render that embed in the form as a preview, App. D.5), fields?: [FieldSpec] (generic form when no template; templates supply their own fields, `fields` entries then override prefills by name)}` | `{submitted: true, values: {…non-secret…}, secrets: {field: "${secret:KEY}"}, effect?: {…template outcome, e.g. mcp: {connected, tools: […]}}}` or `{submitted: false, reason: "cancelled"\|"timeout"}` |
+| `setup.form` | se | `{template?: "mcp_stdio"\|"mcp_http"\|"model_endpoint"\|"speech_endpoint" (§10.9: kind `stt`\|`tts`, url, key, model, voice — probed before anything is written), title: string, embed_id?: string (render that embed in the form as a preview, App. D.5), fields?: [FieldSpec] (generic form when no template; templates supply their own fields, `fields` entries then override prefills by name)}` | `{submitted: true, values: {…non-secret…}, secrets: {field: "${secret:KEY}"}, effect?: {…template outcome, e.g. mcp: {connected, tools: […]}}}` or `{submitted: false, reason: "cancelled"\|"timeout"}` |
 | `setup.request_access` | se | `{tools: [string] (names or globs), reason: string, description?: string}` | `{granted: true, level: "tools"\|"confirm", patterns: [...], tools: [...]}` or `{granted: false, reason}`; `{error: "nothing_to_grant"\|"unknown_tools"}` when there is nothing to ask for (§19.4) |
 | `setup.list_integrations` | ro | `{}` | `{integrations: [{name, description, activation, active: bool, provides}], mcp_servers: [{name, transport, connected: bool, granted: [...]}], ungranted_tools: [...]}` (§19.6) — `connected` and `granted` are different questions (§19.4) |
 | `setup.activate` | se | `{integration: string, prefill?: {name: value}}` | activation-form round-trip (§19.6); returns the activation outcome, or `{pending: true, auth_url}` for `oauth` integrations, or `{submitted: false, …}` |
@@ -4795,6 +5249,7 @@ committing flow (memory, config, embeds).
 | `setup.token_create` | se | `{device: string, label?: string}` | `{device, label, created: true, revealed_to_user: true}` — the value itself goes to the user in a one-time `token.reveal` frame and is **never** in the result, the trace, or any persisted turn (§24.2). `{error: "device_exists"}` on a name collision; `{error: "no_reveal_target"}` (and no row written) when no connected chat-capable device can receive the reveal |
 | `setup.pair_approve` | se | `{code: string, device: string, label?: string}` | `{device, label, approved: true, delivered_to_device: true}` — approves a device that asked to be paired from its own gate (§24.4); the value goes straight to that device and is **never** in the result, the trace, or any persisted turn. `{error: "no_such_request"}` on an unknown or expired code (no row written), `{error: "already_approved"}`, `{error: "device_exists"}` on a name collision or `{error: "bad_device_name"}` on an unusable one (the request survives either, so another name still works). There is deliberately no tool that lists pending requests — the code comes from the human |
 | `setup.pricing` | se | `{endpoint?: string}` | `{submitted: true, endpoint, cost: {in_per_mtok, out_per_mtok, currency}\|null, committed: bool, models_loaded: bool, note}` or `{submitted: false, reason}`; `{error: "unknown_endpoint"\|"no_endpoints"\|"no_conversation"\|"no_run"}`, and `{submitted: true, priced: false, error: "bad_price"}` when the typed figures do not validate — **nothing is written in any error case**. A form round-trip (§19.1), prefilled from the current block so it reads as an edit: three numbers a human types, because three numbers and a currency dictated by a model into a tool call is the anti-telephone problem with money attached. Omitting `endpoint` with more than one configured makes the form lead with a select. Carries an explicit **"no — local or free"** choice that removes the `cost` block, without which a mistyped price is permanent and §10.5's distinction between *free* and *unpriced* is unreachable from the surface that created it. Writes G.2 through the same `writeRaw` + git-commit + `reloadModels()` path the templates use — one writer, not two |
+| `setup.voice` | se | `{}` | `{submitted: true, language, voice, committed: bool}` or `{submitted: false, reason}`; `{error: "no_speech_endpoint", kind}` when there is no `stt` or `tts` endpoint to configure (the answer is the `speech_endpoint` template), `{error: "no_conversation"\|"no_run"}` — one form (§33.5): `language` (select, prefilled from the `stt` entry or the identity locale; `auto` = let the transcriber detect), `voice` (D.5 `voice` type, previewable, prefilled from the `tts` entry, options from the endpoint's voice listing or the OpenAI six). Writes both G.2 entries through `writeRaw` + reload; **nothing is written on cancel or timeout** |
 | `setup.rename` | se | `{name: string, story?: string (a new identity body — the self-description prose; omitted, the old body keeps with whole-word occurrences of the old name swapped for the new)}` | `{name, previous, updated: "config/identity.md", committed: bool, old_name_still_in: [paths], note}` — renames the instance: one validated, committed rewrite of `config/identity.md` (frontmatter `instance_name` + body), then a scan of `config/personality.md` and `memory/*.md` reporting where the old name still appears — the model curates those with its own grants (`memory.update`, prose is judgment) rather than a tool sed-ing curated text. `{error: "not_onboarded"}` before an identity exists; `{error: "same_name"}` when nothing would change. Chat gets it via the default `setup.*` grant — the rename no longer needs onboarding's `config.write`. Connected screens learn the name at `hello`, so they show the new one after their next reconnect |
 
 Suspension per F.7/D.5. Template and activation submissions execute their
@@ -4908,7 +5363,7 @@ never widen it (the RunGrants registry is the arbiter, as for bindings).
 
 | tool | tier | args | returns |
 |---|---|---|---|
-| `usage.summary` | ro | `{period?: "day"\|"week"\|"month"\|"all"="month", group_by?: "endpoint"\|"kind"\|"none"="endpoint"}` | `{period, from, to, groups: [{key, calls, tokens_in, tokens_out, cost?, currency?}], total: {calls, tokens_in, tokens_out, cost?, currency?}}` — SUM over `llm_call` trace rows (§10.5); costless calls count tokens but no cost; mixed currencies group separately rather than pretending to add |
+| `usage.summary` | ro | `{period?: "day"\|"week"\|"month"\|"all"="month", group_by?: "endpoint"\|"kind"\|"purpose"\|"none"="endpoint"}` | `{period, from, to, groups: [{key, calls, tokens_in, tokens_out, cost?, currency?}], total: {calls, tokens_in, tokens_out, cost?, currency?}}` — SUM over `llm_call` trace rows (§10.5); costless calls count tokens but no cost; mixed currencies group separately rather than pretending to add. `group_by: "purpose"` (§10.6) keys on the row's `purpose`, `"unknown"` for rows written before it existed |
 
 One tool, deliberately: the running ledger is a query, and this is the
 query with a stable shape. `ro`, so a cost dashboard is an embed binding
@@ -4979,6 +5434,9 @@ gateway:
 secrets:                  # §27.1
   backend: auto           # auto | os | gpg | plain — pinned concretely at onboarding
   gpg_key: null           # recipient key id, gpg backend only
+voice:                    # §33 — the transcriber's language and the speaking voice
+  idle_min: 10            #   live on the stt/tts entries in models.yaml (G.2, setup.voice)
+  max_utterance_s: 30
 retention_days: 90
 ```
 
@@ -4987,8 +5445,9 @@ retention_days: 90
 ```yaml
 endpoints:
   - name: main                    # unique
-    url: http://localhost:8080/v1 # OpenAI-compatible base
+    url: http://localhost:8080/v1 # OpenAI-compatible base — chat's url convention is .../v1
     api_key: ${secret:MAIN_KEY}   # optional; ${secret:X} from the secret store (§27)
+    kind: chat                    # chat | embedding (§10.1); default chat
     classes: [fast, best]
     caps: [json, tools]           # probe-derived (§10.2); manual edits allowed
     context_size: 32768           # probe-derived
@@ -4997,9 +5456,49 @@ endpoints:
       out_per_mtok: 15.0
       currency: USD
     efforts: [low, high, xhigh]   # §10.6 — reasoning levels this model honors; omit = knob never sent
-embedding:
-  url: http://localhost:8080
-  # llama.cpp /embedding endpoint (§8.3)
+  - name: embedding
+    kind: embedding                # a vector server (§8.3); takes no classes, caps, efforts or cost
+    url: http://localhost:8080     # llama.cpp /embedding endpoint — the server root; a trailing /v1 is tolerated and stripped
+routes:                            # purpose -> class or endpoint (§10.6). First-run setup writes this
+  chat: { class: best }            # block explicitly (Christer, 2026-08-30) — the file shows what
+  handler: { class: fast }         # goes where from day one; `turminder models` prints the resolved
+  ingress: { class: fast }         # table against it. Absent purposes fall back to the kind-default
+  distill: { class: best }         # table (§10.6); `embedding` accepts {endpoint} only, never {class}.
+  title: { class: fast }
+  memory: { class: fast }
+  embedding: { endpoint: embedding }
+```
+
+A pre-this-track file's top-level `embedding:` block heals into a
+`kind: embedding` endpoint plus this `routes.embedding` on the next boot
+(§10.1) — the block above is never written new.
+
+**Speech endpoints** (§10.9) are entries of `kind: stt` / `kind: tts`,
+routed by `routes.stt` / `routes.tts`; a `tts` entry names its `voice`, an
+`stt` entry may pin a `language`, and `cost` takes the kind's unit:
+
+```yaml
+  - name: whisper
+    kind: stt
+    url: https://stt.example/v1
+    model: Systran/faster-whisper-large-v3
+    language: nb                                  # absent = the identity locale; set by setup.voice (§33.5)
+    cost: { per_minute: 0.006, currency: USD }   # omit entirely for a local box
+  - name: piper
+    kind: tts
+    url: https://tts.example/v1
+    model: tts-1
+    voice: nb_NO-talesyntese-medium
+    cost: { per_kchar: 0.015, currency: USD }
+```
+
+**`none` as an effort** (§10.6): an endpoint that declares it also says how
+it travels — `no_think` is merged into the request body when `none` is
+selected, defaulting to `{reasoning_effort: "none"}`:
+
+```yaml
+    efforts: [none, low, medium, xhigh]
+    no_think: { chat_template_kwargs: { enable_thinking: false } }   # Qwen on vLLM / llama.cpp
 ```
 
 ### G.3 `config/identity.md` + `config/personality.md`
@@ -5017,6 +5516,9 @@ onboarded_at: 2026-08-20T…Z
 `personality.md` frontmatter: `formality: relaxed|neutral|formal`,
 `verbosity: terse|normal|chatty`, `humor: dry|none|playful`; the body is
 free-form prose injected verbatim into system prompts (App. H.1).
+`locale` also names the language an `stt` endpoint is asked to transcribe
+(§10.9) unless the endpoint's own `language` — set by `setup.voice`
+(§33.5) — says otherwise.
 
 The instance name is chosen at onboarding and changed by `setup.rename`
 (F.9) — the one writer of `instance_name` outside onboarding's
@@ -5082,10 +5584,12 @@ backend-independent.
 
 Frontmatter schema (§5.1): `name` (must equal filename sans `.md`),
 `description` (required), `match?` (`types?: [glob]`, `sources?: [glob]`),
-`model_class?` (`fast`|`best`, default `fast`),
+`model_class?` (`fast`|`best`; **absent means the `handler` route decides**,
+§10.6 — there is no schema default any more, because "said nothing" and
+"asked for fast" must trace differently),
 `endpoint?: <models.yaml name>` (exact pin, §10.6 — mutually exclusive
-with `model_class`; a pin naming a vanished endpoint is a load error, not
-a silent fallback),
+with `model_class`, **enforced**: both present is a load error; a pin
+naming a vanished endpoint is also a load error, not a silent fallback),
 `effort?` (`low`|`medium`|`high`|`xhigh`, §10.6 — the reasoning level this
 behaviour wants; dropped silently when the serving endpoint declares no
 such level, because a handler cannot know which endpoint class routing
@@ -5096,6 +5600,14 @@ will hand it), `tools?: [glob]`,
 `match:`, and coupled lifecycle — reaped with the embed, §22.5),
 `budgets?` (`max_turns?`, `max_tokens?`, `timeout_s?`). Unknown keys →
 load error (typo protection). Body = the agent instructions.
+
+**`model_class`, `endpoint` and `effort` are written by the `config.write`
+routing form (F.6) or by a human editing the file directly — never by the
+model** (§10.6, §19.2): a chat run asking `config.write` to author a handler
+never gets to set these itself, whatever it puts in the frontmatter it
+sends is stripped and decided by the form (or kept from what was already
+there). This paragraph describes the *shape* the keys take once written;
+who is allowed to write them is F.6's rule.
 
 ### G.8 Skill files — `skills/<name>.md`
 
@@ -5296,7 +5808,11 @@ same way under `library/{skills,handlers}/` — the directory is the
 manifest, auto-discovered, frontmatter-validated at load; prompt prose is
 never a string literal in a module (enforced by the contract test).
 Versioned in the service tree (not user
-data): `ingress`, `handler`, `chat`, `onboarding`, `distill`. Onboarding's
+data): `ingress`, `handler`, `chat`, `onboarding`, `distill`. One
+fragment is conversation-scoped rather than kind-scoped: `voice`
+(`library/base/fragments/voice.md`) is appended to `chat` for voice
+conversations (§33.1) — stable for the conversation's life, so it costs
+the prefix cache nothing, and never varied per turn. Onboarding's
 prompt includes the Culture-Mind naming instruction (plan §3c), the
 exact target file formats from G.3, and the closing "want your phone
 connected?" step that calls `setup.token_create` (§24.3).
@@ -5323,7 +5839,9 @@ src/
                   #   non-compiled asset lookup (§28.4)
   db/             # connection, migrations/, repositories per table
   model/          # models.yaml types, router, inference scheduler, agent loop, probes,
-                  #   tool-names.ts (the §11.5 wire facade: `.` ↔ `__`)
+                  #   tool-names.ts (the §11.5 wire facade: `.` ↔ `__`), routes.ts (the
+                  #   closed purpose vocabulary + kind-default table, §10.6), feed.ts
+                  #   (the request log's live fan-out, §10.8)
   tools/          # dispatcher, grants, run-grant registry (§23.2), mcp-client,
                   #   registry, integrations/{memory,schedule,deliver,events,web,config,
                   #   skills,asana,google,files,setup,time,weather,embeds,docs,
@@ -5341,8 +5859,9 @@ src/
                   #   binder + manifest (§23.2), vendor serving (§23.3)
   docs/           # pdf read (pdfjs-dist), chromium print pipeline (§23.4–23.5)
   chat/           # chat executor, onboarding flow, form lifecycle (§19)
-  egress/         # outbox, channel router
-  net/            # http server, ws server, openai-compat, setup api
+  egress/         # outbox, channel router, spoken forms of deliveries (§33.3)
+  voice/          # §33.2: the /api/voice adapter — transcript in, sentence-chunked speech out
+  net/            # http server, ws server, openai-compat, setup api, voice api (§33)
   scheduler/      # timer loop, rrule advance
   watchers/       # §30 engine: frozen-call poll, extract, diff, state file,
                   #   watch.changed/failed emission; consumes watch.due
@@ -5431,7 +5950,9 @@ from the table.
 
 The desktop shell (§28) is **packaging tier**: its Rust dependencies are
 pinned by `app/Cargo.lock`, and its build toolchain — the Rust compiler,
-the Tauri CLI, webkitgtk/gtk/dbus — by `app/shell.nix`. Any JS
+the Tauri CLI, webkitgtk/gtk/dbus — by `app/shell.nix`. Voice in the
+shell (§28.6) adds exactly four crates there — `cpal`, `rodio`,
+`rustpotter`, `tauri-plugin-global-shortcut` — and no others. Any JS
 tooling a platform's build needs lives in `app/package.json`. None of it
 appears in the root `package.json`, so the spec-contract whitelist test
 is untouched by the app's existence. Growing `app/` dependencies is still

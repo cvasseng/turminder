@@ -24,7 +24,9 @@ export function registerHandlersCommand(program: Command): void {
           // The routing line: class or pin, and the reasoning level if this
           // behaviour asked for one (§10.6).
           const routing = [
-            h.frontmatter.endpoint ?? h.frontmatter.model_class,
+            // Absent means the `handler` route decides (§10.6) — said so
+            // rather than printing `undefined`.
+            h.frontmatter.endpoint ?? h.frontmatter.model_class ?? 'handler route',
             ...(h.frontmatter.effort ? [`effort ${h.frontmatter.effort}`] : []),
           ].join(', ');
           out(`${h.name}  [${routing}]${match}`);

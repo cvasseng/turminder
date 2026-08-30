@@ -128,9 +128,10 @@ export class DistillExecutor {
 
     try {
       const result = await runAgent(gateway, {
-        // `best`, deliberately (§10.6): background priority makes the latency
-        // free, and what-is-worth-keeping is the judgment being paid for.
-        selector: { class: 'best', caps: ['json'] },
+        // `distill` routes to `best` by default (§10.6): background priority
+        // makes the latency free, and what-is-worth-keeping is the judgment
+        // being paid for.
+        selector: { purpose: 'distill', caps: ['json'] },
         priority: 'background',
         system: assembleSystemPrompt({
           kind: 'distill',
@@ -179,14 +180,17 @@ export class DistillExecutor {
             : loaded.includes(memoryInput.project)
               ? memoryInput.project
               : fallback;
-        await memory.save({
-          type: memoryInput.type,
-          name: memoryInput.name,
-          description: memoryInput.description,
-          content: memoryInput.content,
-          reason: `distilled from a conversation on ${nowIso().slice(0, 10)}`,
-          project,
-        });
+        await memory.save(
+          {
+            type: memoryInput.type,
+            name: memoryInput.name,
+            description: memoryInput.description,
+            content: memoryInput.content,
+            reason: `distilled from a conversation on ${nowIso().slice(0, 10)}`,
+            project,
+          },
+          trace,
+        );
         saved += 1;
       }
       repos.runs.finish(runId, {

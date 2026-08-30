@@ -2,7 +2,8 @@ import type { Command } from 'commander';
 import { bootstrap } from '../app.js';
 import { requireModelStack } from '../model/index.js';
 import { runAgent } from '../model/agent-loop.js';
-import { MemoryTraceSink, type ModelClass, type Priority } from '../model/types.js';
+import { MemoryTraceSink, type ModelSelector, type Priority } from '../model/types.js';
+import { ROUTABLE_PURPOSES, type RoutablePurpose } from '../model/routes.js';
 import { assembleSystemPrompt } from '../prompts/index.js';
 import { nowIso } from '../core/time.js';
 import { UserFacingError } from '../core/errors.js';
@@ -10,7 +11,8 @@ import { globalOpts } from './common.js';
 
 interface AskOpts {
   priority: string;
-  class: string;
+  purpose: string;
+  endpoint?: string;
   stream: boolean;
   trace: boolean;
 }
@@ -21,7 +23,8 @@ export function registerAskCommand(program: Command): void {
     .command('ask <prompt...>')
     .description('one-shot completion through the router, scheduler and agent loop')
     .option('--priority <p>', 'interactive | event | background', 'interactive')
-    .option('--class <c>', 'fast | best', 'fast')
+    .option('--purpose <p>', `who is asking (§10.6): ${ROUTABLE_PURPOSES.join('|')}`, 'chat')
+    .option('--endpoint <name>', 'pin an exact endpoint by name (overrides --purpose routing)')
     .option('--no-stream', 'wait for the full completion instead of streaming')
     .option('--trace', 'print the llm_call trace records when done')
     .action(async (promptWords: string[], opts: AskOpts, cmd: Command) => {
@@ -34,12 +37,24 @@ export function registerAskCommand(program: Command): void {
             `--priority must be interactive|event|background`,
           );
         }
-        const modelClass = opts.class as ModelClass;
-        if (!['fast', 'best'].includes(modelClass)) {
-          throw new UserFacingError('bad_option', `--class must be fast|best`);
+        const purpose = opts.purpose as RoutablePurpose;
+        if (!ROUTABLE_PURPOSES.includes(purpose)) {
+          throw new UserFacingError(
+            'bad_option',
+            `--purpose must be one of ${ROUTABLE_PURPOSES.join('|')}`,
+          );
         }
 
         const { gateway } = requireModelStack(app.config);
+        if (opts.endpoint && !gateway.router.byName(opts.endpoint, 'chat')) {
+          throw new UserFacingError('bad_option', `no chat endpoint named "${opts.endpoint}"`);
+        }
+        const selector: ModelSelector = {
+          purpose,
+          ...(opts.endpoint
+            ? { pin: { endpoint: opts.endpoint, by: 'override' as const } }
+            : {}),
+        };
         const trace = new MemoryTraceSink();
         const system = assembleSystemPrompt({
           kind: 'chat',
@@ -49,7 +64,7 @@ export function registerAskCommand(program: Command): void {
         });
 
         const result = await runAgent(gateway, {
-          selector: { class: modelClass },
+          selector,
           priority,
           system,
           messages: [{ role: 'user', content: promptWords.join(' ') }],

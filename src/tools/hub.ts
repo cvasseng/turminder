@@ -4,8 +4,10 @@ import type { Config } from '../core/config.js';
 import type { McpYaml } from '../core/config-schemas.js';
 import type { DataHome } from '../core/datadir.js';
 import type { Repos } from '../db/repos/index.js';
+import type { FormBroker } from '../chat/forms.js';
 import type { EventIntake } from '../ingress/intake.js';
 import type { MemoryAgent } from '../memory/agent.js';
+import type { ModelRouter } from '../model/router.js';
 import { budgeted } from './budget.js';
 import { McpConnection } from './mcp/connect.js';
 import { configTools } from './integrations/config.js';
@@ -35,6 +37,12 @@ export interface ToolHubDeps {
   /** Which project islands a conversation may retrieve from (§31.3). */
   projectScope: ProjectScope;
   repos: Repos;
+  /** The one form broker (§19.1) — `config.write`'s handler-routing form (F.6)
+   *  raises through it, the same as `setup.*`'s forms. */
+  forms: FormBroker;
+  /** Live, because the model stack can be rebuilt after `ToolHub` is built
+   *  (a models.yaml reload) — a snapshot taken at construction would go stale. */
+  router: () => ModelRouter | null;
   /** Integrations wired by the service rather than built here (deliver). */
   extra?: Record<string, ToolDefinition[]>;
   /** Injected in tests so web.search never touches the network. */
@@ -73,7 +81,7 @@ export class ToolHub {
     // match_count, narrow the selector, query again — one download.
     const pages = new PageCache();
     const integrations: Record<string, ToolDefinition[]> = {
-      config: configTools(deps.home),
+      config: configTools(deps.home, { forms: deps.forms, router: deps.router }),
       events: eventsTools(deps.intake),
       web: [
         ...webTools({
@@ -100,7 +108,9 @@ export class ToolHub {
         meta: deps.repos.meta,
         ...(deps.fetch ? { fetch: deps.fetch } : {}),
       }),
-      ...(deps.memory ? { memory: memoryTools(deps.memory, deps.projectScope) } : {}),
+      ...(deps.memory
+        ? { memory: memoryTools(deps.memory, deps.projectScope, deps.repos.trace) }
+        : {}),
       ...(deps.extra ?? {}),
     };
 

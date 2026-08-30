@@ -230,8 +230,15 @@ describe('setup api (plan §3b)', () => {
     });
     const yaml = fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8');
     expect(yaml).not.toContain('sentinel-embedding-key');
+    expect(yaml).not.toContain('embedding:\n  url');
     const doc = YAML.parse(yaml);
-    expect(doc.embedding.api_key).toBe('${secret:MODEL_API_KEY_MAIN}');
+    // A `kind: embedding` endpoint, not a second top-level block (§10.6 v2).
+    const embedding = doc.endpoints.find((e: { name: string }) => e.name === 'embedding');
+    expect(embedding).toMatchObject({
+      kind: 'embedding',
+      api_key: '${secret:MODEL_API_KEY_MAIN}',
+    });
+    expect(doc.routes.embedding).toEqual({ endpoint: 'embedding' });
   });
 
   it('puts the API key in the secret store and a reference in models.yaml (§28.5)', async () => {
@@ -261,6 +268,13 @@ describe('setup api (plan §3b)', () => {
     expect(h.app.config.secretStore.get('MODEL_API_KEY_MAIN')).toBe('sentinel-hosted-key');
     // And the reference resolves, so the endpoint actually works.
     expect(h.app.config.models()?.endpoints[0]?.api_key).toBe('sentinel-hosted-key');
+
+    // Declining is a real answer (§10.6 v2): no embedding endpoint, no
+    // `routes.embedding` — but the purpose→class table is still written.
+    const doc = YAML.parse(yaml);
+    expect(doc.endpoints.some((e: { kind?: string }) => e.kind === 'embedding')).toBe(false);
+    expect(doc.routes.embedding).toBeUndefined();
+    expect(doc.routes.chat).toEqual({ class: 'best' });
   });
 
   it('reports a dead endpoint honestly instead of hanging', async () => {
@@ -929,6 +943,74 @@ describe('the read surface over the lifecycle (§4.2.1)', () => {
       intent: 'confirm',
       title: 'Sleeper Service wants to delete a file',
     });
+    client.close();
+  });
+});
+
+/**
+ * The request log (§10.8, App. D): one row per model call, live, over the
+ * `llm_call` rows already being written. Modelled on the activity panel above.
+ */
+describe('the request log (§10.8)', () => {
+  it('lists calls newest first after a chat run, and clamps limit', async () => {
+    h = await bootService({ onboarded: true });
+    h.fake.always({ text: 'The capital is Oslo.' });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat']);
+    client.send('chat.send', { text: 'capital of Norway?' });
+    await client.next('chat.done');
+
+    client.send('calls.list', { limit: 1000 });
+    const result = (await client.next('calls.list.result')).payload;
+    expect(result.calls.length).toBeGreaterThan(0);
+    const ats = result.calls.map((c: { at: string }) => c.at);
+    expect([...ats].sort().reverse()).toEqual(ats);
+    expect(result.calls.some((c: { purpose: string }) => c.purpose === 'chat')).toBe(true);
+
+    client.send('calls.list', { limit: 100000 });
+    const clamped = (await client.next('calls.list.result')).payload;
+    expect(clamped.calls.length).toBeLessThanOrEqual(200);
+    client.close();
+  });
+
+  it('refuses a device that does not render chat', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['notify.actions']);
+    client.send('calls.list', {});
+    expect((await client.next('error')).payload.code).toBe('bad_frame');
+    client.close();
+  });
+
+  it('pushes a call.made whose purpose is chat, and rides no content — the sentinel', async () => {
+    h = await bootService({ onboarded: true });
+    h.fake.always({ text: 'The capital is Oslo.' });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat']);
+    client.send('chat.send', { text: 'capital of Norway?' });
+
+    const push = await client.until('call.made', (p) => p.purpose === 'chat', 15000);
+    expect(push.endpoint).toBe('main');
+    expect(typeof push.tokens_in).toBe('number');
+    expect(typeof push.tokens_out).toBe('number');
+    expect(typeof push.duration_ms).toBe('number');
+    expect(push.resolved_by).toBeTruthy();
+    // Nothing else may ever ride this frame — no prompt text, no args, no
+    // excerpts, no `model` id. The local harness endpoint is unpriced, so
+    // `cost`/`currency` are absent here too (never a `0.00`, §10.5).
+    expect(Object.keys(push).sort()).toEqual(
+      [
+        'at',
+        'duration_ms',
+        'endpoint',
+        'purpose',
+        'resolved_by',
+        'seq',
+        'stop_reason',
+        'tokens_in',
+        'tokens_out',
+      ].sort(),
+    );
     client.close();
   });
 });

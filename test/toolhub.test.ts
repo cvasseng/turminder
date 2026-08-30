@@ -3,6 +3,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Config, DEFAULT_SETTINGS } from '../src/core/config.js';
 import { openDataHome, type DataHome } from '../src/core/datadir.js';
+import { FormBroker } from '../src/chat/forms.js';
 import { openDb } from '../src/db/index.js';
 import { createRepos } from '../src/db/repos/index.js';
 import { EventIntake } from '../src/ingress/intake.js';
@@ -36,6 +37,8 @@ async function hubHarness(opts: { fetch?: typeof globalThis.fetch } = {}): Promi
     repos,
     skills,
     projectScope: new ProjectScope(repos.conversations),
+    forms: new FormBroker(home, config),
+    router: () => null,
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   return {
@@ -299,6 +302,8 @@ describe('external MCP servers (§11.1)', () => {
       repos,
       skills: new SkillLoader(home),
       projectScope: new ProjectScope(repos.conversations),
+      forms: new FormBroker(home, config),
+      router: () => null,
     });
 
     try {
@@ -352,13 +357,16 @@ describe('external MCP servers (§11.1)', () => {
     );
     const db = openDb(home.dbPath);
     const repos = createRepos(db);
+    const config = new Config(home);
     const hub = await ToolHub.create({
       home,
-      config: new Config(home),
+      config,
       intake: new EventIntake(repos, DEFAULT_SETTINGS),
       repos,
       skills: new SkillLoader(home),
       projectScope: new ProjectScope(repos.conversations),
+      forms: new FormBroker(home, config),
+      router: () => null,
     });
     try {
       // The assistant still starts; it just has fewer tools.

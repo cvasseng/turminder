@@ -31,7 +31,7 @@ is no tagged release, only a rolling `nightly` prerelease built from `main`.
 The context rules are what make a local model workable: 30,000 tokens per
 run, tool results capped at 4,000 characters where they enter the transcript,
 and 8 tool namespaces in the prompt until the model asks for more. The suite
-is 56 test files (`npm test`), three of which exist to keep those numbers
+is 59 test files (`npm test`), three of which exist to keep those numbers
 from drifting.
 
 ## Run it
@@ -74,7 +74,7 @@ pairing](docs/running.md).
 - Projects: islands of files, memories and past chats that reach a prompt only while loaded.
 - Clients: a Linux desktop app, a browser extension, and phone pairing you approve from a device you trust.
 - An activity panel: everything in flight, what it is waiting on, and what gave up and why.
-- Cost per endpoint and per conversation, and a trace of every model call and tool call.
+- Cost per endpoint and per conversation, a live Requests panel of every model call, and a trace of every tool call.
 
 Each of these in full: [docs/features.md](docs/features.md).
 

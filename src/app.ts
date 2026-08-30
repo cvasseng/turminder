@@ -53,8 +53,10 @@ export function bootstrap(opts: BootOptions = {}): App {
   // fix, never a silent downgrade to plaintext (§27.1).
   config.secretStore.assertUsable();
   // Same story one file over: an api_key written into models.yaml in the clear
-  // (before §27, or by hand) moves into the store and leaves a reference behind.
-  config.healPlaintextModelKeys();
+  // (before §27, or by hand) moves into the store and leaves a reference
+  // behind, and a legacy `embedding:` block becomes a `kind: embedding`
+  // endpoint (§8.3, §10.6) — one pass, one commit for whichever apply.
+  config.healModelsYaml();
   // An install written before §24 still has plaintext tokens on disk; fold them
   // into hashes now, once, so the devices holding them keep working and the
   // file stops carrying values (G.4).

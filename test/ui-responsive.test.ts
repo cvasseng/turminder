@@ -151,7 +151,7 @@ describe('the shell at any width (§9.1)', () => {
  * layout never honoured. There is one selection here and it has one home.
  */
 describe('the side panels are one drawer (§9.1)', () => {
-  const TABS = ['files', 'embeds', 'activity'];
+  const TABS = ['files', 'embeds', 'activity', 'calls'];
 
   /** The markup between a tag with this id and the element that follows it. */
   const at = (needle: string): number => {
@@ -173,7 +173,7 @@ describe('the side panels are one drawer (§9.1)', () => {
     expect(at('id="drawer-tabs"')).toBeLessThan(at('id="shell"'));
   });
 
-  it('is a tablist, not three toggles', () => {
+  it('is a tablist, not four toggles', () => {
     const rail = html.slice(at('id="drawer-tabs"'), at('<div id="shell">'));
     expect(rail).toContain('role="tablist"');
     expect([...rail.matchAll(/role="tab"/g)]).toHaveLength(TABS.length);
@@ -185,7 +185,7 @@ describe('the side panels are one drawer (§9.1)', () => {
       expect(rail).toContain(`aria-controls="panel-${tab}"`);
       expect(html).toContain(`id="panel-${tab}"`);
     }
-    // Exactly the three panels, all inside the one drawer.
+    // Exactly the four panels, all inside the one drawer.
     const drawer = html.slice(at('<aside id="drawer">'), at('</aside>\n    </div>'));
     expect([...drawer.matchAll(/role="tabpanel"/g)]).toHaveLength(TABS.length);
   });

@@ -38,6 +38,7 @@ import { MemoryWatcher } from './rag/watcher.js';
 import { FileStore } from './files/store.js';
 import { FileEvents } from './files/events.js';
 import { EventFeed } from './ingress/feed.js';
+import { CallFeed } from './model/feed.js';
 import { SnapshotStore } from './files/snapshots.js';
 import { FileWatcher } from './files/watcher.js';
 import { filesTools } from './tools/integrations/files.js';
@@ -138,6 +139,8 @@ export class Service {
   readonly embedEvents = new EmbedEvents();
   /** Where every event is in its lifecycle, for the activity panel (§4.2.1). */
   readonly eventFeed = new EventFeed();
+  /** One row per model call, live, for the request log (§10.8). */
+  readonly callFeed = new CallFeed();
   /** Print-only documents, alive for one chromium navigation (§23.4). */
   readonly transient = new TransientDocs();
   /** Chat attachments (§26.1). Eager: the HTTP routes serve them. */
@@ -158,6 +161,9 @@ export class Service {
   private ingressAgent: IngressAgent | null = null;
   private handlerExecutor: HandlerExecutor | null = null;
   private memoryAgent: MemoryAgent | null = null;
+  /** Reconfigured, not rebuilt, on a models.yaml reload (§10.6, §8.3) — the
+   *  indexes below hold this same instance for the life of the process. */
+  private embeddingClient: EmbeddingClient | null = null;
   private ragIndex: RagIndex | null = null;
   private filesIndex: FilesIndex | null = null;
   private turnsIndex: TurnsIndex | null = null;
@@ -180,6 +186,8 @@ export class Service {
     // (§4.2.1). The panel is a read surface over state the loop already keeps;
     // nothing about the loop changes because somebody is watching.
     this.repos.events.observe((event) => this.eventFeed.moved(event));
+    // Every model call, for the request log (§10.8) — same shape of wiring.
+    this.repos.trace.observe((row) => this.callFeed.made(row));
     const settings = app.config.settings;
     this.intake = new EventIntake(this.repos, settings);
     this.skills = new SkillLoader(app.home);
@@ -456,6 +464,9 @@ export class Service {
     } else {
       l.warn('no usable config/models.yaml — setup required before chat works');
     }
+    // Same client instance, new endpoint (§10.6, §8.3): the RAG/files/turns
+    // indexes hold this reference and must not be rebuilt for a config reload.
+    this.embeddingClient?.reconfigure(this.models?.router.embedding() ?? null);
     return this.configured;
   }
 
@@ -530,11 +541,15 @@ export class Service {
     // RAG and memory come up before the tool hub, because the memory
     // integration is one of the tools it serves.
     const embeddingCfg = this.models?.router.embedding() ?? null;
+    // `null` is a normal state (§10.6: no `kind: embedding` endpoint
+    // configured) — `EmbeddingClient` degrades to lexical fallback rather
+    // than being handed a guessed URL that was never in models.yaml.
     const embeddings = new EmbeddingClient(
-      embeddingCfg ?? { url: 'http://127.0.0.1:8080', model: 'default' },
+      embeddingCfg,
       this.models?.scheduler ?? new InferenceScheduler(1),
       { ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}) },
     );
+    this.embeddingClient = embeddings;
     this.ragIndex = new RagIndex(this.app.home, this.memoryStore, embeddings);
     this.filesIndex = new FilesIndex(this.app.home, this.files, embeddings);
     this.turnsIndex = new TurnsIndex(this.app.home, this.repos.conversations, embeddings);
@@ -586,6 +601,8 @@ export class Service {
       intake: this.intake,
       repos: this.repos,
       skills: this.skills,
+      forms: this.forms,
+      router: () => this.models?.router ?? null,
       memory: this.memoryAgent,
       projectScope: this.projectScope,
       extra: {

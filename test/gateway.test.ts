@@ -22,7 +22,7 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
     fake.script({ text: 'Hello there.', usage: { prompt: 120, completion: 7 } });
     const trace = new MemoryTraceSink();
     const r = await gw.turn({
-      selector: { class: 'fast' },
+      selector: { purpose: 'chat' },
       priority: 'interactive',
       system: 'be brief',
       messages: [{ role: 'user', content: 'hi' }],
@@ -40,13 +40,17 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
     expect(rec?.tokens_in).toBe(120);
     expect(rec?.queue_wait_ms).toBe(0);
     expect(rec?.duration_ms).toBeGreaterThanOrEqual(0);
+    // §10.6: who asked, and why the router chose this endpoint.
+    expect(rec?.purpose).toBe('chat');
+    expect(rec?.resolved_by).toBe('kind_default');
+    expect(rec?.endpoint).toBe('fake');
   });
 
   it('streams deltas as they arrive', async () => {
     fake.script({ text: 'one two three four' });
     const deltas: string[] = [];
     const r = await gw.turn({
-      selector: {},
+      selector: { purpose: 'chat' },
       priority: 'interactive',
       system: 's',
       messages: [{ role: 'user', content: 'go' }],
@@ -61,7 +65,7 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
   it('sends the system prompt and messages in OpenAI shape', async () => {
     fake.script({ text: 'ack' });
     await gw.turn({
-      selector: {},
+      selector: { purpose: 'chat' },
       priority: 'event',
       system: 'SYSTEM-PREFIX',
       messages: [{ role: 'user', content: 'question' }],
@@ -76,7 +80,7 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
     fake.script({ toolCalls: [{ name: 'web_search', args: { q: 'oslo' } }] });
     const disp = new RecordingDispatcher({ web_search: () => ({ results: [] }) });
     const r = await gw.turn({
-      selector: { caps: ['tools'] },
+      selector: { purpose: 'chat', caps: ['tools'] },
       priority: 'event',
       system: 's',
       messages: [{ role: 'user', content: 'search' }],
@@ -100,7 +104,7 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
     fake.script({ toolCalls: [{ name: 'calendar.create_task', args: { title: 'x' } }] });
     const disp = new RecordingDispatcher({ 'calendar.create_task': () => ({ ok: true }) });
     const r = await gw.turn({
-      selector: { caps: ['tools'] },
+      selector: { purpose: 'chat', caps: ['tools'] },
       priority: 'event',
       system: 's',
       messages: [{ role: 'user', content: 'book it' }],
@@ -126,7 +130,7 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
     fake.script({ toolCalls: [{ name: 'config.write', args: {} }] });
     const disp = new RecordingDispatcher({ 'time.now': () => ({}) });
     const r = await gw.turn({
-      selector: { caps: ['tools'] },
+      selector: { purpose: 'chat', caps: ['tools'] },
       priority: 'event',
       system: 's',
       messages: [{ role: 'user', content: 'write config' }],
@@ -140,7 +144,7 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
   it('translates tool names already in the message history (§11.5)', async () => {
     fake.script({ text: 'done' });
     await gw.turn({
-      selector: {},
+      selector: { purpose: 'chat' },
       priority: 'event',
       system: 's',
       messages: [
@@ -173,7 +177,7 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
     fake.script({ toolCalls: [{ name: 'web_search', args: '{"q": broken' }] });
     const disp = new RecordingDispatcher({ web_search: () => ({}) });
     const r = await gw.turn({
-      selector: {},
+      selector: { purpose: 'chat' },
       priority: 'event',
       system: 's',
       messages: [{ role: 'user', content: 'x' }],
@@ -188,7 +192,7 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
     fake.script({ toolCalls: [{ name: 'not_a_tool', args: { q: 'x' } }] });
     const disp = new RecordingDispatcher({ web_search: () => ({}) });
     const r = await gw.turn({
-      selector: {},
+      selector: { purpose: 'chat' },
       priority: 'event',
       system: 's',
       messages: [{ role: 'user', content: 'x' }],
@@ -200,7 +204,7 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
   it('constrains output with a JSON schema (llama.cpp grammar path)', async () => {
     fake.script({ text: '{"ok":true}' });
     await gw.turn({
-      selector: { caps: ['json'] },
+      selector: { purpose: 'chat', caps: ['json'] },
       priority: 'event',
       system: 's',
       messages: [{ role: 'user', content: 'x' }],
@@ -218,7 +222,7 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
   it('passes a raw GBNF grammar through', async () => {
     fake.script({ text: 'yes' });
     await gw.turn({
-      selector: {},
+      selector: { purpose: 'chat' },
       priority: 'event',
       system: 's',
       messages: [{ role: 'user', content: 'x' }],
@@ -232,7 +236,7 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
     const trace = new MemoryTraceSink();
     await expect(
       gw.turn({
-        selector: {},
+        selector: { purpose: 'chat' },
         priority: 'event',
         system: 's',
         messages: [{ role: 'user', content: 'x' }],
@@ -241,6 +245,9 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
     ).rejects.toThrow();
     const rows = trace.ofKind('llm_call') as LlmCallTrace[];
     expect(rows.at(-1)?.stop_reason).toBe('error');
+    // The routing decision rides the error-path row too, not just success.
+    expect(rows.at(-1)?.purpose).toBe('chat');
+    expect(rows.at(-1)?.resolved_by).toBe('kind_default');
   });
 
   it('queues concurrent calls on one endpoint and reports the wait', async () => {
@@ -248,7 +255,7 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
     const trace = new MemoryTraceSink();
     const call = (priority: 'interactive' | 'background') =>
       gw.turn({
-        selector: {},
+        selector: { purpose: 'chat' },
         priority,
         system: 's',
         messages: [{ role: 'user', content: priority }],

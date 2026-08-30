@@ -1,4 +1,7 @@
+import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import YAML from 'yaml';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   Config,
@@ -160,6 +163,106 @@ Be brief. Do not gush.
 
   it('defaults mcp servers to an empty list', () => {
     expect(config.mcp().servers).toEqual([]);
+  });
+});
+
+/**
+ * `healModelsYaml` (§8.3, §10.6 v2): a legacy `embedding:` block folds into a
+ * `kind: embedding` endpoint plus an explicit `routes.embedding`, in the same
+ * pass — and same commit — as the pre-existing plaintext-key heal.
+ */
+describe('healModelsYaml — folding a legacy embedding: block', () => {
+  let t: { dir: string; cleanup: () => void };
+  let home: DataHome;
+  let config: Config;
+
+  beforeEach(() => {
+    t = tmpDir();
+    home = openDataHome(path.join(t.dir, 'home')).home;
+    config = new Config(home);
+  });
+  afterEach(() => t.cleanup());
+
+  const modelsText = () => fs.readFileSync(home.path('config', 'models.yaml'), 'utf8');
+  const commitCount = () =>
+    spawnSync('git', ['log', '--oneline'], { cwd: home.root, encoding: 'utf8' })
+      .stdout.trim()
+      .split('\n').length;
+
+  it('folds the block, writes an explicit route, keeps the secret reference, and commits once', () => {
+    write(
+      home.path('config', 'models.yaml'),
+      `endpoints:
+  - name: main
+    url: http://localhost:8080/v1
+    classes: [fast, best]
+embedding:
+  url: http://localhost:8080
+  api_key: \${secret:X}
+`,
+    );
+    const before = commitCount();
+
+    const result = config.healModelsYaml();
+    expect(result.embeddingFolded).toBe(true);
+
+    const parsed = YAML.parse(modelsText()) as Record<string, unknown>;
+    expect(parsed.embedding).toBeUndefined();
+    const endpoints = parsed.endpoints as Record<string, unknown>[];
+    const folded = endpoints.find((e) => e.name === 'embedding');
+    expect(folded).toMatchObject({
+      kind: 'embedding',
+      url: 'http://localhost:8080',
+      api_key: '${secret:X}',
+    });
+    expect(parsed.routes).toEqual({ embedding: { endpoint: 'embedding' } });
+    // The literal reference survived untouched — it names a secret, is not
+    // one, and healModelsYaml never resolves `${secret:}` (that would write
+    // the value to disk).
+    expect(modelsText()).toContain('${secret:X}');
+    expect(commitCount()).toBe(before + 1);
+
+    // Idempotent: a second pass changes nothing and commits nothing.
+    const stableText = modelsText();
+    const second = config.healModelsYaml();
+    expect(second.embeddingFolded).toBe(false);
+    expect(second.apiKeys).toEqual([]);
+    expect(modelsText()).toBe(stableText);
+    expect(commitCount()).toBe(before + 1);
+  });
+
+  it('suffixes the folded name on a collision with an existing endpoint', () => {
+    write(
+      home.path('config', 'models.yaml'),
+      `endpoints:
+  - name: embedding
+    url: http://localhost:9999/v1
+    classes: [fast]
+embedding:
+  url: http://localhost:8080
+`,
+    );
+    config.healModelsYaml();
+    const parsed = YAML.parse(modelsText()) as Record<string, unknown>;
+    const endpoints = parsed.endpoints as Record<string, unknown>[];
+    expect(endpoints.map((e) => e.name)).toEqual(['embedding', 'embedding-2']);
+    expect((endpoints[1] as Record<string, unknown>).kind).toBe('embedding');
+    expect(parsed.routes).toEqual({ embedding: { endpoint: 'embedding-2' } });
+  });
+
+  it('does nothing to a file with no embedding: block and no plaintext key', () => {
+    write(
+      home.path('config', 'models.yaml'),
+      `endpoints:
+  - name: main
+    url: http://localhost:8080/v1
+    classes: [fast, best]
+`,
+    );
+    const before = commitCount();
+    const result = config.healModelsYaml();
+    expect(result).toEqual({ apiKeys: [], embeddingFolded: false });
+    expect(commitCount()).toBe(before);
   });
 });
 

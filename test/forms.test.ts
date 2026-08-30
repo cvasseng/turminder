@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import matter from 'gray-matter';
 import YAML from 'yaml';
 import { Config } from '../src/core/config.js';
 import { openDataHome, type DataHome } from '../src/core/datadir.js';
@@ -711,10 +712,40 @@ describe('connector templates (§19.3)', () => {
     const added = models.endpoints.find((e: any) => e.name === 'spare');
     expect(added.api_key).toBe('${secret:SPARE_API_KEY}');
     expect(h.app.config.secrets.SPARE_API_KEY).toBe('sentinel-model-key');
+    expect(added.kind).toBe('chat');
     expect(added.classes).toEqual(['fast']);
     expect(added.caps).toContain('json');
-    expect(h.service.modelStack?.router.byName('spare')).toBeTruthy();
+    expect(models.embedding).toBeUndefined();
+    expect(h.service.modelStack?.router.byName('spare', 'chat')).toBeTruthy();
     expect(sweep(h.dataDir, 'sentinel-model-key')).toEqual(['secrets/secrets.yaml']);
+  });
+
+  it('gives the classes field no prefill once a chat endpoint already exists (§10.6)', async () => {
+    h = await bootService({ onboarded: true });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+
+    h.fake.always((req) => {
+      if (req.body.tools) {
+        return {
+          toolCalls: [
+            {
+              name: 'setup.form',
+              args: { title: 'Add an endpoint', template: 'model_endpoint' },
+            },
+          ],
+        };
+      }
+      return { text: 'ready' };
+    });
+
+    h.service.chat.send({ text: 'add another endpoint' });
+    const form = await client.next('form.request', 15000);
+    // `main` already exists (the harness default), and it is a chat endpoint —
+    // asking about "the first one" would be furniture at best.
+    const classesField = form.payload.fields.find((f: any) => f.name === 'classes');
+    expect(classesField.value).toBeUndefined();
+    expect(classesField.label).toContain('already has a chat endpoint');
   });
 });
 
@@ -906,6 +937,256 @@ describe('setup.pricing (§10.5, F.9)', () => {
     const call = traced(sent.eventId);
     expect(call.result_excerpt).toContain('bad_price');
     expect(fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8')).toBe(before);
+  });
+});
+
+/**
+ * The handler-routing form (§10.6, §19.2, F.6): `config.write` never accepts
+ * `model_class`/`endpoint`/`effort` from the model. Driven like `setup.pricing`
+ * above — a scripted tool call, the form round trip, then the file on disk.
+ */
+describe('handler routing form (F.6)', () => {
+  const handlerPath = (dataDir: string, name: string) =>
+    path.join(dataDir, 'handlers', `${name}.md`);
+
+  const readModelsDoc = (harness: ServiceHarness) =>
+    YAML.parse(
+      fs.readFileSync(path.join(harness.dataDir, 'config', 'models.yaml'), 'utf8'),
+    ) as { endpoints: Record<string, unknown>[] };
+
+  const writeModelsDoc = (harness: ServiceHarness, doc: unknown) => {
+    write(path.join(harness.dataDir, 'config', 'models.yaml'), YAML.stringify(doc));
+    harness.app.config.reload();
+    harness.service.loadModels();
+  };
+
+  /** A second chat endpoint — real capability, not just a class label. */
+  const addChatEndpoint = (
+    harness: ServiceHarness,
+    name: string,
+    opts: { efforts?: string[] } = {},
+  ) => {
+    const doc = readModelsDoc(harness);
+    const base = { ...doc.endpoints[0] } as Record<string, unknown>;
+    delete base.cost;
+    delete base.efforts;
+    doc.endpoints.push({ ...base, name, ...(opts.efforts ? { efforts: opts.efforts } : {}) });
+    writeModelsDoc(harness, doc);
+  };
+
+  const declareMainEfforts = (harness: ServiceHarness, efforts: string[]) => {
+    const doc = readModelsDoc(harness);
+    doc.endpoints[0]!.efforts = efforts;
+    writeModelsDoc(harness, doc);
+  };
+
+  const askToWriteHandler = (args: Record<string, unknown>) => {
+    let asked = false;
+    h.fake.always((req: any) => {
+      if (req.body.tools && !asked) {
+        asked = true;
+        return { toolCalls: [{ name: 'config.write', args }] };
+      }
+      return { text: 'Done.' };
+    });
+  };
+
+  const NEW_HANDLER =
+    '---\nname: nudge\ndescription: d\nmodel_class: best\ntools: []\n---\n\nDo it.\n';
+  const NEW_HANDLER_NO_ROUTING = '---\nname: nudge\ndescription: d\ntools: []\n---\n\nDo it.\n';
+
+  const tracedCall = (harness: ServiceHarness, eventId: string) =>
+    harness.service.repos.trace.forEvent(eventId).find((t) => t.kind === 'tool_call')!
+      .data as any;
+
+  it('(a) routes a new handler through a form with two endpoints, and strips what the model wrote', async () => {
+    h = await bootService({ onboarded: true });
+    addChatEndpoint(h, 'plain');
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    askToWriteHandler({
+      path: 'handlers/nudge.md',
+      content: NEW_HANDLER,
+      message: 'add the nudge handler',
+    });
+
+    const sent = h.service.chat.send({ text: 'add a nudge handler' });
+    const form = await client.next('form.request', 15000);
+    expect(form.payload.fields.map((f: any) => f.name)).toEqual(['model']);
+    const options = form.payload.fields[0].options as string[];
+    expect(options[0]).toMatch(/^Default — handler route/);
+    const plainOption = options.find((o) => o.startsWith('plain'))!;
+    expect(plainOption).toBeTruthy();
+
+    client.send('form.submit', {
+      form_id: form.payload.form_id,
+      values: { model: plainOption },
+    });
+    await client.next('form.accepted');
+    await drain(h);
+
+    const parsed = matter(fs.readFileSync(handlerPath(h.dataDir, 'nudge'), 'utf8'));
+    expect(parsed.data.endpoint).toBe('plain');
+    expect(parsed.data.model_class).toBeUndefined();
+
+    const call = tracedCall(h, sent.eventId);
+    expect(call.result_excerpt).toContain('"chosen_by":"user"');
+    expect(call.result_excerpt).toContain('"endpoint":"plain"');
+    expect(call.result_excerpt).toContain('"ignored":["model_class"]');
+  });
+
+  it('(b) writes with no form and no routing keys when there is no real choice', async () => {
+    h = await bootService({ onboarded: true });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    askToWriteHandler({
+      path: 'handlers/nudge.md',
+      content: NEW_HANDLER,
+      message: 'add the nudge handler',
+    });
+
+    const sent = h.service.chat.send({ text: 'add a nudge handler' });
+    await drain(h);
+
+    const parsed = matter(fs.readFileSync(handlerPath(h.dataDir, 'nudge'), 'utf8'));
+    expect(parsed.data.model_class).toBeUndefined();
+    expect(parsed.data.endpoint).toBeUndefined();
+    expect(parsed.data.effort).toBeUndefined();
+
+    const call = tracedCall(h, sent.eventId);
+    expect(call.result_excerpt).toContain('"chosen_by":"table"');
+    expect(call.result_excerpt).toContain('"ignored":["model_class"]');
+  });
+
+  it('(c) keeps an existing choice across an ordinary rewrite, byte-for-byte', async () => {
+    h = await bootService({ onboarded: true });
+    addChatEndpoint(h, 'plain');
+    write(
+      handlerPath(h.dataDir, 'nudge'),
+      '---\nname: nudge\ndescription: d\nendpoint: plain\ntools: []\n---\n\nOld body.\n',
+    );
+
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    askToWriteHandler({
+      path: 'handlers/nudge.md',
+      content: NEW_HANDLER_NO_ROUTING.replace('Do it.', 'New body.'),
+      message: 'update the nudge handler',
+    });
+
+    const sent = h.service.chat.send({ text: 'update the nudge handler' });
+    await drain(h);
+
+    const parsed = matter(fs.readFileSync(handlerPath(h.dataDir, 'nudge'), 'utf8'));
+    expect(parsed.data.endpoint).toBe('plain');
+    expect(parsed.content.trim()).toBe('New body.');
+
+    const call = tracedCall(h, sent.eventId);
+    expect(call.result_excerpt).toContain('"chosen_by":"kept"');
+    expect(call.result_excerpt).toContain('"endpoint":"plain"');
+  });
+
+  it('(d) rechoose_routing raises the form again even though a choice was already kept', async () => {
+    h = await bootService({ onboarded: true });
+    addChatEndpoint(h, 'plain');
+    write(
+      handlerPath(h.dataDir, 'nudge'),
+      '---\nname: nudge\ndescription: d\nendpoint: plain\ntools: []\n---\n\nOld body.\n',
+    );
+
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    askToWriteHandler({
+      path: 'handlers/nudge.md',
+      content: NEW_HANDLER_NO_ROUTING.replace('Do it.', 'New body.'),
+      message: 'update the nudge handler',
+      rechoose_routing: true,
+    });
+
+    h.service.chat.send({ text: 'let me pick the model for nudge again' });
+    const form = await client.next('form.request', 15000);
+    expect(form.payload.fields.map((f: any) => f.name)).toEqual(['model']);
+    client.send('form.submit', {
+      form_id: form.payload.form_id,
+      values: { model: form.payload.fields[0].options[0] }, // Default
+    });
+    await client.next('form.accepted');
+    await drain(h);
+
+    const parsed = matter(fs.readFileSync(handlerPath(h.dataDir, 'nudge'), 'utf8'));
+    expect(parsed.data.endpoint).toBeUndefined();
+  });
+
+  it('(e) cancelling the form writes nothing — new file stays absent', async () => {
+    h = await bootService({ onboarded: true });
+    addChatEndpoint(h, 'plain');
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    askToWriteHandler({
+      path: 'handlers/nudge.md',
+      content: NEW_HANDLER,
+      message: 'add the nudge handler',
+    });
+
+    const sent = h.service.chat.send({ text: 'add a nudge handler' });
+    const form = await client.next('form.request', 15000);
+    client.send('form.cancel', { form_id: form.payload.form_id });
+    await client.next('form.accepted');
+    await drain(h);
+
+    expect(fs.existsSync(handlerPath(h.dataDir, 'nudge'))).toBe(false);
+    const call = tracedCall(h, sent.eventId);
+    expect(call.result_excerpt).toContain('"submitted":false');
+    expect(call.result_excerpt).toContain('"reason":"cancelled"');
+  });
+
+  it('(f) refuses a write needing a choice when there is no conversation to ask in', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    addChatEndpoint(h, 'plain');
+    const tool = h.service.tools.handles().find((t) => t.name === 'config.write')!;
+    const result = (
+      await tool.call(
+        { path: 'handlers/nudge.md', content: NEW_HANDLER_NO_ROUTING, message: 'add handler' },
+        { runId: 'r1', eventId: null },
+      )
+    ).output as any;
+    expect(result).toMatchObject({ error: 'no_conversation' });
+    expect(fs.existsSync(handlerPath(h.dataDir, 'nudge'))).toBe(false);
+  });
+
+  it('(g) drops a chosen effort the target endpoint does not declare, with a note', async () => {
+    h = await bootService({ onboarded: true });
+    declareMainEfforts(h, ['low', 'high']);
+    addChatEndpoint(h, 'plain');
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    askToWriteHandler({
+      path: 'handlers/nudge.md',
+      content: NEW_HANDLER_NO_ROUTING,
+      message: 'add the nudge handler',
+    });
+
+    const sent = h.service.chat.send({ text: 'add a nudge handler' });
+    const form = await client.next('form.request', 15000);
+    expect(form.payload.fields.map((f: any) => f.name)).toEqual(['model', 'effort']);
+    const modelField = form.payload.fields[0];
+    const effortField = form.payload.fields[1];
+    expect(effortField.options).toEqual(['endpoint default', 'low', 'high']);
+    const plainOption = modelField.options.find((o: string) => o.startsWith('plain'))!;
+
+    client.send('form.submit', {
+      form_id: form.payload.form_id,
+      values: { model: plainOption, effort: 'high' },
+    });
+    await client.next('form.accepted');
+    await drain(h);
+
+    const parsed = matter(fs.readFileSync(handlerPath(h.dataDir, 'nudge'), 'utf8'));
+    expect(parsed.data.endpoint).toBe('plain');
+    expect(parsed.data.effort).toBeUndefined();
+
+    const call = tracedCall(h, sent.eventId);
+    expect(call.result_excerpt).toContain('not declared by the endpoint');
   });
 });
 

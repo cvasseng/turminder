@@ -80,7 +80,10 @@ describe('handler loading and matching (§5.1, §5.2)', () => {
       const loader = new HandlerLoader(home);
       const all = loader.all();
       expect(all).toHaveLength(1);
-      expect(all[0]?.frontmatter.model_class).toBe('fast');
+      // Absent, not defaulted: the `handler` route (§10.6) decides now, so a
+      // handler that says nothing must trace `resolved_by: "route"` or
+      // `"kind_default"`, never a false `"frontmatter"`.
+      expect(all[0]?.frontmatter.model_class).toBeUndefined();
       expect(all[0]?.frontmatter.tools).toEqual([]);
       expect(all[0]?.body).toBe('Do the thing.');
       expect(loader.errors()).toHaveLength(0);

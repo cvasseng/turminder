@@ -8,7 +8,14 @@ import type { Repos } from '../db/repos/index.js';
 import type { EventRecord } from '../db/repos/events.js';
 import { runAgent } from '../model/agent-loop.js';
 import type { ModelGateway } from '../model/gateway.js';
-import type { ModelCap, ModelEffort, ModelSelector, RunKind } from '../model/types.js';
+import type {
+  ModelCap,
+  ModelEffort,
+  ModelSelector,
+  Pin,
+  ResolvedEndpoint,
+  RunKind,
+} from '../model/types.js';
 import { GrantedDispatcher, type Grants } from '../tools/dispatcher.js';
 import { PagedDispatcher } from '../tools/paged.js';
 import type { RunGrants } from '../tools/run-grants.js';
@@ -83,11 +90,17 @@ export interface ChatExecutorDeps {
 export class ChatExecutor {
   constructor(private readonly deps: ChatExecutorDeps) {}
 
-  /** Does any endpoint accept image parts (§10.2, §26.3)? */
-  private canSee(gateway: ChatExecutorDeps['gateway']): boolean {
+  /**
+   * Can the endpoint that will actually serve this turn accept image parts
+   * (§10.2, §26.3)? Resolved with the same pin the main selector below uses —
+   * an override to a blind endpoint must answer "no", not "yes, because the
+   * default `best` endpoint can see" (found live, JUDGMENT.md).
+   */
+  private canSee(gateway: ChatExecutorDeps['gateway'], pin?: Pin): boolean {
     try {
-      gateway.router.pick({ class: 'best', caps: ['vision'] });
-      return true;
+      return gateway.router
+        .resolve({ purpose: 'chat', ...(pin ? { pin } : {}) })
+        .endpoint.caps.includes('vision');
     } catch {
       return false;
     }
@@ -254,13 +267,41 @@ export class ChatExecutor {
       limit: config.settings.chatContextTurns,
     });
     /**
+     * §10.6 step 1: the conversation's override wins **absolutely** — over
+     * class and over the capability filter. Resolved into a `Pin` here,
+     * before anything downstream asks the router, because `canSee()` needs
+     * to know which endpoint will actually serve this turn — an override to
+     * a blind endpoint must answer "no", not "yes, because the default
+     * `best` endpoint can see" (found live, JUDGMENT.md). An override naming
+     * an endpoint that has since left models.yaml clears itself, with a
+     * notice, rather than killing the conversation.
+     */
+    const override = conversation.model_override;
+    let pin: Pin | undefined;
+    if (override) {
+      if (gateway.router.byName(override, 'chat')) {
+        pin = { endpoint: override, by: 'override' };
+      } else {
+        repos.conversations.setModelOverride(conversation.id, null);
+        stream.failed({
+          conversationId: conversation.id,
+          message: `the model "${override}" is no longer configured — using the default again`,
+        });
+        l.warn(
+          { conversation: conversation.id, endpoint: override },
+          'stale model override cleared',
+        );
+      }
+    }
+
+    /**
      * Images ride only when an endpoint can actually look at them (§26.3).
      * Asking the router first means the honest bracket — "you cannot see it" —
      * is chosen by what this install has, not by hope; and reading the bytes
      * here, at assembly time, is what keeps them out of every other layer.
      */
     const wantsVision = history.some((t) => t.attachments.length > 0);
-    const visionEndpoint = wantsVision && this.canSee(gateway);
+    const visionEndpoint = wantsVision && this.canSee(gateway, pin);
     const images: ImageContext | null =
       visionEndpoint && this.deps.uploads
         ? {
@@ -303,44 +344,27 @@ export class ChatExecutor {
     const caps: ModelCap[] = wantsTools ? ['tools'] : [];
     if (visionEndpoint) caps.push('vision');
     /**
-     * §10.6 step 1: a conversation's override wins **absolutely** — over
-     * class and over the capability filter. The user forcing a model is the
-     * confirmation; the selector labels endpoints missing `tools` so the
-     * choice is informed rather than gated. An override naming an endpoint
-     * that has since left models.yaml clears itself, with a notice, rather
-     * than killing the conversation.
+     * The user forcing a model IS the confirmation (§10.6 step 1): a `pin`
+     * selector carries no `caps` at all, so an override to an endpoint
+     * missing `tools`/`vision` is informed, not gated — the tools (or the
+     * images) go quiet rather than the turn failing.
      */
-    let selector: ModelSelector = { class: 'best', caps, resolvedBy: 'kind_default' };
-    const override = conversation.model_override;
-    if (override) {
-      if (gateway.router.byName(override)) {
-        selector = { endpoint: override, resolvedBy: 'override' };
-      } else {
-        repos.conversations.setModelOverride(conversation.id, null);
-        stream.failed({
-          conversationId: conversation.id,
-          message: `the model "${override}" is no longer configured — using the default again`,
-        });
-        l.warn(
-          { conversation: conversation.id, endpoint: override },
-          'stale model override cleared',
-        );
-      }
-    }
-    if (!override || selector.resolvedBy !== 'override') {
+    let selector: ModelSelector = pin ? { purpose: 'chat', pin } : { purpose: 'chat', caps };
+    let chosen: ResolvedEndpoint;
+    if (pin) {
+      chosen = gateway.router.resolve(selector).endpoint;
+    } else {
       try {
-        gateway.router.pick(selector);
+        chosen = gateway.router.resolve(selector).endpoint;
       } catch (e) {
         if (!(e instanceof UserFacingError) || e.code !== 'no_endpoint' || !wantsTools) throw e;
         // Honest degradation (plan §3b): no tool-capable endpoint means chat
         // without tools, not chat that fails.
         l.warn({ err: e.message }, 'no tool-capable endpoint; running chat without tools');
-        selector = { class: 'best', resolvedBy: 'kind_default' };
+        selector = { purpose: 'chat' };
+        chosen = gateway.router.resolve(selector).endpoint;
       }
     }
-    // An override may point at an endpoint with no `tools` cap; the tools go
-    // quiet rather than the turn failing (§10.6: informed, not gated).
-    const chosen = gateway.router.pick(selector);
     const toolsAvailable = wantsTools && chosen.caps.includes('tools');
 
     /**
@@ -473,7 +497,7 @@ export class ChatExecutor {
     const total = repos.runs.tokensForConversation(conversation.id);
     let contextSize: number | null = null;
     try {
-      contextSize = gateway.router.pick(selector).contextSize ?? null;
+      contextSize = gateway.router.resolve(selector).endpoint.contextSize ?? null;
     } catch {
       /* the endpoint went away between the run and now; not worth failing over */
     }

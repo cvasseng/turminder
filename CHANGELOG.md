@@ -200,6 +200,22 @@
    vendored browser libraries all came back as errors, while `npm run dev`
    was fine.
 
+ * Which model handles what is now a table you can read and edit —
+   `config/models.yaml` gets a `routes:` block naming a class or an exact
+   endpoint per purpose (chat, handlers, titling, memory, and so on),
+   `turminder models` prints it against your actual config, and every model
+   call in the trace records which endpoint served it and why.
+
+ * A new **Requests** panel, beside Activity, shows every call to a model as
+   it happens: when, for what, which endpoint, tokens in and out, the
+   estimated cost, and how long it took. Nothing more — no prompt text, no
+   arguments.
+
+ * When the assistant writes a new behavior and more than one model is
+   configured, you choose which one runs it — a small form appears, the same
+   way setting a price does. The assistant cannot make that choice for
+   itself.
+
  # 1.0.0
 
  Initial public release.

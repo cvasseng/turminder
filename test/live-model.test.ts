@@ -61,7 +61,7 @@ suite('live llama.cpp endpoint', () => {
     const trace = new MemoryTraceSink();
     const deltas: string[] = [];
     const r = await runAgent(gateway(), {
-      selector: { class: 'fast' },
+      selector: { purpose: 'chat' },
       priority: 'interactive',
       system: 'Answer in one short sentence. No preamble.',
       messages: [{ role: 'user', content: 'What is the capital of Norway?' }],
@@ -81,7 +81,7 @@ suite('live llama.cpp endpoint', () => {
     const disp = new OneToolDispatcher();
     const trace = new MemoryTraceSink();
     const r = await runAgent(gateway(), {
-      selector: { caps: ['tools'] },
+      selector: { purpose: 'chat', caps: ['tools'] },
       priority: 'interactive',
       system:
         'You have tools. When the user asks for the current time you MUST call get_time. Never guess the time.',
@@ -104,7 +104,7 @@ suite('live llama.cpp endpoint', () => {
 
   it('returns schema-constrained JSON', { timeout: 120_000 }, async () => {
     const r = await gateway().turn({
-      selector: { caps: ['json'] },
+      selector: { purpose: 'chat', caps: ['json'] },
       priority: 'interactive',
       system: 'Classify the message. Return only JSON.',
       messages: [

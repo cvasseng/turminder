@@ -130,21 +130,25 @@ export class HandlerExecutor {
     try {
       result = await runAgent(gateway, {
         /**
-         * §10.6 step 2: a handler's frontmatter decides. An explicit
-         * `endpoint:` pin bypasses class routing entirely (the behaviour that
-         * must run local, or must run hosted); otherwise its `model_class`
-         * applies — which defaults to `fast`, so a handler that says nothing
-         * still resolves by the kind default rather than by accident.
+         * §10.6 step 2: a handler's frontmatter pin decides — an explicit
+         * `endpoint:` bypasses class routing entirely (the behaviour that
+         * must run local, or must run hosted), or `model_class` names a
+         * class. A handler that names neither carries no `pin` at all: the
+         * `handler` route (or its kind-default) decides, and the trace says
+         * `resolved_by: "route"|"kind_default"` rather than a false
+         * `"frontmatter"`.
          */
         selector: {
+          purpose: 'handler',
           ...(handler.frontmatter.endpoint
-            ? { endpoint: handler.frontmatter.endpoint }
-            : { class: handler.frontmatter.model_class }),
+            ? { pin: { endpoint: handler.frontmatter.endpoint, by: 'frontmatter' as const } }
+            : handler.frontmatter.model_class
+              ? { pin: { class: handler.frontmatter.model_class, by: 'frontmatter' as const } }
+              : {}),
           // The reasoning level this behaviour asked for, if any (§10.6). The
           // gateway drops it when the serving endpoint does not declare it.
           ...(handler.frontmatter.effort ? { effort: handler.frontmatter.effort } : {}),
           ...(dispatcher.granted().length ? { caps: ['tools' as const] } : {}),
-          resolvedBy: 'frontmatter' as const,
         },
         priority: 'event',
         // Long tool-heavy runs otherwise carry every result to the end (§20.4).

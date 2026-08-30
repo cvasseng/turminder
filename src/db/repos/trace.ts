@@ -26,25 +26,114 @@ function toEntry(row: TraceRow): TraceEntry {
 }
 
 /**
+ * One row of the request log (§10.8, App. D.2) — deliberately not the trace
+ * row: `data` is JSON parsed and only these fields survive, because "never
+ * any content" is the whole point (no prompt text, no args, no excerpts, no
+ * `model` id). Kept as plain strings/numbers rather than the model layer's
+ * `Purpose`/`resolved_by` union types — `db` imports only `core` (App. I),
+ * and a display row has no business enforcing a vocabulary it only shows.
+ */
+export interface CallRow {
+  seq: number;
+  at: string;
+  purpose: string;
+  endpoint: string;
+  tokens_in: number;
+  tokens_out: number;
+  cost?: number;
+  currency?: string;
+  duration_ms: number;
+  stop_reason: string;
+  resolved_by: string;
+}
+
+/** Rows predating `purpose`/`resolved_by`/`endpoint` (pre-§10.6-v2) simply
+ *  lack them (C.1) — `'unknown'` says so rather than a blank cell. */
+function buildCallRow(seq: number, at: string, data: unknown): CallRow {
+  const d = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
+  const row: CallRow = {
+    seq,
+    at,
+    purpose: typeof d.purpose === 'string' ? d.purpose : 'unknown',
+    endpoint: typeof d.endpoint === 'string' ? d.endpoint : 'unknown',
+    tokens_in: typeof d.tokens_in === 'number' ? d.tokens_in : 0,
+    tokens_out: typeof d.tokens_out === 'number' ? d.tokens_out : 0,
+    duration_ms: typeof d.duration_ms === 'number' ? d.duration_ms : 0,
+    stop_reason: typeof d.stop_reason === 'string' ? d.stop_reason : 'unknown',
+    resolved_by: typeof d.resolved_by === 'string' ? d.resolved_by : 'unknown',
+  };
+  if (typeof d.cost === 'number') row.cost = d.cost;
+  if (typeof d.currency === 'string') row.currency = d.currency;
+  return row;
+}
+
+/**
  * The trace table (§13.1). Every subsystem writes here through a bound sink, so
  * a trace row can never be attributed to the wrong event or run by accident.
  */
 export class TraceRepo {
   constructor(private readonly db: Db) {}
 
+  /**
+   * Told about every new `llm_call` row, for the request log (§10.8) — the
+   * same one-door shape as `EventsRepo.observe` (`db/repos/events.ts`): a
+   * single observer, set by the service, and a failure in it never becomes
+   * the caller's problem.
+   */
+  private observer: ((row: CallRow) => void) | null = null;
+
+  observe(fn: (row: CallRow) => void): void {
+    this.observer = fn;
+  }
+
+  private announceCall(seq: number, at: string, data: unknown): void {
+    if (!this.observer) return;
+    try {
+      this.observer(buildCallRow(seq, at, data));
+    } catch {
+      // A display surface is not worth failing a call over.
+    }
+  }
+
   append(
     kind: TraceKind,
     data: unknown,
     ctx: { eventId?: string | null; runId?: string | null } = {},
   ): void {
-    this.db
+    const at = nowIso();
+    const info = this.db
       .prepare(`INSERT INTO trace (event_id, run_id, at, kind, data) VALUES (?, ?, ?, ?, ?)`)
-      .run(ctx.eventId ?? null, ctx.runId ?? null, nowIso(), kind, JSON.stringify(data ?? {}));
+      .run(ctx.eventId ?? null, ctx.runId ?? null, at, kind, JSON.stringify(data ?? {}));
+    if (kind === 'llm_call') this.announceCall(Number(info.lastInsertRowid), at, data);
   }
 
   /** A TraceSink pinned to one event/run — what the agent loop is handed. */
   sink(ctx: { eventId?: string | null; runId?: string | null }): TraceSink {
     return { append: (kind, data) => this.append(kind, data, ctx) };
+  }
+
+  /**
+   * The request log's live window (§10.8, App. A `request_log_window`):
+   * newest first, within the caller's cutoff. `data` is fetched and parsed
+   * here — the repo boundary — so every caller sees the same typed row.
+   */
+  recentCalls(opts: { limit: number; since: string }): CallRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT seq, at, data FROM trace
+          WHERE kind = 'llm_call' AND at >= ?
+          ORDER BY at DESC, seq DESC LIMIT ?`,
+      )
+      .all(opts.since, opts.limit) as { seq: number; at: string; data: string }[];
+    return rows.map((r) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(r.data);
+      } catch {
+        parsed = {};
+      }
+      return buildCallRow(r.seq, r.at, parsed);
+    });
   }
 
   forEvent(eventId: string): TraceEntry[] {
@@ -117,7 +206,7 @@ export class TraceRepo {
   usage(opts: {
     from?: string | null;
     to?: string | null;
-    groupBy: 'endpoint' | 'kind' | 'none';
+    groupBy: 'endpoint' | 'kind' | 'purpose' | 'none';
   }): {
     key: string;
     calls: number;
@@ -141,7 +230,9 @@ export class TraceRepo {
         ? `COALESCE(json_extract(t.data, '$.endpoint'), json_extract(t.data, '$.model'), 'unknown')`
         : opts.groupBy === 'kind'
           ? `COALESCE(r.kind, 'unknown')`
-          : `'all'`;
+          : opts.groupBy === 'purpose'
+            ? `COALESCE(json_extract(t.data, '$.purpose'), 'unknown')`
+            : `'all'`;
     return this.db
       .prepare(
         `SELECT ${keyExpr} AS key,
