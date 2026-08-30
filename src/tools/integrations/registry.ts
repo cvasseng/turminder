@@ -130,6 +130,7 @@ export const MANIFESTS: IntegrationManifest[] = [
       'setup.pair_approve',
       'setup.rename',
       'setup.pricing',
+      'setup.voice',
     ],
   ),
   {

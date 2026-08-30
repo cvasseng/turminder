@@ -9,6 +9,7 @@ import type { EventIntake } from '../ingress/intake.js';
 import type { MemoryAgent } from '../memory/agent.js';
 import type { ModelRouter } from '../model/router.js';
 import { budgeted } from './budget.js';
+import { placeholderGuarded } from './placeholder.js';
 import { McpConnection } from './mcp/connect.js';
 import { configTools } from './integrations/config.js';
 import { eventsTools } from './integrations/events.js';
@@ -132,8 +133,12 @@ export class ToolHub {
     for (const conn of this.connections.values()) {
       try {
         // The transcript budget is applied here, at the one boundary every
-        // tool result crosses (§20.3) — bundled and external alike.
-        all.push(...(await conn.listTools()).map((h) => budgeted(h, maxChars)));
+        // tool result crosses (§20.3) — bundled and external alike. The
+        // placeholder guard sits inside it (§20.6): a bulk-content field that
+        // is itself a transcript marker never reaches the tool.
+        all.push(
+          ...(await conn.listTools()).map((h) => budgeted(placeholderGuarded(h), maxChars)),
+        );
       } catch (e) {
         l.warn({ source: conn.name, err: errMessage(e) }, 'listing tools failed');
       }

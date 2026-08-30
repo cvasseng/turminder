@@ -3,12 +3,21 @@ import { newId } from '../../core/ids.js';
 import { stripReservedMarkers } from '../../core/markers.js';
 import { nowIso } from '../../core/time.js';
 
-export type ConversationMode = 'normal' | 'onboarding';
+/** What the `mode` column may hold — the CHECK constraint's vocabulary. */
+export type StoredConversationMode = 'normal' | 'onboarding';
+/**
+ * What a reader sees (D.2). `voice` is **derived**, never stored: a voice
+ * conversation's `mode` column stays `normal` and its `voice_device` names the
+ * device speaking to it (§33.1, App. C). One mapper does the derivation, here,
+ * so no surface has to remember to do it.
+ */
+export type ConversationMode = StoredConversationMode | 'voice';
 export type ConversationStatus = 'open' | 'closed';
 
 export interface ConversationRow {
   id: string;
   title: string | null;
+  /** Derived, not the column: `voice` whenever `voice_device` is set. */
   mode: ConversationMode;
   status: ConversationStatus;
   created_at: string;
@@ -24,6 +33,20 @@ export interface ConversationRow {
   /** Reasoning level this conversation asks for, or null for the endpoint's
    *  own default — which is then never named on the wire (§10.6). */
   effort_override: string | null;
+  /** The voice device this conversation belongs to (§33.1), or null for one
+   *  that was typed. Each device owns at most one open voice conversation. */
+  voice_device: string | null;
+}
+
+/**
+ * The one place `mode: 'voice'` is derived (§33.1, D.2). Every read goes
+ * through it; the column itself is never rewritten, because a device can be
+ * forgotten and the conversation it spoke to is still an ordinary
+ * conversation afterwards.
+ */
+function toConversation(row: ConversationRow | undefined): ConversationRow | null {
+  if (!row) return null;
+  return row.voice_device ? { ...row, mode: 'voice' } : row;
 }
 
 export interface TurnRow {
@@ -96,7 +119,9 @@ function toTurn(row: TurnRow): Turn {
 export class ConversationsRepo {
   constructor(private readonly db: Db) {}
 
-  create(opts: { mode?: ConversationMode; id?: string } = {}): ConversationRow {
+  create(
+    opts: { mode?: StoredConversationMode; id?: string; voiceDevice?: string } = {},
+  ): ConversationRow {
     const row: ConversationRow = {
       id: opts.id ?? newId(),
       title: null,
@@ -109,24 +134,50 @@ export class ConversationsRepo {
       distilled_at: null,
       open_namespaces: '[]',
       loaded_projects: '[]',
+      voice_device: opts.voiceDevice ?? null,
     };
     this.db
       .prepare(
         `INSERT INTO conversations
            (id, title, mode, status, created_at, last_activity_at, distilled_at,
-            open_namespaces)
+            open_namespaces, voice_device)
          VALUES (@id, @title, @mode, @status, @created_at, @last_activity_at,
-                 @distilled_at, @open_namespaces)`,
+                 @distilled_at, @open_namespaces, @voice_device)`,
       )
       .run(row);
-    return row;
+    return toConversation(row)!;
   }
 
   get(id: string): ConversationRow | null {
-    return (
-      (this.db
-        .prepare(`SELECT * FROM conversations WHERE id = ?`)
-        .get(id) as ConversationRow) ?? null
+    return toConversation(
+      this.db.prepare(`SELECT * FROM conversations WHERE id = ?`).get(id) as
+        ConversationRow | undefined,
+    );
+  }
+
+  /**
+   * The conversation this device is speaking to, if it is still fresh (§33.1).
+   *
+   * "Fresh" is `idleMin` minutes since anything last happened in it — the
+   * follow-up window at the conversation level. A voice device does not get to
+   * resume yesterday's thread because it happens to be the same microphone;
+   * that would make one endless conversation of a year of kitchen questions,
+   * and distillation (§8.2) would have nothing to close.
+   */
+  voiceConversationFor(
+    device: string,
+    idleMin: number,
+    now = new Date(),
+  ): ConversationRow | null {
+    const cutoff = new Date(now.getTime() - idleMin * 60_000).toISOString();
+    return toConversation(
+      this.db
+        .prepare(
+          `SELECT * FROM conversations
+            WHERE voice_device = ? AND status = 'open' AND last_activity_at >= ?
+            ORDER BY last_activity_at DESC, id DESC LIMIT 1`,
+        )
+        .get(device, cutoff) as ConversationRow | undefined,
     );
   }
 
@@ -148,7 +199,8 @@ export class ConversationsRepo {
       .prepare(
         `SELECT * FROM conversations ${where} ORDER BY last_activity_at DESC, id DESC LIMIT ?`,
       )
-      .all(...args, opts.limit ?? 50) as ConversationRow[];
+      .all(...args, opts.limit ?? 50)
+      .map((r) => toConversation(r as ConversationRow)!);
   }
 
   /**
@@ -160,13 +212,13 @@ export class ConversationsRepo {
    * because `onboard --redo` can legitimately make another.
    */
   onboardingConversation(): ConversationRow | null {
-    return (
-      (this.db
+    return toConversation(
+      this.db
         .prepare(
           `SELECT * FROM conversations WHERE mode = 'onboarding'
            ORDER BY last_activity_at DESC, id DESC LIMIT 1`,
         )
-        .get() as ConversationRow | undefined) ?? null
+        .get() as ConversationRow | undefined,
     );
   }
 
@@ -180,7 +232,7 @@ export class ConversationsRepo {
     this.db.prepare(`UPDATE conversations SET title = ? WHERE id = ?`).run(title, id);
   }
 
-  setMode(id: string, mode: ConversationMode): void {
+  setMode(id: string, mode: StoredConversationMode): void {
     this.db.prepare(`UPDATE conversations SET mode = ? WHERE id = ?`).run(mode, id);
   }
 
@@ -377,7 +429,8 @@ export class ConversationsRepo {
           WHERE status = 'open' AND last_activity_at < ?
             AND (distilled_at IS NULL OR distilled_at < last_activity_at)`,
       )
-      .all(cutoff) as ConversationRow[];
+      .all(cutoff)
+      .map((r) => toConversation(r as ConversationRow)!);
   }
 
   /**

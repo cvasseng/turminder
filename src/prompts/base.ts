@@ -51,6 +51,22 @@ export const TOOL_USE_RULE = `Tool use:
 - Call \`tools.open\` with the namespace name before using its tools. It stays open for the rest of the conversation, so open it once and get on with the work.
 - If you call a tool from a closed namespace by name, it still works: the namespace opens itself. Guessing tool names is worse than opening the namespace and reading them.`;
 
+/**
+ * The one conversation-scoped fragment (H.5, §33.1): appended to the `chat`
+ * base prompt for the life of a voice conversation, never varied per turn, so
+ * the prefix stays byte-stable and the cache holds (§20.5). A file rather than
+ * a literal for the same reason as every other prompt — and loaded eagerly, so
+ * a missing or renamed file is a startup error rather than a silent
+ * conversation that answers in bullet points to a speaker.
+ */
+export const VOICE_FRAGMENT: string = loadVoiceFragment();
+
+function loadVoiceFragment(): string {
+  const file = readLibrary('base/fragments').find((f) => f.name === 'voice');
+  if (!file) throw new Error('missing prompt fragment: library/base/fragments/voice.md');
+  return file.content.replace(/\n$/, '');
+}
+
 const FRAGMENTS: Record<string, string> = {
   untrusted_rule: UNTRUSTED_RULE,
   memory_recall_rule: MEMORY_RECALL_RULE,

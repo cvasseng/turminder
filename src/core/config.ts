@@ -274,6 +274,15 @@ export interface Settings {
   chatMaxTurns: number;
   chatMaxTokens: number;
   chatTimeoutS: number;
+  /** Voice (§33, App. A): the conversation window, the utterance cap, the
+   *  floor below which audio is not a sentence, and the spoken-line cap. */
+  voiceIdleMin: number;
+  voiceMaxUtteranceS: number;
+  sttMinAudioMs: number;
+  spokenMaxChars: number;
+  /** §33.2 — how long a voice turn may be silent before it says it is working.
+   *  0 turns the acknowledgement off. */
+  voiceAcknowledgeAfterMs: number;
 }
 
 /** The shipped default set (Appendix A). */
@@ -321,6 +330,11 @@ export const DEFAULT_SETTINGS: Settings = {
   uploadMaxMb: 20,
   uploadTtlDays: 30,
   imageContextTurns: 2,
+  voiceIdleMin: 10,
+  voiceMaxUtteranceS: 30,
+  sttMinAudioMs: 300,
+  spokenMaxChars: 300,
+  voiceAcknowledgeAfterMs: 1200,
   retentionDays: 90,
   filesDir: null,
   filesQuiescenceS: 30,
@@ -483,6 +497,14 @@ export function resolveSettings(
   if (raw.uploads?.ttl_days !== undefined) s.uploadTtlDays = raw.uploads.ttl_days;
   if (raw.uploads?.image_context_turns !== undefined) {
     s.imageContextTurns = raw.uploads.image_context_turns;
+  }
+  if (raw.voice?.idle_min !== undefined) s.voiceIdleMin = raw.voice.idle_min;
+  if (raw.voice?.max_utterance_s !== undefined)
+    s.voiceMaxUtteranceS = raw.voice.max_utterance_s;
+  if (raw.voice?.stt_min_audio_ms !== undefined) s.sttMinAudioMs = raw.voice.stt_min_audio_ms;
+  if (raw.voice?.spoken_max_chars !== undefined) s.spokenMaxChars = raw.voice.spoken_max_chars;
+  if (raw.voice?.acknowledge_after_ms !== undefined) {
+    s.voiceAcknowledgeAfterMs = raw.voice.acknowledge_after_ms;
   }
   if (raw.gateway?.public_url !== undefined) s.gatewayPublicUrl = raw.gateway.public_url;
   if (raw.retention_days !== undefined) s.retentionDays = raw.retention_days;

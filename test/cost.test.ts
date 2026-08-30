@@ -4,7 +4,7 @@ import path from 'node:path';
 import YAML from 'yaml';
 import { ModelRouter } from '../src/model/router.js';
 import { DEFAULT_ROUTES, ROUTABLE_PURPOSES } from '../src/model/routes.js';
-import { ModelsYamlSchema } from '../src/core/config-schemas.js';
+import { HandlerFrontmatterSchema, ModelsYamlSchema } from '../src/core/config-schemas.js';
 import { callCost } from '../src/model/types.js';
 import { periodWindow } from '../src/tools/integrations/usage.js';
 import { bootService, TestClient, type ServiceHarness } from './service-harness.js';
@@ -61,7 +61,10 @@ describe('routing transparency (§10.6)', () => {
     // §10.6 step 5: the kind-default table, made concrete against THREE.
     // `distill → best`, not fast — the old literal here was wrong (Phase 36).
     for (const purpose of ROUTABLE_PURPOSES) {
-      if (purpose === 'embedding') continue; // no class default; see below
+      // The non-chat kinds have no class to default to — `embedding()` and
+      // `speech()` answer "the first endpoint of that kind" instead, and are
+      // covered in `router.test.ts`.
+      if (purpose === 'embedding' || purpose === 'stt' || purpose === 'tts') continue;
       const route = DEFAULT_ROUTES[purpose]!;
       const resolved = router.resolve({ purpose });
       expect(resolved.resolved_by, purpose).toBe('kind_default');
@@ -217,13 +220,19 @@ describe('routing transparency (§10.6)', () => {
 
 describe('reasoning effort (§10.6)', () => {
   /** Give the harness endpoint a declaration, the way a real models.yaml does. */
-  function declareEfforts(harness: ServiceHarness, efforts: string[] | null): void {
+  function declareEfforts(
+    harness: ServiceHarness,
+    efforts: string[] | null,
+    noThink?: Record<string, unknown>,
+  ): void {
     const file = path.join(harness.dataDir, 'config', 'models.yaml');
     const models = YAML.parse(fs.readFileSync(file, 'utf8')) as {
       endpoints: Record<string, unknown>[];
     };
     if (efforts) models.endpoints[0]!.efforts = efforts;
     else delete models.endpoints[0]!.efforts;
+    if (noThink) models.endpoints[0]!.no_think = noThink;
+    else delete models.endpoints[0]!.no_think;
     write(file, YAML.stringify(models));
     harness.app.config.reload();
     harness.service.loadModels();
@@ -427,6 +436,107 @@ describe('reasoning effort (§10.6)', () => {
     expect(after.messages[1]).toEqual(before.messages[1]);
     client.close();
   });
+
+  /* ── `none`: turning thinking off (§10.6, V2) ─────────────────────────── */
+
+  /** Pin `effort` on a fresh conversation and return the body that reached the
+   *  endpoint. Everything about the request except the level is held constant. */
+  async function bodyWithEffort(
+    harness: ServiceHarness,
+    effort: string | null,
+  ): Promise<Record<string, any>> {
+    const client = await TestClient.connect(harness.baseUrl, harness.token);
+    await client.hello(['chat']);
+    const sent = harness.service.chat.send({ text: 'identical question' });
+    await drain(harness);
+    if (effort) {
+      client.send('conversation.model', { conversation_id: sent.conversationId, effort });
+      await client.next('conversation.model.set');
+    }
+    harness.fake.requests.length = 0;
+    harness.service.chat.send({
+      conversationId: sent.conversationId,
+      text: 'identical question',
+    });
+    await drain(harness);
+    client.close();
+    return completions(harness).at(-1)!.body;
+  }
+
+  it('sends the endpoint own no_think fragment for `none`, never reasoning_effort', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    declareEfforts(h, ['none', 'low'], { chat_template_kwargs: { enable_thinking: false } });
+    h.fake.always({ text: 'answered' });
+
+    const body = await bodyWithEffort(h, 'none');
+    expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
+    // The level itself never travels under its own name — `none` is spelled by
+    // the fragment, and a server that saw both would honour whichever it knew.
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it('falls back to reasoning_effort: none when the endpoint declares the level but not the knob', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    declareEfforts(h, ['none']);
+    h.fake.always({ text: 'answered' });
+    const body = await bodyWithEffort(h, 'none');
+    expect(body.reasoning_effort).toBe('none');
+    expect(body.chat_template_kwargs).toBeUndefined();
+  });
+
+  it('sends nothing at all when `none` was never declared', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    declareEfforts(h, ['low', 'high'], { chat_template_kwargs: { enable_thinking: false } });
+    h.fake.always({ text: 'answered' });
+    const sent = h.service.chat.send({ text: 'hello' });
+    await drain(h);
+    // Straight onto the row, past the frame's validation — the gateway is the
+    // last gate, and it must hold on its own (§10.6).
+    h.service.repos.conversations.setEffortOverride(sent.conversationId, 'none');
+    h.fake.requests.length = 0;
+    h.service.chat.send({ conversationId: sent.conversationId, text: 'again' });
+    await drain(h);
+    const body = completions(h).at(-1)!.body;
+    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.chat_template_kwargs).toBeUndefined();
+  });
+
+  it('leaves the messages byte-identical with `none` on (the prefix guard)', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    declareEfforts(h, ['none'], { chat_template_kwargs: { enable_thinking: false } });
+    h.fake.always({ text: 'same either way' });
+    const before = await bodyWithEffort(h, null);
+    const after = await bodyWithEffort(h, 'none');
+    // Turning thinking off must cost nothing in prompt bytes — a voice turn
+    // depends on the warm prefix (§33.4), and a changed system prompt forfeits it.
+    expect(after.messages).toEqual(before.messages);
+  });
+
+  it('offers `none` to the chat selector and to handler frontmatter like any other level', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    declareEfforts(h, ['none', 'low']);
+    const sent = h.service.chat.send({ text: 'hello' });
+    await drain(h);
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat']);
+    client.send('models.list', { conversation_id: sent.conversationId });
+    const listed = await client.next('models.list.result');
+    // The declaration is what draws the control, so `none` must be in it.
+    expect(listed.payload.endpoints[0].efforts).toEqual(['none', 'low']);
+    client.send('conversation.model', { conversation_id: sent.conversationId, effort: 'none' });
+    expect((await client.next('conversation.model.set')).payload.effort).toBe('none');
+    client.close();
+
+    // Frontmatter takes it through the same schema.
+    expect(
+      HandlerFrontmatterSchema.safeParse({
+        name: 'quiet',
+        description: 'Mechanical.',
+        match: { types: ['thing.filed'] },
+        effort: 'none',
+      }).success,
+    ).toBe(true);
+  });
 });
 
 describe('the usage ledger (F.17, §10.5)', () => {
@@ -494,6 +604,48 @@ describe('the usage ledger (F.17, §10.5)', () => {
     expect(byKey.chat).toMatchObject({ calls: 1, tokens_in: 100, tokens_out: 50 });
     expect(byKey.title).toMatchObject({ calls: 1, tokens_in: 10, tokens_out: 5 });
     expect(byKey.unknown).toMatchObject({ calls: 1 });
+  });
+
+  it('sums speech calls by purpose with money and no tokens (§10.9, V1.8)', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    const trace = h.service.repos.trace.sink({ eventId: null, runId: null });
+    // Two transcriptions and one sentence spoken: zero tokens all round, but
+    // real money — the shape a speech row has (C.1).
+    trace.append('llm_call', {
+      endpoint: 'whisper',
+      purpose: 'stt',
+      tokens_in: 0,
+      tokens_out: 0,
+      audio_s: 30,
+      cost: 0.003,
+      currency: 'USD',
+    });
+    trace.append('llm_call', {
+      endpoint: 'whisper',
+      purpose: 'stt',
+      tokens_in: 0,
+      tokens_out: 0,
+      audio_s: 30,
+      cost: 0.003,
+      currency: 'USD',
+    });
+    trace.append('llm_call', {
+      endpoint: 'piper',
+      purpose: 'tts',
+      tokens_in: 0,
+      tokens_out: 0,
+      chars: 200,
+      cost: 0.003,
+      currency: 'USD',
+    });
+
+    const summary = h.service.tools.handles().find((t) => t.name === 'usage.summary')!;
+    const out = (
+      await summary.call({ period: 'all', group_by: 'purpose' }, { runId: null, eventId: null })
+    ).output as any;
+    const byKey = Object.fromEntries(out.groups.map((g: any) => [g.key, g]));
+    expect(byKey.stt).toMatchObject({ calls: 2, tokens_in: 0, tokens_out: 0, cost: 0.006 });
+    expect(byKey.tts).toMatchObject({ calls: 1, cost: 0.003, currency: 'USD' });
   });
 
   it('groups mixed currencies rather than adding them', async () => {

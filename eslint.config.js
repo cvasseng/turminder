@@ -21,6 +21,8 @@ const browserGlobals = {
   requestAnimationFrame: 'readonly',
   NodeFilter: 'readonly',
   DOMParser: 'readonly',
+  // The voice-field preview plays a WAV the server made (§33.5, D.5).
+  Audio: 'readonly',
   console: 'readonly',
   marked: 'readonly',
 };

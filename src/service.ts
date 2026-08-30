@@ -60,6 +60,7 @@ import { RevealBroker } from './chat/reveals.js';
 import { PairingBroker, type PairKind, type PairRequest } from './core/pairing.js';
 import { GrantStore } from './tools/grants.js';
 import { RunGrants } from './tools/run-grants.js';
+import { ChatStops } from './chat/stop.js';
 import { setupTools } from './tools/integrations/setup/tools.js';
 import { ChatService } from './chat/service.js';
 import { ChatStreamHub } from './chat/stream.js';
@@ -153,6 +154,8 @@ export class Service {
    * built the run's dispatcher, so "what may this run call" has one answer.
    */
   readonly runGrants = new RunGrants();
+  /** In-flight chat runs, so `chat.stop` (App. D) has a handle to pull. */
+  readonly chatStops = new ChatStops();
 
   private models: ModelStack | null = null;
   private toolHub: ToolHub | null = null;
@@ -482,6 +485,7 @@ export class Service {
         confirm: this.confirm,
         grants: this.grants,
         runGrants: this.runGrants,
+        stops: this.chatStops,
         background: this.background,
         projects: this.projects,
         ...(this.ragIndex ? { rag: this.ragIndex } : {}),
@@ -606,7 +610,7 @@ export class Service {
       memory: this.memoryAgent,
       projectScope: this.projectScope,
       extra: {
-        deliver: deliverTools(this.outbox),
+        deliver: deliverTools(this.outbox, () => this.app.config.settings.spokenMaxChars),
         files: filesTools({
           store: this.files,
           index: this.filesIndex,
@@ -639,6 +643,7 @@ export class Service {
         setup: setupTools({
           home: this.app.home,
           config: this.app.config,
+          router: () => this.models?.router ?? null,
           intake: this.intake,
           forms: this.forms,
           reveals: this.reveals,

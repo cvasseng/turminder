@@ -118,14 +118,22 @@ export class MemoryAgent {
   async update(
     name: string,
     changes: { content?: string; description?: string },
-  ): Promise<{ name: string; file: string } | null> {
+  ): Promise<{ name: string; file: string; updated: true; chars?: number } | null> {
     const updated = this.store.update(name, changes);
     if (!updated) return null;
     this.store.commit(`memory(updated): ${updated.name} — ${updated.description}`, [
       updated.file,
     ]);
     await this.index.sync();
-    return { name: updated.name, file: updated.file };
+    // Say plainly that it landed, and how much: the transcript will shortly
+    // show this call's `content` as a placeholder (§20.6), and a result that
+    // only echoed the name left a model unsure whether anything was written.
+    return {
+      name: updated.name,
+      file: updated.file,
+      updated: true,
+      ...(changes.content !== undefined ? { chars: changes.content.length } : {}),
+    };
   }
 
   async forget(name: string, reason: string): Promise<{ name: string; deleted: boolean }> {

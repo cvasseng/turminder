@@ -14,6 +14,8 @@ import {
 import type { RevealBroker } from '../../../chat/reveals.js';
 import { DEVICE_NAME, DEVICE_NAME_MAX, type DeviceTokens } from '../../../core/tokens.js';
 import type { PairingBroker } from '../../../core/pairing.js';
+import type { ModelRouter } from '../../../model/router.js';
+import { listVoices } from '../../../model/probe.js';
 import type { ToolContext, ToolDefinition } from '../../types.js';
 import type { Grants } from '../../dispatcher.js';
 import type { GrantStore } from '../../grants.js';
@@ -68,6 +70,9 @@ interface PricedEndpoint {
 
 export interface SetupDeps extends TemplateContext, ActivationContext {
   forms: FormBroker;
+  /** Live, like `configTools`': the stack is rebuilt on every models.yaml
+   *  reload, so a snapshot taken at construction goes stale (§33.5). */
+  router: () => ModelRouter | null;
   /** Where a minted token value goes — and the only place it ever exists (§24.2). */
   reveals: RevealBroker;
   /** The one door into channels.yaml (§24.1). */
@@ -82,11 +87,70 @@ export interface SetupDeps extends TemplateContext, ActivationContext {
   rebuildIndexes: () => Promise<Record<string, { indexed: number; vectors: number }>>;
 }
 
+/**
+ * The transcriber languages the form offers (§33.5). Whisper's common set,
+ * spelled `"<code> — <Name>"` so the human reads names and the file gets
+ * codes. `auto` first, because "let it work it out" is the honest default for
+ * a household that switches languages mid-sentence.
+ *
+ * One exported constant, so `setup.voice` and its tests read the same list.
+ */
+export const STT_LANGUAGES: string[] = [
+  'auto — let the transcriber detect',
+  'nb — Norwegian Bokmål',
+  'nn — Norwegian Nynorsk',
+  'no — Norwegian',
+  'sv — Swedish',
+  'da — Danish',
+  'fi — Finnish',
+  'is — Icelandic',
+  'en — English',
+  'de — German',
+  'nl — Dutch',
+  'fr — French',
+  'es — Spanish',
+  'pt — Portuguese',
+  'it — Italian',
+  'pl — Polish',
+  'cs — Czech',
+  'ru — Russian',
+  'uk — Ukrainian',
+  'tr — Turkish',
+  'ar — Arabic',
+  'hi — Hindi',
+  'zh — Chinese',
+  'ja — Japanese',
+  'ko — Korean',
+];
+
+/** What OpenAI's dialect defines, and therefore what an endpoint that lists
+ *  nothing is assumed to take (§33.5). */
+export const OPENAI_VOICES: string[] = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'];
+
+/** `"nb — Norwegian Bokmål"` → `nb`. */
+function languageCode(option: string): string {
+  return (option.split('—')[0] ?? option).trim() || 'auto';
+}
+
+/** The option a stored code corresponds to, so the form prefills with a value
+ *  the select actually contains. An unknown code falls back to `auto`. */
+function languageOption(code: string): string {
+  return STT_LANGUAGES.find((o) => languageCode(o) === code) ?? STT_LANGUAGES[0]!;
+}
+
+/** The G.2 fields `setup.voice` reads and writes; everything else on the entry
+ *  is carried through untouched. */
+interface SpeechEntry {
+  name: string;
+  language?: string;
+  voice?: string;
+}
+
 /** The subset of FieldSpec an agent may supply or override (App. F.9, D.5). */
 const FieldSpecSchema = z.object({
   name: z.string().min(1),
   label: z.string().optional(),
-  type: z.enum(['text', 'url', 'number', 'select', 'secret', 'choice']).optional(),
+  type: z.enum(['text', 'url', 'number', 'select', 'secret', 'choice', 'voice']).optional(),
   required: z.boolean().optional(),
   value: z.union([z.string(), z.number()]).optional(),
   options: z.array(z.string()).optional(),
@@ -165,7 +229,9 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
       tier: 'se',
       args: z.object({
         title: z.string().min(1),
-        template: z.enum(['mcp_stdio', 'mcp_http', 'model_endpoint']).optional(),
+        template: z
+          .enum(['mcp_stdio', 'mcp_http', 'model_endpoint', 'speech_endpoint'])
+          .optional(),
         embed_id: z
           .string()
           .min(1)
@@ -751,6 +817,125 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
             ? 'applies to calls from now on; earlier runs keep the price they ran at'
             : 'this endpoint is costless by declaration again, reported as local rather than 0.00',
         };
+      },
+    },
+    {
+      name: 'setup.voice',
+      description:
+        'Set the language the assistant listens for and the voice it speaks with. Opens ' +
+        'one form: the user picks, and can hear each candidate voice before choosing. Use ' +
+        'when asked to speak a different language or sound different.',
+      tier: 'se',
+      args: z.strictObject({}),
+      async execute(_args: Record<string, never>, ctx: ToolContext) {
+        if (!ctx.conversationId) {
+          return {
+            error: 'no_conversation',
+            message: 'the voice form renders in a chat conversation; this run has none',
+          };
+        }
+        if (!ctx.runId) return { error: 'no_run', message: 'no run to suspend' };
+
+        const router = deps.router();
+        const stt = router?.speech('stt') ?? null;
+        const tts = router?.speech('tts') ?? null;
+        for (const [kind, endpoint] of [
+          ['stt', stt],
+          ['tts', tts],
+        ] as const) {
+          if (endpoint) continue;
+          // The fix is a different form, so name it rather than opening this
+          // one over a config that has nothing to configure (§10.9).
+          return {
+            error: 'no_speech_endpoint',
+            kind,
+            message:
+              `there is no ${kind} endpoint to configure — connect one first with ` +
+              `setup.form, template speech_endpoint`,
+          };
+        }
+
+        const file = deps.home.path('config', 'models.yaml');
+        const doc = readRaw(file);
+        const endpoints = Array.isArray(doc.endpoints) ? (doc.endpoints as SpeechEntry[]) : [];
+        const sttEntry = endpoints.find((e) => e.name === stt!.name);
+        const ttsEntry = endpoints.find((e) => e.name === tts!.name);
+        if (!sttEntry || !ttsEntry) {
+          return {
+            error: 'no_speech_endpoint',
+            kind: sttEntry ? 'tts' : 'stt',
+            message: 'the resolved speech endpoint is not in config/models.yaml',
+          };
+        }
+
+        // Absent means the identity locale (§10.9), so that is what the form
+        // shows — the prefill is the behaviour, not a guess about it.
+        const locale = deps.config.identity()?.frontmatter.locale;
+        const currentLanguage = sttEntry.language ?? locale ?? 'auto';
+        const listed = await listVoices(tts!, {
+          ...(deps.fetch ? { fetch: deps.fetch } : {}),
+        });
+        const configured = ttsEntry.voice;
+        const offered = listed ?? OPENAI_VOICES;
+        // A configured voice the endpoint does not list is a leftover from a
+        // synthesiser this endpoint no longer is — swapping openedai-speech for
+        // Speaches leaves `voice: alloy` behind, and Kokoro has no `alloy`
+        // (Christer, 2026-08-31). It stays *reachable*, because a listing can
+        // be incomplete and nothing should become unpickable; it does not stay
+        // the default, because the default is what submitting without touching
+        // anything writes back.
+        const stale = configured !== undefined && !offered.includes(configured);
+        const currentVoice = stale ? (offered[0] ?? configured) : (configured ?? offered[0]!);
+        const voices = stale
+          ? [...new Set([...offered, configured])]
+          : [...new Set([currentVoice, ...offered])];
+        const name = deps.config.identity()?.frontmatter.instance_name ?? 'Turminder';
+
+        const outcome = await deps.forms.request({
+          runId: ctx.runId,
+          conversationId: ctx.conversationId,
+          title: `How should ${name} listen and speak?`,
+          fields: [
+            {
+              name: 'language',
+              label: 'Language to transcribe',
+              type: 'select',
+              options: STT_LANGUAGES,
+              value: languageOption(currentLanguage),
+            },
+            {
+              name: 'voice',
+              label: 'Voice to speak with',
+              type: 'voice',
+              options: voices,
+              value: currentVoice,
+            },
+          ],
+        });
+        if (!outcome.submitted) return { submitted: false, reason: outcome.reason };
+
+        const language = languageCode(String(outcome.values.language ?? ''));
+        const voice = String(outcome.values.voice ?? '').trim() || currentVoice;
+        const nextStt: SpeechEntry = { ...sttEntry };
+        // `auto` is the absence of a pin, not a value to write: G.2 says an
+        // absent `language` means the locale, and `auto` means detect — the
+        // transcriber is asked for neither.
+        if (language === 'auto') delete nextStt.language;
+        else nextStt.language = language;
+        const nextTts: SpeechEntry = { ...ttsEntry, voice };
+
+        const committed = writeRaw(
+          deps.home,
+          'config/models.yaml',
+          {
+            ...doc,
+            endpoints: upsertByName(upsertByName(endpoints, nextStt), nextTts),
+          },
+          `setup: voice language ${language}, voice ${voice}`,
+        );
+        const loaded = deps.reloadModels();
+        l.info({ language, voice, committed, loaded }, 'voice configuration written');
+        return { submitted: true, language, voice, committed, models_loaded: loaded };
       },
     },
     {

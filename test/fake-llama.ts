@@ -16,10 +16,11 @@ export interface ScriptedToolCall {
 export interface ScriptedTurn {
   text?: string;
   /**
-   * Streamed on the reasoning channel (`delta.reasoning_content`), the way
-   * llama.cpp reports a thinking model's block — which is a different path from
-   * inline `<think>` tags in `text`, and the only one that produces live
-   * reasoning activity (§20.1).
+   * Reported on the reasoning channel — `delta.reasoning_content` when
+   * streaming, `message.reasoning_content` when not — the way llama.cpp and
+   * vLLM report a thinking model's block. A different path from inline
+   * `<think>` tags in `text`, and the only one that produces live reasoning
+   * activity (§20.1).
    */
   reasoning?: string;
   toolCalls?: ScriptedToolCall[];
@@ -306,6 +307,10 @@ export class FakeLlama {
           message: {
             role: 'assistant',
             content: turn.text ?? '',
+            // vLLM and llama.cpp both put the thinking here on a non-streamed
+            // answer, the way they put it on `delta.reasoning_content` when
+            // streaming — a probe or a one-shot agent call sees this shape.
+            ...(turn.reasoning ? { reasoning_content: turn.reasoning } : {}),
             ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
           },
           finish_reason: finishReason,

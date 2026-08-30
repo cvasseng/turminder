@@ -148,12 +148,16 @@ export class GrantedDispatcher implements ToolDispatcher {
       // `traceOutput` (§20.3) rides through untouched: the trace must show what
       // the tool returned, not what the transcript budget left of it.
       // `bulkArgs` is reported only from here, the one path where the tool ran
-      // and its content is therefore readable back (§20.6).
+      // and its content is therefore readable back (§20.6) — and only when it
+      // succeeded: a refused or failed write stored nothing, and a stub saying
+      // "written and is stored" over content that was not is exactly the lie
+      // that sent a model re-sending its writes (2026-08-30).
       const outcome = await handle.call(call.args, this.ctx);
+      const stored = outcome.ok && !isErrorReturn(outcome.output);
       return {
         ...outcome,
         ...traceArgs,
-        ...(handle.bulkArgs?.length ? { bulkArgs: handle.bulkArgs } : {}),
+        ...(handle.bulkArgs?.length && stored ? { bulkArgs: handle.bulkArgs } : {}),
         // Structural emptiness, decided here because this is where the handle
         // is (§20.9). The loop counts; it does not judge.
         empty: isEmptyResult(handle, outcome.output),
@@ -186,5 +190,10 @@ function isEmptyResult(handle: ToolHandle, output: unknown): boolean {
       return false;
     }
   }
+  return isErrorReturn(output);
+}
+
+/** The expected-failure shape every tool speaks (`{error, message}`). */
+function isErrorReturn(output: unknown): boolean {
   return Boolean(output && typeof output === 'object' && 'error' in output);
 }

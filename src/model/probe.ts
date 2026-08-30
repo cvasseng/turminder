@@ -1,11 +1,15 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { jsonSchema, tool, type ToolSet } from 'ai';
 import { z } from 'zod';
 import { log } from '../core/logger.js';
 import { errMessage } from '../core/errors.js';
-import { ModelsYamlSchema, type ModelCap } from '../core/config-schemas.js';
+import { ModelsYamlSchema, type ModelCap, type ModelEffort } from '../core/config-schemas.js';
 import { ModelGateway } from './gateway.js';
 import { ModelRouter } from './router.js';
+import type { ResolvedEndpoint } from './types.js';
 import { InferenceScheduler } from './scheduler.js';
+import { readWavHeader } from './wav.js';
 
 const l = log('probe');
 
@@ -22,6 +26,13 @@ export interface ProbeOptions {
   model?: string;
   fetch?: typeof globalThis.fetch;
   timeoutMs?: number;
+  /**
+   * The `no_think` body fragment to test (§10.6, G.2). Absent means the default
+   * `{reasoning_effort: "none"}` — so probing an endpoint whose server wants
+   * `chat_template_kwargs` correctly reports that the default knob does nothing
+   * there, which is the honest answer to "does this work out of the box".
+   */
+  noThink?: Record<string, unknown>;
 }
 
 export interface ProbeResult {
@@ -33,6 +44,14 @@ export interface ProbeResult {
   models?: string[];
   context_size?: number;
   caps: ModelCap[];
+  /**
+   * Effort levels this probe could *verify* (§10.6) — in practice only `none`,
+   * because "did it stop thinking" is checkable and "did it think harder" is
+   * not. Reported, never auto-written: a partial `efforts` list would claim by
+   * omission that the levels nobody measured are unsupported (§10.2's rule —
+   * the probe result is the default, the config is the decision).
+   */
+  efforts?: ModelEffort[];
   /** Per-probe detail, for honest reporting in the setup UI (plan §3b). */
   checks: {
     reachable: boolean;
@@ -41,6 +60,8 @@ export interface ProbeResult {
     tools: boolean;
     long_context: boolean;
     vision: boolean;
+    /** The endpoint thinks by default *and* the `no_think` fragment stops it. */
+    no_think: boolean;
   };
   smoke?: string;
   notes: string[];
@@ -259,6 +280,11 @@ function gatewayFor(api: string, opts: ProbeOptions, modelId: string): ModelGate
           model: modelId,
           classes: ['fast', 'best'],
           caps: ['json', 'tools'],
+          // Declared so the gateway will actually *send* the fragment when the
+          // reasoning-off check asks for `none` — the same gate a real call
+          // passes through (§10.6), not a bypass built for the probe.
+          efforts: ['none'],
+          ...(opts.noThink ? { no_think: opts.noThink } : {}),
           ...(opts.apiKey ? { api_key: opts.apiKey } : {}),
         },
       ],
@@ -305,6 +331,7 @@ export async function probeEndpoint(
     tools: false,
     long_context: false,
     vision: false,
+    no_think: false,
   };
   const result: ProbeResult = { url: api, reachable: false, caps: [], checks, notes };
 
@@ -466,6 +493,39 @@ export async function probeEndpoint(
     notes.push(`vision round-trip failed: ${errMessage(e)}`);
   }
 
+  // 6. `none` as an effort (§10.6): does this endpoint's thinking actually stop?
+  //
+  // Two calls of the same question, because either half alone proves nothing.
+  // A model that never reasons would "pass" a one-call check while honouring
+  // no knob at all — and tagging it `none` would tell a voice conversation it
+  // had turned something off that was never on. So: reason first, then don't.
+  try {
+    const question = 'A farmer has 17 sheep. All but 9 run away. How many are left?';
+    const ask = (effort?: 'none') =>
+      gateway.turn({
+        selector: { purpose: 'probe', ...(effort ? { effort } : {}) },
+        priority: 'interactive',
+        system: 'Answer with one number.',
+        messages: [{ role: 'user', content: question }],
+        maxOutputTokens: 512,
+        abortSignal: AbortSignal.timeout(timeoutMs),
+      });
+    const thinking = await ask();
+    if (thinking.reasoningChars > 0) {
+      const quiet = await ask('none');
+      checks.no_think = quiet.reasoningChars === 0;
+      if (!checks.no_think) {
+        notes.push('the endpoint kept reasoning with thinking turned off — `none` not offered');
+      }
+    } else {
+      notes.push(
+        'the endpoint did not reason at all, so there is nothing for `none` to turn off',
+      );
+    }
+  } catch (e) {
+    notes.push(`the reasoning-off check failed: ${errMessage(e)}`);
+  }
+
   checks.long_context = (contextSize ?? 0) >= LONG_CONTEXT_THRESHOLD;
 
   const caps: ModelCap[] = [];
@@ -474,7 +534,288 @@ export async function probeEndpoint(
   if (checks.long_context) caps.push('long_context');
   if (checks.vision) caps.push('vision');
   result.caps = caps;
+  if (checks.no_think) result.efforts = ['none'];
 
   l.info({ url: api, caps, checks }, 'probe complete');
+  return result;
+}
+
+/* ── Speech endpoints (§10.9) ────────────────────────────────────────────── */
+
+/**
+ * The `stt` probe's stimulus: a 16 kHz mono clip of the sentence in
+ * `probe.txt`, rendered once from the reference synthesiser and checked in.
+ * A file rather than a base64 constant because a second and a half of speech
+ * is 49 KB of bytes, and a source file is for reading — the build copies the
+ * directory next to the compiled module the way it copies the prompt library,
+ * and `test/voice-fixture.test.ts` walks the header the way the green PNG's
+ * guard test walks its chunks.
+ *
+ * **A probe validates its own stimulus** (§10.2): a fixture that is itself
+ * broken false-negatives every transcriber that actually works.
+ */
+const FIXTURE_DIR = path.join(import.meta.dirname, 'fixtures');
+export const STT_FIXTURE_WAV = path.join(FIXTURE_DIR, 'probe.wav');
+export const STT_FIXTURE_TXT = path.join(FIXTURE_DIR, 'probe.txt');
+
+/** The fixture is English, whatever the install's locale is — the transcript
+ *  it is scored against is English words. */
+const STT_FIXTURE_LANGUAGE = 'en';
+
+/**
+ * How much of the fixture a transcriber has to get right to pass. Not 100 %:
+ * "Turminder" is an invented proper noun and every whisper build heard so far
+ * renders it "Reminder" — refusing an endpoint for mishearing a made-up name
+ * would fail every endpoint in the world. Six words of seven is the reference
+ * result; the threshold sits just under it.
+ */
+const STT_MATCH_THRESHOLD = 0.8;
+
+/** The shortest speech worth calling speech — under this the endpoint answered
+ *  with a click, which is what a silently-broken synthesiser sounds like. */
+const TTS_MIN_SECONDS = 0.3;
+
+export interface SttProbeResult {
+  url: string;
+  reachable: boolean;
+  model_id?: string;
+  transcript?: string;
+  /** Did enough of the known sentence come back (`STT_MATCH_THRESHOLD`)? */
+  matched: boolean;
+  error?: string;
+}
+
+export interface TtsProbeResult {
+  url: string;
+  reachable: boolean;
+  model_id?: string;
+  sample_rate?: number;
+  seconds?: number;
+  /** Did the endpoint answer with real audio? */
+  ok: boolean;
+  /** The voices it lists, when it lists any (§33.5, V5.1). */
+  voices?: string[];
+  error?: string;
+}
+
+export type SpeechProbeResult = SttProbeResult | TtsProbeResult;
+
+/** Lower-cased, punctuation-stripped words — the shape both sides of the
+ *  transcript comparison are reduced to before they are compared. */
+function words(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/** The model id an endpoint serves, and the ids it lists — the same
+ *  `/v1/models` read `probeEndpoint` opens with, minus the capability work a
+ *  speech endpoint has no answer for. */
+async function speechModels(
+  api: string,
+  opts: ProbeOptions,
+): Promise<{ ok: boolean; modelId?: string; error?: string }> {
+  const listed = await getJson(`${api}/models`, opts);
+  if (!listed.ok) return { ok: false, ...(listed.error ? { error: listed.error } : {}) };
+  const data: any[] = Array.isArray(listed.body?.data) ? listed.body.data : [];
+  const ids = data.map((m) => m?.id).filter((id): id is string => typeof id === 'string');
+  const modelId = opts.model ?? ids[0];
+  return { ok: true, ...(modelId ? { modelId } : {}) };
+}
+
+/**
+ * The voices a `tts` endpoint offers, or `undefined` when it does not say
+ * (§33.5) — the form's option list, and the preview route's allowlist.
+ *
+ * Three routes because the ecosystem has not settled on one: Speaches
+ * serves the first, some forks the second, others the bare third; OpenAI and
+ * openedai-speech serve none at all, which is not an error — it means the form
+ * falls back to the six names OpenAI's dialect defines.
+ *
+ * Any JSON array is accepted, of strings or of objects wearing an `id`, `name`
+ * or `voice_id`: the shape is not standardised either, and refusing a listing
+ * for spelling its key differently would buy nothing.
+ */
+export async function listVoices(
+  endpoint: Pick<ResolvedEndpoint, 'url' | 'apiKey' | 'model'>,
+  opts: Pick<ProbeOptions, 'fetch' | 'timeoutMs'> = {},
+): Promise<string[] | undefined> {
+  const { api } = normaliseEndpointUrl(endpoint.url);
+  // Keyed by model as well as address: one Speaches serves several
+  // synthesisers with different voices, and the answer for one is wrong for
+  // the other.
+  const key = `${api}|${endpoint.model}`;
+  const hit = VOICE_CACHE.get(key);
+  if (hit && hit.at > Date.now() - VOICE_CACHE_TTL_MS) return hit.voices;
+  const voices = await fetchVoices(api, {
+    ...(endpoint.apiKey ? { apiKey: endpoint.apiKey } : {}),
+    ...(endpoint.model ? { model: endpoint.model } : {}),
+    ...opts,
+  });
+  VOICE_CACHE.set(key, { at: Date.now(), ...(voices ? { voices } : {}) });
+  return voices;
+}
+
+/**
+ * Cached per process for a minute (the App. F.5 page-cache precedent, same
+ * reasoning): a form that opens twice must not re-ask, and a voice added to
+ * the endpoint must not take a restart to appear. A miss is cached too — three
+ * 404s per form render, on every render, for an endpoint that will never list
+ * anything, is the case this is actually for.
+ */
+const VOICE_CACHE_TTL_MS = 60_000;
+const VOICE_CACHE = new Map<string, { at: number; voices?: string[] }>();
+
+/** Drops every cached listing. Tests, and nothing else — a process cache with
+ *  a minute's TTL needs no invalidation in production. */
+export function clearVoiceCache(): void {
+  VOICE_CACHE.clear();
+}
+
+async function fetchVoices(api: string, opts: ProbeOptions): Promise<string[] | undefined> {
+  const routes = [`${api}/audio/speech/voices`, `${api}/audio/voices`, `${api}/voices`];
+  for (const url of routes) {
+    const res = await getJson(url, opts);
+    if (!res.ok) continue;
+    const raw: unknown = Array.isArray(res.body)
+      ? res.body
+      : (res.body?.voices ?? res.body?.data);
+    const names = voiceNames(raw);
+    if (names.length) return names;
+  }
+  // Nothing flat. Ask what the endpoint serves and look inside the model this
+  // one is configured for — the Speaches shape, and the only one that can tell
+  // two synthesisers on one address apart.
+  for (const url of [`${api}/models`, `${api}/registry?task=text-to-speech`]) {
+    const res = await getJson(url, opts);
+    if (!res.ok) continue;
+    const entries: any[] = Array.isArray(res.body?.data) ? res.body.data : [];
+    const named = opts.model ? entries.find((m) => m?.id === opts.model) : undefined;
+    // A model that was asked for and lists no voices is the answer "none", not
+    // a reason to go and read a different model's.
+    const entry = named ?? entries.find((m) => voiceNames(m?.voices).length);
+    const names = voiceNames(entry?.voices);
+    if (names.length) return names;
+  }
+  return undefined;
+}
+
+/** Names out of a voice listing, whatever key this server spells them with. */
+function voiceNames(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((v: any) => (typeof v === 'string' ? v : (v?.name ?? v?.id ?? v?.voice_id)))
+    .filter((v: unknown): v is string => typeof v === 'string' && v.length > 0);
+}
+
+/**
+ * Probe a speech endpoint (§10.9). Like every probe: what it actually does,
+ * not what it claims, and reported rather than thrown. Writes nothing —
+ * `setup.form`'s `speech_endpoint` template decides what to do with the answer.
+ */
+export async function probeSpeech(
+  kind: 'stt' | 'tts',
+  rawUrl: string,
+  opts: ProbeOptions & { voice?: string } = {},
+): Promise<SpeechProbeResult> {
+  const { api } = normaliseEndpointUrl(rawUrl);
+  const doFetch = opts.fetch ?? globalThis.fetch;
+  const timeoutMs = opts.timeoutMs ?? 60_000;
+  const listed = await speechModels(api, opts);
+  const modelId = listed.modelId;
+
+  if (kind === 'stt') {
+    const result: SttProbeResult = { url: api, reachable: false, matched: false };
+    if (modelId) result.model_id = modelId;
+    let audio: Buffer;
+    let expected: string;
+    try {
+      audio = fs.readFileSync(STT_FIXTURE_WAV);
+      expected = fs.readFileSync(STT_FIXTURE_TXT, 'utf8').trim();
+    } catch (e) {
+      // The stimulus, not the endpoint. Say so — a missing fixture reported as
+      // a failing transcriber is exactly the §10.2 lesson happening again.
+      result.error = `the probe's own audio fixture is missing: ${errMessage(e)}`;
+      return result;
+    }
+    try {
+      const form = new FormData();
+      form.set('file', new Blob([new Uint8Array(audio)], { type: 'audio/wav' }), 'probe.wav');
+      form.set('model', modelId ?? 'default');
+      form.set('language', STT_FIXTURE_LANGUAGE);
+      form.set('response_format', 'json');
+      const res = await doFetch(`${api}/audio/transcriptions`, {
+        method: 'POST',
+        headers: authHeaders(opts.apiKey),
+        body: form,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) {
+        result.error = `POST ${api}/audio/transcriptions: ${await describeFailure(res, opts.apiKey)}`;
+        return result;
+      }
+      const body: any = await res.json();
+      const transcript = typeof body?.text === 'string' ? body.text.trim() : '';
+      result.reachable = true;
+      result.transcript = transcript;
+      const want = words(expected);
+      const heard = new Set(words(transcript));
+      const hits = want.filter((w) => heard.has(w)).length;
+      result.matched = want.length > 0 && hits / want.length >= STT_MATCH_THRESHOLD;
+      if (!result.matched) {
+        result.error = `transcribed "${transcript}" — expected "${expected}"`;
+      }
+    } catch (e) {
+      result.error = `POST ${api}/audio/transcriptions: ${errMessage(e)}`;
+    }
+    l.info({ url: api, matched: result.matched }, 'stt probe complete');
+    return result;
+  }
+
+  const result: TtsProbeResult = { url: api, reachable: false, ok: false };
+  if (modelId) result.model_id = modelId;
+  try {
+    const res = await doFetch(`${api}/audio/speech`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeaders(opts.apiKey) },
+      body: JSON.stringify({
+        model: modelId ?? 'default',
+        input: 'Turminder is ready.',
+        ...(opts.voice ? { voice: opts.voice } : {}),
+        response_format: 'wav',
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) {
+      result.error = `POST ${api}/audio/speech: ${await describeFailure(res, opts.apiKey)}`;
+      return result;
+    }
+    const body = new Uint8Array(await res.arrayBuffer());
+    result.reachable = true;
+    const wav = readWavHeader(body);
+    if (!wav) {
+      result.error = 'the endpoint answered, but not with a RIFF/WAVE body';
+      return result;
+    }
+    result.sample_rate = wav.sampleRate;
+    result.seconds = wav.seconds;
+    if (wav.sampleRate < 8_000 || wav.sampleRate > 48_000) {
+      result.error = `sample rate ${wav.sampleRate} Hz is outside 8000–48000`;
+      return result;
+    }
+    if (wav.seconds < TTS_MIN_SECONDS) {
+      result.error = `only ${wav.seconds.toFixed(3)}s of audio came back`;
+      return result;
+    }
+    result.ok = true;
+  } catch (e) {
+    result.error = `POST ${api}/audio/speech: ${errMessage(e)}`;
+    return result;
+  }
+  const voices = await fetchVoices(api, opts);
+  if (voices) result.voices = voices;
+  l.info({ url: api, ok: result.ok, voices: result.voices?.length ?? 0 }, 'tts probe complete');
   return result;
 }

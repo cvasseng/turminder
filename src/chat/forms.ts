@@ -6,7 +6,12 @@ import type { DataHome } from '../core/datadir.js';
 const l = log('forms');
 
 /** App. D.5. `secret_key` names the target key in secrets/secrets.yaml. */
-export type FieldType = 'text' | 'url' | 'number' | 'select' | 'secret' | 'choice';
+/**
+ * D.5. `voice` is a `select` with a play button beside it (§33.5) — same
+ * validation, different rendering; a surface that cannot play audio renders it
+ * as a plain select and nothing breaks.
+ */
+export type FieldType = 'text' | 'url' | 'number' | 'select' | 'secret' | 'choice' | 'voice';
 
 export interface FieldSpec {
   name: string;
@@ -263,7 +268,7 @@ export class FormBroker {
       }
 
       if (
-        (field.type === 'select' || field.type === 'choice') &&
+        (field.type === 'select' || field.type === 'choice' || field.type === 'voice') &&
         field.options?.length &&
         !field.options.includes(text)
       ) {

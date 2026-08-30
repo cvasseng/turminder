@@ -127,6 +127,20 @@
         margin-top: 10px;
         min-height: 16px;
       }
+      /* Connected, with a caveat — not a failure, so not red. */
+      #notice {
+        color: var(--text);
+        background: rgba(160, 120, 20, 0.14);
+        border-left: 3px solid #c8952a;
+        padding: 8px 10px;
+        border-radius: 0 6px 6px 0;
+        font-size: 12px;
+        line-height: 1.45;
+        margin-top: 10px;
+      }
+      #notice:empty {
+        display: none;
+      }
       label.check {
         display: flex;
         gap: 8px;
@@ -156,9 +170,14 @@
   </head>
   <body>
     <main>
-      <!-- First run: what is this install going to be? -->
+      <!--
+        The welcome (§28.1). Shown whenever this shell cannot reach an
+        assistant — no mode picked, or a mode with nothing behind it — and
+        reachable again from the tray, because an install that chose one way on
+        day one must not be stuck with it.
+      -->
       <section class="pane" id="pane-choose" hidden>
-        <h1>Set up Turminder</h1>
+        <h1>Welcome to Turminder</h1>
         <p>
           Turminder has two halves: the assistant itself, which runs quietly and holds all
           your data, and this window, which talks to it. Where should the assistant run?
@@ -209,6 +228,7 @@
           <span id="state" style="font-size: 12px; color: var(--dim)"></span>
         </div>
         <div id="error"></div>
+        <div id="notice"></div>
         <label class="check">
           <input id="autostart" type="checkbox" />
           <span>Start Turminder when I log in</span>
@@ -217,7 +237,17 @@
           Closing this window leaves Turminder in the tray, so reminders still reach you.
           Use Quit in the tray menu to stop it.
         </p>
-        <button class="back" id="connect-back">Back</button>
+        <div class="row">
+          <button class="back" id="connect-back">Back</button>
+          <!--
+            The other mode, reachable from here (§28.1, V6.1). Both modes have
+            always existed and only one was ever findable: the chooser shows on
+            first run and never again, so an install that picked one on day one
+            had no way back. The tray's "Connect to another instance…" returns
+            to this screen, and this returns to the other half of it.
+          -->
+          <button class="back" id="run-here">Run it here instead</button>
+        </div>
       </section>
     </main>
     <script>
@@ -298,10 +328,15 @@
           }
           $('connect').disabled = true;
           $('error').textContent = '';
+          $('notice').textContent = '';
           $('state').textContent = 'checking…';
           try {
-            const device = await invoke('connect_to', { url });
-            $('state').textContent = `connected as ${device}`;
+            const result = await invoke('connect_to', { url });
+            $('state').textContent = `connected as ${result.device}`;
+            // Connected, but this machine cannot keep it (§28.2). Not a
+            // failure — the app works — so it goes in the notice line rather
+            // than the red one, and it says what to do about it.
+            $('notice').textContent = result.persisted ? '' : result.warning || '';
           } catch (e) {
             say('error', e);
             $('state').textContent = '';
@@ -321,6 +356,9 @@
 
         /* ── starting over ────────────────────────────────────────────────── */
 
+        // `forget` navigates the window home itself (§28.1), which reloads
+        // this page — so the `show` here is for the case where it does not
+        // (the window is already home), and the reload is harmless either way.
         const startOver = () => {
           invoke('forget')
             .then(() => {
@@ -333,13 +371,40 @@
         $('boot-back').onclick = startOver;
         $('connect-back').onclick = startOver;
 
+        // Switching modes stops the sidecar and drops the socket before it
+        // starts the other one — `choose_bundled` does both, so two services
+        // can never be live at once.
+        $('run-here').onclick = async () => {
+          try {
+            await invoke('choose_bundled');
+            show('boot');
+          } catch (e) {
+            say('error', e);
+          }
+        };
+
         /* ── which screen is this? ────────────────────────────────────────── */
 
         invoke('status')
           .then((s) => {
-            // mode set + no window navigation means the shell is mid-boot
-            // (bundled) or has nothing stored yet (connect).
-            show(s.mode === 'bundled' ? 'boot' : s.mode === 'connect' ? 'connect' : 'choose');
+            // The tray asks for a pane by fragment (§28.1) — that is the whole
+            // of "Connect to another instance…", and it wins over the routing
+            // below, which is about what this install *is* rather than what
+            // was just clicked.
+            // Only a pane name: the fragment is a routing hint, and anything
+            // else in it (a stale connect link, a reload) must not blank the
+            // screen by naming a pane that does not exist.
+            const wanted = location.hash.replace('#', '');
+            const asked = PANES.includes(wanted) ? wanted : '';
+            // Read once. A reload after this routes by what the install *is*,
+            // not by what somebody clicked ten minutes ago.
+            if (location.hash) history.replaceState(null, '', location.pathname);
+            // Unconfigured is the welcome, whichever half is missing: a mode
+            // with nothing behind it cannot reach an assistant either, and a
+            // paste box for the half that was picked once is not the honest
+            // screen (§28.1).
+            const pane = asked || (!s.configured ? 'choose' : s.mode === 'bundled' ? 'boot' : 'connect');
+            show(pane);
             // The boot starts before this page exists, so its early events —
             // including a failure — are emitted with nobody subscribed. Ask for
             // the state as well as listening for it, or a build that dies early

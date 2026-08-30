@@ -82,9 +82,17 @@ export function elidedMarker(tool: string, value: unknown): string {
   );
 }
 
+/**
+ * The stand-in for a bulk argument after its call ran (§20.6). It says what it
+ * is *before* it says what happened: a model that read the old wording as "my
+ * content was replaced" re-sent the write eight times in seventy seconds
+ * (2026-08-30). Only a successful call is ever stubbed, so "stored" is true
+ * whenever this text appears.
+ */
 export function storedMarker(chars: number): string {
   return (
-    `${STORED_PREFIX} ${chars} chars — the content was written and is stored. ` +
+    `${STORED_PREFIX} ${chars} chars — placeholder for the content you sent in this call; ` +
+    `it was written successfully and is stored, and is shown as this marker to save space. ` +
     `Read it back with the tool if needed. Never copy this marker into a tool call]]`
   );
 }

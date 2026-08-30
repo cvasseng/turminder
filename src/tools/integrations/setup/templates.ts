@@ -5,13 +5,13 @@ import { errMessage } from '../../../core/errors.js';
 import type { Config } from '../../../core/config.js';
 import type { DataHome } from '../../../core/datadir.js';
 import { McpServerSchema, ModelEndpointSchema } from '../../../core/config-schemas.js';
-import { normaliseEndpointUrl, probeEndpoint } from '../../../model/probe.js';
+import { normaliseEndpointUrl, probeEndpoint, probeSpeech } from '../../../model/probe.js';
 import type { FieldSpec, FormValues } from '../../../chat/forms.js';
 import type { ToolHub } from '../../hub.js';
 
 const l = log('tool:setup');
 
-export type TemplateName = 'mcp_stdio' | 'mcp_http' | 'model_endpoint';
+export type TemplateName = 'mcp_stdio' | 'mcp_http' | 'model_endpoint' | 'speech_endpoint';
 
 export interface TemplateContext {
   home: DataHome;
@@ -408,10 +408,139 @@ const modelEndpoint: ConnectorTemplate = {
   },
 };
 
+/**
+ * A transcriber or a synthesiser (§10.9, F.9). Deliberately the *same* shape as
+ * `model_endpoint`: probe first, refuse on failure, write one entry, reload.
+ *
+ * The `voice` field is free text here rather than a pick from the endpoint's
+ * listing, because the listing lives behind a URL the form is asking for — it
+ * cannot be read before the answer exists. Choosing a voice from what the
+ * endpoint actually offers, with a preview, is `setup.voice`'s job (§33.5);
+ * this form's result names the voices it found so the assistant can say so.
+ */
+const speechEndpoint: ConnectorTemplate = {
+  name: 'speech_endpoint',
+  title: 'Connect a transcriber or a speech synthesiser',
+  fields: [
+    {
+      name: 'kind',
+      label: 'What it does — stt turns speech into text, tts turns text into speech',
+      type: 'choice',
+      options: ['stt', 'tts'],
+    },
+    { name: 'name', label: 'Short name for this endpoint', type: 'text' },
+    {
+      name: 'url',
+      label: 'OpenAI-audio-compatible base URL, e.g. http://localhost:8000/v1',
+      type: 'url',
+    },
+    {
+      name: 'api_key',
+      label: 'API key, if the endpoint needs one — stored in secrets/secrets.yaml',
+      type: 'secret',
+      required: false,
+    },
+    {
+      name: 'model',
+      label: 'Model to use — blank takes the first the endpoint lists',
+      type: 'text',
+      required: false,
+    },
+    {
+      name: 'voice',
+      label: 'tts only: the voice to speak with (change it later with setup.voice)',
+      type: 'text',
+      required: false,
+    },
+    {
+      name: 'language',
+      label: 'stt only: the language to transcribe — blank follows the identity locale',
+      type: 'text',
+      required: false,
+    },
+  ],
+  async effect({ values, secrets }, ctx) {
+    const name = serverName(values);
+    const kind = String(values.kind ?? '').trim();
+    if (kind !== 'stt' && kind !== 'tts') {
+      return {
+        added: false,
+        error: 'bad_kind',
+        detail: `kind must be stt or tts, not "${kind}"`,
+      };
+    }
+    const url = normaliseEndpointUrl(String(values.url ?? '')).api;
+    const ref = secrets.api_key;
+    const apiKey = resolveRef(ctx.config, ref);
+    const model = String(values.model ?? '').trim();
+    const voice = String(values.voice ?? '').trim();
+    const language = String(values.language ?? '').trim();
+
+    const probe = await probeSpeech(kind, url, {
+      ...(apiKey ? { apiKey } : {}),
+      ...(model ? { model } : {}),
+      ...(kind === 'tts' && voice ? { voice } : {}),
+      ...(ctx.fetch ? { fetch: ctx.fetch } : {}),
+      timeoutMs: 90_000,
+    });
+    // Nothing is written by a probe that did not pass: an entry that cannot
+    // transcribe is worse than no entry, because `routes` would point at it.
+    const passed = 'matched' in probe ? probe.matched : probe.ok;
+    if (!passed) {
+      return {
+        added: false,
+        error: probe.reachable ? 'probe_failed' : 'unreachable',
+        detail: probe.error ?? null,
+        ...('transcript' in probe && probe.transcript ? { transcript: probe.transcript } : {}),
+      };
+    }
+
+    const endpoint = ModelEndpointSchema.parse({
+      name,
+      kind,
+      url,
+      ...(model || probe.model_id ? { model: model || probe.model_id } : {}),
+      ...(ref ? { api_key: ref } : {}),
+      ...(kind === 'tts' && voice ? { voice } : {}),
+      ...(kind === 'stt' && language ? { language } : {}),
+    });
+
+    const file = ctx.home.path('config', 'models.yaml');
+    const doc = readRaw(file);
+    const existing = Array.isArray(doc.endpoints) ? (doc.endpoints as { name: string }[]) : [];
+    const routes = (doc.routes ?? {}) as Record<string, unknown>;
+    // Route the purpose here only when nothing does yet: the first transcriber
+    // an install gets should just work, and a second one must not silently
+    // steal the route from the one that was chosen (§10.6).
+    const routed = routes[kind] === undefined;
+    const next: Record<string, unknown> = {
+      ...doc,
+      endpoints: upsertByName(existing, endpoint as { name: string }),
+      routes: routed ? { ...routes, [kind]: { endpoint: name } } : routes,
+    };
+    writeRaw(ctx.home, 'config/models.yaml', next, `setup: add ${kind} endpoint ${name}`);
+
+    const loaded = ctx.reloadModels();
+    l.info({ endpoint: name, kind, routed, loaded }, 'speech endpoint added');
+    return {
+      added: true,
+      endpoint: name,
+      kind,
+      model_id: probe.model_id ?? null,
+      routed,
+      ...('transcript' in probe ? { transcript: probe.transcript ?? null } : {}),
+      ...('sample_rate' in probe ? { sample_rate: probe.sample_rate ?? null } : {}),
+      ...('voices' in probe && probe.voices ? { voices: probe.voices } : {}),
+      models_loaded: loaded,
+    };
+  },
+};
+
 export const TEMPLATES: Record<TemplateName, ConnectorTemplate> = {
   mcp_stdio: mcpStdio,
   mcp_http: mcpHttp,
   model_endpoint: modelEndpoint,
+  speech_endpoint: speechEndpoint,
 };
 
 export const TEMPLATE_NAMES = Object.keys(TEMPLATES) as TemplateName[];

@@ -1,7 +1,9 @@
 import type { Command } from 'commander';
 import { bootstrap } from '../app.js';
+import { errMessage } from '../core/errors.js';
 import { ModelRouter } from '../model/router.js';
 import { DEFAULT_ROUTES, ROUTABLE_PURPOSES } from '../model/routes.js';
+import { priceLabel } from '../model/types.js';
 import { globalOpts } from './common.js';
 
 /**
@@ -37,9 +39,10 @@ export function registerModelsCommand(program: Command): void {
         // stands, unguessed (§10.6).
         efforts: e.efforts?.join(',') ?? '-',
         // `local` rather than `0.00`: unpriced and free are different claims.
-        price: e.cost
-          ? `${e.cost.inPerMtok}/${e.cost.outPerMtok} ${e.cost.currency} per Mtok`
-          : 'local',
+        price: priceLabel(e.cost),
+        // The one fact a speech endpoint has that no column above holds
+        // (§10.9): which voice it speaks with, which language it listens for.
+        note: e.voice ?? (e.language ? `language=${e.language}` : '-'),
       }));
       const width = (key: keyof (typeof rows)[number]) =>
         Math.max(key.length, ...rows.map((r) => String(r[key]).length));
@@ -51,6 +54,7 @@ export function registerModelsCommand(program: Command): void {
         'context',
         'efforts',
         'price',
+        'note',
       ];
       const line = (cells: string[]) =>
         cells
@@ -73,6 +77,25 @@ export function registerModelsCommand(program: Command): void {
           process.stdout.write(
             `  ${purpose.padEnd(8)} source=${(configured ? 'config' : 'default').padEnd(7)} ` +
               `${selector.padEnd(22)} → ${ep ? ep.name : '(none — lexical search)'}\n`,
+          );
+          continue;
+        }
+        // Speech resolves by kind, not by class (§10.9) — and its absence is a
+        // fact about this install, not an error: no transcriber means no voice.
+        if (purpose === 'stt' || purpose === 'tts') {
+          const configured = models.routes?.[purpose];
+          const selector = configured
+            ? `endpoint=${configured.endpoint}`
+            : `first kind=${purpose}`;
+          let served: string;
+          try {
+            served = router.speech(purpose)?.name ?? '(none)';
+          } catch (e) {
+            served = `(${errMessage(e)})`;
+          }
+          process.stdout.write(
+            `  ${purpose.padEnd(8)} source=${(configured ? 'config' : 'default').padEnd(7)} ` +
+              `${selector.padEnd(22)} → ${served}\n`,
           );
           continue;
         }

@@ -1,5 +1,95 @@
  # Next
 
+ * A Stop button. While the assistant is answering, a stop button sits beside
+   Send (Esc does the same); pressing it ends the answer mid-word. What it had
+   already said stays in the conversation — you watched it stream, it is yours
+   — and a stopped question is settled, not retried behind your back. Stopping
+   something that already finished quietly succeeds.
+
+ * The assistant can be talked to. Hold a key in the desktop app, say something,
+   let go, and it answers out loud — or turn on the wake word and just say its
+   name. What it heard and what it said become an ordinary conversation, listed
+   and searchable beside the typed ones, and the speaker starts on the first
+   sentence rather than waiting for the whole answer. Speaking to it is chat
+   with a different mouth: the same tools, the same permissions, the same
+   record. Anything that needs your approval still asks on a screen.
+
+ * The desktop app shows what it is doing while you talk to it: a small window
+   that says it is listening, then what it heard — within a fraction of a
+   second, long before the answer — then that it is working, then that it is
+   answering. It used to show nothing at all.
+
+ * A spoken answer that takes a while now says so out loud, once, rather than
+   leaving the room in silence wondering whether it heard you. A quick answer
+   still just answers.
+
+ * "Talk to it" in the tray starts a spoken turn with no key held and no wake
+   word — the way in before you have set either up, and on a machine where
+   something else already owns the hotkey. It listens until you stop talking,
+   and says "Stop listening" while it does if you change your mind.
+
+ * The wake word is trained on your own voice, on your own machine: say the
+   assistant's name five times and it learns that, in whatever language it is —
+   no model download, nothing recorded kept, and nothing leaves the computer
+   until you have actually triggered it. After a reply you have a few seconds to
+   ask a follow-up without saying the name again.
+
+ * The desktop app picks its microphone and speaker explicitly — both are in the
+   tray, both are remembered, and one that will not open falls back to one that
+   does and says so rather than listening to nothing. It opens the microphone
+   once and shares it, so the wake word, a turn you started, and the moment
+   after a reply are not three programs fighting over one device; and when
+   nothing is listening, nothing is open.
+
+ * Quiet mode in the tray silences the whole app: no notifications, no spoken
+   replies, no chime. Whatever arrives while it is on comes back when you switch
+   it off, in order, unless it expired in the meantime — nothing is dropped and
+   nothing is faked.
+
+ * The desktop app connects to a remote instance even on a machine with no
+   keyring. It keeps the connection for that run only and says so, rather than
+   refusing outright — the token still never touches disk, which is the point
+   of the keyring in the first place.
+
+ * When the desktop app cannot do something, it now says what happened, what
+   follows from it, and what would fix it. "Platform secure storage failure:
+   DBus error: The name is not activatable" and "Connection refused (os error
+   111)" were both true and neither was any use.
+
+ * The desktop app can be pointed at a different instance without reinstalling:
+   "Connect to another instance…" is in the tray, and the connect screen offers
+   to run it here instead. Both directions keep what you already paired with.
+
+ * The desktop app opens on a welcome screen whenever it cannot reach an
+   assistant — a fresh install, one whose stored connection has gone, or one
+   running its own copy whose data you deleted — with both ways to get one in
+   front of you rather than the half you happened to pick last time. And
+   "Change where Turminder runs…" in the tray gets you back to it whenever you
+   want, without deleting anything.
+
+ * Transcribers and speech synthesisers are things you connect by asking, the
+   same way you connect anything else: the assistant raises a form, checks the
+   endpoint can actually hear and speak before writing anything down, and says
+   what it cost. Any OpenAI-audio-compatible service works, local or hosted.
+
+ * "Speak Norwegian" and "use a different voice" now work by asking. The
+   assistant opens one form with the languages it can listen for and the voices
+   it can speak with — and you can hear each voice before choosing it. It finds
+   the voice list wherever your synthesiser keeps it, asks only about the model
+   you have configured rather than everything the box happens to serve, and
+   when you have switched synthesisers it stops defaulting to a voice the new
+   one has never heard of.
+
+ * Notifications can be read aloud by the desktop app, and a handler chooses
+   the one sentence worth hearing: "Invoice from Hafslund, two thousand three
+   hundred kroner, due Friday" instead of the three-line body it wrote for the
+   screen. One arriving while the assistant is mid-sentence waits its turn.
+
+ * A model that thinks before answering can be told not to. Thinking is now a
+   level like any other — off, low, high — pickable per conversation, and
+   spoken conversations turn it off by default because a second of silence
+   before the first word is a second too long.
+
  * The desktop app remembers which port it ran on and takes it again next
    launch, so a link to a chart or dashboard you opened in a browser tab still
    works tomorrow — and the window stops forgetting anything it remembered,
@@ -215,6 +305,18 @@
    configured, you choose which one runs it — a small form appears, the same
    way setting a price does. The assistant cannot make that choice for
    itself.
+
+ * Fixed: the assistant could talk itself into a loop after saving a memory —
+   re-saving the same note over and over, and twice writing the system's own
+   "content stored" placeholder into the memory instead of the note. It now
+   gets a plain "updated, N characters" answer when a write lands, a
+   placeholder can no longer be saved as if it were content, a third rewrite
+   of the same memory or file in one go is called out for what it is, and a
+   write that was refused no longer pretends its content was stored.
+
+ * Memory names are titles now — at most 80 characters — so the list of what
+   the assistant remembers reads as headings rather than as the memories
+   themselves.
 
  # 1.0.0
 

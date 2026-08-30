@@ -72,6 +72,7 @@ pairing](docs/running.md).
 - Embeds: sandboxed charts, dashboards and slides whose numbers come from frozen tool calls.
 - PDF and .docx reading by outline, and PDF export of any embed or markdown file.
 - Projects: islands of files, memories and past chats that reach a prompt only while loaded.
+- Voice: send it a recording, hear the answer back, and read what it heard as an ordinary conversation. Any OpenAI-audio-compatible transcriber and synthesiser, connected by asking, with the language and the speaking voice chosen from a form you can hear before you pick.
 - Clients: a Linux desktop app, a browser extension, and phone pairing you approve from a device you trust.
 - An activity panel: everything in flight, what it is waiting on, and what gave up and why.
 - Cost per endpoint and per conversation, a live Requests panel of every model call, and a trace of every tool call.

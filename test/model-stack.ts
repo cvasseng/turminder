@@ -27,7 +27,13 @@ export class RecordingDispatcher implements ToolDispatcher {
   readonly calls: DispatchCall[] = [];
   constructor(
     private readonly tools: Record<string, (args: any) => unknown | Promise<unknown>>,
-    private readonly opts: { throwOn?: string } = {},
+    private readonly opts: {
+      throwOn?: string;
+      /** Per-tool bulk-content fields (§20.6), reported like the real dispatcher does. */
+      bulkArgs?: Record<string, readonly string[]>;
+      /** Per-tool JSON schema; the default is the one-field `{q}` shape. */
+      schema?: Record<string, Record<string, unknown>>;
+    } = {},
   ) {}
 
   toolSet(): ToolSet {
@@ -35,12 +41,14 @@ export class RecordingDispatcher implements ToolDispatcher {
     for (const name of Object.keys(this.tools)) {
       set[name] = tool({
         description: `test tool ${name}`,
-        inputSchema: jsonSchema<any>({
-          type: 'object',
-          properties: { q: { type: 'string' } },
-          required: ['q'],
-          additionalProperties: false,
-        }),
+        inputSchema: jsonSchema<any>(
+          this.opts.schema?.[name] ?? {
+            type: 'object',
+            properties: { q: { type: 'string' } },
+            required: ['q'],
+            additionalProperties: false,
+          },
+        ),
       });
     }
     return set;
@@ -51,6 +59,7 @@ export class RecordingDispatcher implements ToolDispatcher {
     if (this.opts.throwOn === call.name) throw new Error('dispatcher exploded');
     const impl = this.tools[call.name];
     if (!impl) return { ok: false, output: { error: 'unknown_tool' }, denied: 'not_granted' };
-    return { ok: true, output: await impl(call.args) };
+    const bulk = this.opts.bulkArgs?.[call.name];
+    return { ok: true, output: await impl(call.args), ...(bulk ? { bulkArgs: bulk } : {}) };
   }
 }

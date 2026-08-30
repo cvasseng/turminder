@@ -87,6 +87,7 @@ describe('database bootstrap', () => {
     db.exec(`ALTER TABLE conversations DROP COLUMN model_override`);
     db.exec(`ALTER TABLE conversations DROP COLUMN effort_override`);
     db.exec(`ALTER TABLE conversations DROP COLUMN loaded_projects`);
+    db.exec(`ALTER TABLE conversations DROP COLUMN voice_device`);
     db.exec(`ALTER TABLE schedules DROP COLUMN on_miss`);
     db.exec(`DROP INDEX ix_trace_kind_at`);
     db.exec(`CREATE TABLE embeds (
@@ -124,6 +125,26 @@ describe('database bootstrap', () => {
     // second CREATE INDEX — the same idempotence every migration promises.
     expect(migrate(db)).toBe(DB_VERSION);
     expect(indexNames()).toContain('ix_trace_kind_at');
+    db.close();
+  });
+
+  it('applies migration 013 on an empty database and on one with existing conversations (§33.1)', () => {
+    const db = openDb(dbFile());
+    const columns = () =>
+      (db.pragma('table_info(conversations)') as { name: string }[]).map((c) => c.name);
+    expect(columns()).toContain('voice_device');
+
+    // A conversation from before voice existed is a conversation nobody spoke
+    // to — NULL, which is what D.2's derived mode reads as "not a voice one".
+    db.prepare(
+      `INSERT INTO conversations (id, mode, status, created_at, last_activity_at)
+       VALUES ('01TYPED', 'normal', 'open', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+    ).run();
+    expect(migrate(db)).toBe(DB_VERSION);
+    const row = db
+      .prepare(`SELECT voice_device FROM conversations WHERE id = '01TYPED'`)
+      .get() as { voice_device: string | null };
+    expect(row.voice_device).toBeNull();
     db.close();
   });
 

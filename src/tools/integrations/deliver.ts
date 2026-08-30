@@ -7,7 +7,11 @@ import type { ToolContext, ToolDefinition } from '../types.js';
  * absent: those are created by the dispatcher during the confirmation
  * round-trip, never requested by a model.
  */
-export function deliverTools(outbox: Outbox): ToolDefinition[] {
+export function deliverTools(
+  outbox: Outbox,
+  /** Read at call time so a config reload takes effect (App. A, G.1). */
+  spokenMaxChars: () => number,
+): ToolDefinition[] {
   return [
     {
       name: 'deliver.notify',
@@ -17,6 +21,12 @@ export function deliverTools(outbox: Outbox): ToolDefinition[] {
       args: z.object({
         title: z.string().min(1),
         body: z.string().min(1),
+        spoken: z
+          .string()
+          .min(1)
+          .max(spokenMaxChars())
+          .optional()
+          .describe('one sentence a speaker says instead of title and body'),
         actions: z
           .array(z.object({ id: z.string().min(1), label: z.string().min(1) }))
           .max(4)
@@ -33,6 +43,7 @@ export function deliverTools(outbox: Outbox): ToolDefinition[] {
         args: {
           title: string;
           body: string;
+          spoken?: string;
           actions?: { id: string; label: string }[];
           ttl_s?: number;
         },
@@ -43,6 +54,9 @@ export function deliverTools(outbox: Outbox): ToolDefinition[] {
           payload: {
             title: args.title,
             body: args.body,
+            // Assistant-authored, exactly as the title and body already are
+            // (§33.3). A device with no speaker simply ignores it (D.3).
+            ...(args.spoken ? { spoken: args.spoken } : {}),
             ...(args.actions?.length ? { actions: args.actions } : {}),
           },
           ...(args.ttl_s ? { ttlS: args.ttl_s } : {}),

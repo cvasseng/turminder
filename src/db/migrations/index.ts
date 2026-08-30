@@ -11,6 +11,7 @@ import { migration as m009 } from './009-conversation-effort-override.js';
 import { migration as m010 } from './010-conversation-loaded-projects.js';
 import { migration as m011 } from './011-schedule-on-miss.js';
 import { migration as m012 } from './012-trace-kind-at.js';
+import { migration as m013 } from './013-conversation-voice-device.js';
 
 /** Numbered migrations, applied in order. Add new ones here; never edit old ones. */
 export const MIGRATIONS: Migration[] = [
@@ -26,6 +27,7 @@ export const MIGRATIONS: Migration[] = [
   m010,
   m011,
   m012,
+  m013,
 ];
 
 export const DB_VERSION = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

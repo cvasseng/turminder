@@ -19,6 +19,7 @@ import type {
 import { GrantedDispatcher, type Grants } from '../tools/dispatcher.js';
 import { PagedDispatcher } from '../tools/paged.js';
 import type { RunGrants } from '../tools/run-grants.js';
+import type { ChatStops } from './stop.js';
 import type { GrantStore } from '../tools/grants.js';
 import type { ToolHub } from '../tools/hub.js';
 import { assembleSystemPrompt, fenceMemoryRecall } from '../prompts/index.js';
@@ -78,6 +79,8 @@ export interface ChatExecutorDeps {
   grants?: GrantStore;
   /** Where this run's grant set is published for the length of the run (§23.2). */
   runGrants?: RunGrants;
+  /** Where this run's abort handle is published, so `chat.stop` can find it (App. D). */
+  stops?: ChatStops;
   /** Tracks work nobody waits for, so it finishes before shutdown. */
   background: BackgroundTasks;
 }
@@ -138,6 +141,10 @@ export class ChatExecutor {
     }
 
     const onboarding = conversation.mode === 'onboarding';
+    // A voice conversation is an ordinary chat run with a different mouth
+    // (§33.1): same kind, same grant, same tools and confirms — only the
+    // prompt fragment and the effort pin differ.
+    const voice = conversation.mode === 'voice';
     const kind: RunKind = onboarding ? 'onboarding' : 'chat';
     const runId = repos.runs.create({ kind, eventId: event.id });
     const trace = repos.trace.sink({ eventId: event.id, runId });
@@ -165,7 +172,16 @@ export class ChatExecutor {
       grantsFor,
       toolCtx,
       this.deps.confirm
-        ? (call, handle) => this.deps.confirm!.request(call, handle, toolCtx)
+        ? (call, handle) => {
+            // Announced before the wait, not after it: the point of the frame
+            // is to say why nothing is happening (§11.3, D.2).
+            stream.activity({
+              conversationId: conversation.id,
+              runId,
+              activity: { kind: 'awaiting_confirm', tool: call.name },
+            });
+            return this.deps.confirm!.request(call, handle, toolCtx);
+          }
         : undefined,
     );
     /**
@@ -253,6 +269,9 @@ export class ChatExecutor {
         kind,
         identity,
         personality,
+        // Conversation-scoped, so it is inside the stable prefix rather than
+        // re-decided per turn (§20.5, H.5).
+        ...(voice ? { voice: true } : {}),
         // Description-only roster; bodies are fetched via skills.fetch (§11.1).
         skills: onboarding ? [] : tools.skills.roster(),
         // What islands exist (§31.2). Names and one line each — the contents
@@ -373,6 +392,18 @@ export class ChatExecutor {
      * the serving model never declared is stale in exactly the way a vanished
      * endpoint is, and the parameter must never be sent unguessed.
      */
+    /**
+     * A voice conversation pins `none` where the serving endpoint declares it
+     * (§33.1, §10.6): a model that reasons for a second before its first word
+     * cannot hold a conversation out loud. Where the endpoint does not declare
+     * it, nothing is sent — slow, and honest about it in the trace, rather
+     * than pretending. An explicit `effort_override` still wins: the human
+     * choosing beats the conversation's kind.
+     */
+    if (voice && !conversation.effort_override && chosen.efforts?.includes('none')) {
+      selector = { ...selector, effort: 'none' };
+    }
+
     const effort = conversation.effort_override;
     if (effort) {
       if (chosen.efforts?.some((e) => e === effort)) {
@@ -398,11 +429,17 @@ export class ChatExecutor {
      * happen to be open this turn.
      */
     const releaseGrants = this.deps.runGrants?.register(runId, granted);
+    // The user's stop button reaches this run through here (App. D
+    // `chat.stop`): nothing else ever aborts this controller, so after the
+    // run, `controller.signal.aborted` *is* "the user stopped it".
+    const controller = new AbortController();
+    const releaseStop = this.deps.stops?.register(conversation.id, runId, controller);
     let result;
     try {
       result = await runAgent(gateway, {
         selector,
         priority: 'interactive',
+        abortSignal: controller.signal,
         // Long tool-heavy runs otherwise carry every result to the end (§20.4).
         elision: {
           thresholdChars: config.settings.elideThresholdChars,
@@ -426,31 +463,39 @@ export class ChatExecutor {
       });
     } finally {
       releaseGrants?.();
+      releaseStop?.();
     }
 
     // Everything it said this run, not just the final turn: the user watched it
     // all stream past, so all of it belongs in the transcript.
     const text = result.assistantText.trim() || result.text.trim();
+    const stopped = controller.signal.aborted;
     // A run cut short by a budget has usually still said something useful.
     // Throwing that away and showing only an error is the worse failure.
     const cutShort = result.stopReason !== 'stop' && text.length > 0;
     const failed = text.length === 0;
 
     repos.runs.finish(runId, {
-      status: failed || cutShort ? 'failed' : 'done',
+      // A user-stopped run that said something is complete — the user chose
+      // where it ended; one that said nothing failed to answer, however it
+      // ended. The event settles either way: a stop must never retry into a
+      // second answer.
+      status: failed || (cutShort && !stopped) ? 'failed' : 'done',
       turns: result.turns,
       tokensIn: result.tokensIn,
       tokensOut: result.tokensOut,
       model: result.endpoint || null,
-      error: failed
-        ? (result.error ?? 'empty response')
-        : cutShort
-          ? (result.error ?? `stopped: ${result.stopReason}`)
-          : null,
+      error: stopped
+        ? 'stopped_by_user'
+        : failed
+          ? (result.error ?? 'empty response')
+          : cutShort
+            ? (result.error ?? `stopped: ${result.stopReason}`)
+            : null,
     });
 
     if (failed) {
-      const message = result.error ?? 'the model returned nothing';
+      const message = stopped ? 'stopped' : (result.error ?? 'the model returned nothing');
       // Chat failures are reported in-band. A retry an hour later would answer
       // a question the user has long since re-asked, so the event is complete.
       stream.failed({ conversationId: conversation.id, message });
@@ -469,8 +514,9 @@ export class ChatExecutor {
       runId,
     });
     stream.done({ conversationId: conversation.id, runId, turnSeq: turn.seq });
-    if (cutShort) {
+    if (cutShort && !stopped) {
       // Keep the answer, but say plainly that it is unfinished and why.
+      // A user-stopped run gets no banner: the person who ended it knows.
       stream.failed({
         conversationId: conversation.id,
         message: `answer cut short (${result.stopReason})${

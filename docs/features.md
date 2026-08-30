@@ -111,6 +111,34 @@ the assistant should run: on this computer, where the app carries its own
 Node runtime and supervises the service, or on a machine you already run it
 on, reached with a connect link. Its key lives in your keyring.
 
+## Voice
+
+Speaking to the assistant is chat with a different mouth. A recording goes to
+`POST /api/voice` and the answer comes back as audio, sentence by sentence, so
+the speaker starts before the whole reply is written. What was heard and what
+was said become an ordinary conversation — listed and searchable beside the
+typed ones, marked with a microphone, distilled like any other. The same
+tools, the same permissions, the same record; a gated action still needs a
+screen, because a microphone in a room is not a device you hold.
+
+The transcriber and the synthesiser are endpoints like any other: anything
+speaking the OpenAI audio dialect, local or hosted, connected by asking. The
+assistant raises a form, sends real audio to check the endpoint can actually
+hear and speak, and only then writes it down. "Speak Norwegian" or "use a
+different voice" opens one more form — a language list and a voice list with a
+play button, so you hear a voice before you choose it.
+
+Notifications can be read aloud, and the handler that raised one chooses the
+sentence worth hearing: "Invoice from Hafslund, two thousand three hundred
+kroner, due Friday" instead of the three-line body it wrote for the screen.
+The words are always the server's; a device asks for a delivery by id and gets
+audio back.
+
+Thinking is off for spoken conversations where the model can be told to stop —
+a second of silence before the first word is a second too long — and every
+transcription and every spoken sentence shows up in the Requests panel with
+what it cost.
+
 ## Browser extension
 
 Open a page, click, and read the exact text that will be sent before it goes:
