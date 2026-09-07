@@ -268,7 +268,7 @@ describe('tool paging (§21.2)', () => {
 
     const prompt = system(h);
     expect(prompt).toMatch(/^- config: 2 tools — .+ \(closed; open with tools\.open\)$/m);
-    expect(prompt).toContain('- setup: 12 tools —');
+    expect(prompt).toContain('- setup: 13 tools —');
     // A description from the integration manifest, not a list of tool names.
     expect(prompt).toContain('Reading and writing the assistant’s own configuration.');
   });

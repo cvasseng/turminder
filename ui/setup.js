@@ -155,6 +155,11 @@ async function save() {
       caps: lastProbe.caps,
     };
     if (lastProbe.model_id) endpoint.model = lastProbe.model_id;
+    // What those caps were measured against (§10.2, G.2). The same id as
+    // `model` here by construction — the point is that it stays behind when
+    // somebody edits `model` later, so staleness is a comparison and not a
+    // guess.
+    if (lastProbe.model_id) endpoint.probed_model = lastProbe.model_id;
     if (lastProbe.context_size) endpoint.context_size = lastProbe.context_size;
     const apiKey = $('apikey').value.trim();
     if (apiKey) endpoint.api_key = apiKey;

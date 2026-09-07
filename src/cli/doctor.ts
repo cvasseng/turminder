@@ -2,6 +2,7 @@ import type { Command } from 'commander';
 import { bootstrap } from '../app.js';
 import { dbVersion } from '../db/index.js';
 import { driftedShippedAssets } from '../prompts/shipped.js';
+import { staleEndpoints } from '../tools/integrations/setup/reprobe.js';
 import { globalOpts } from './common.js';
 
 export function registerDoctorCommand(program: Command): void {
@@ -25,6 +26,10 @@ export function registerDoctorCommand(program: Command): void {
         models_configured: Boolean(models),
         models_error: error ?? null,
         endpoints: models?.endpoints.map((e) => e.name) ?? [],
+        // Endpoints whose capability tags were measured against a model they
+        // no longer name (§10.2). A warning, not a refusal — `turminder models
+        // probe <name>` re-derives them.
+        stale_model_tags: staleEndpoints(models?.endpoints ?? []),
         onboarded: Boolean(identity),
         instance_name: identity?.frontmatter.instance_name ?? null,
         devices: app.config.channels().devices.map((d) => d.device),

@@ -278,6 +278,13 @@ export const ModelEndpointSchema = z
     caps: z.array(ModelCapSchema).default([]),
     context_size: z.number().int().positive().optional(),
     /**
+     * The model `caps` and `context_size` were actually measured against
+     * (§10.2). Optional, because an entry written before probes recorded their
+     * subject has none — and that is *unknown*, never *stale*. Differing from
+     * `model` is what makes staleness a comparison rather than a guess.
+     */
+    probed_model: z.string().min(1).optional(),
+    /**
      * Reasoning levels this model honors (§10.6). Omitted means the knob is
      * never sent — an endpoint that has not said it understands
      * `reasoning_effort` does not get handed it, and its own default stands
@@ -384,6 +391,28 @@ export const ModelEndpointSchema = z
     }
   });
 export type ModelEndpoint = z.infer<typeof ModelEndpointSchema>;
+
+/**
+ * Do an entry's capability tags still describe the model it names (§10.2)?
+ *
+ * `unknown` is an entry whose tags were written before anything recorded what
+ * it measured — the tags may well be right and nothing knows, which is a
+ * different statement from `stale` and must not be reported as one. Neither is
+ * ever a refusal: a router degrading on a suspicion helps nobody, so every
+ * surface that shows endpoints warns and keeps using them.
+ */
+export type TagFreshness = 'fresh' | 'stale' | 'unknown';
+
+export function tagFreshness(e: {
+  model?: string | undefined;
+  probed_model?: string | undefined;
+}): TagFreshness {
+  if (!e.probed_model) return 'unknown';
+  // An entry that names no model is an endpoint serving whatever it serves —
+  // the llama.cpp case — so what was probed is what it runs.
+  if (!e.model) return 'fresh';
+  return e.model === e.probed_model ? 'fresh' : 'stale';
+}
 
 /**
  * Purposes that route through `routes:` (G.2, §10.6) — the closed vocabulary

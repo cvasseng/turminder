@@ -1,7 +1,9 @@
 import type { Command } from 'commander';
 import { bootstrap } from '../app.js';
-import { errMessage } from '../core/errors.js';
+import { errMessage, UserFacingError } from '../core/errors.js';
+import { tagFreshness } from '../core/config-schemas.js';
 import { ModelRouter } from '../model/router.js';
+import { reprobeEndpoint } from '../tools/integrations/setup/reprobe.js';
 import { DEFAULT_ROUTES, ROUTABLE_PURPOSES } from '../model/routes.js';
 import { priceLabel } from '../model/types.js';
 import { globalOpts } from './common.js';
@@ -17,10 +19,14 @@ import { globalOpts } from './common.js';
  * either kept here.
  */
 export function registerModelsCommand(program: Command): void {
-  program
+  const group = program
     .command('models')
+    .description('list model endpoints and how each purpose resolves');
+
+  group
+    .command('list', { isDefault: true })
     .description('list model endpoints and how each purpose resolves')
-    .action((_o, cmd: Command) => {
+    .action((_o: unknown, cmd: Command) => {
       const app = bootstrap(globalOpts(cmd));
       const { models, error } = app.config.modelsOrNull();
       if (!models) {
@@ -29,11 +35,19 @@ export function registerModelsCommand(program: Command): void {
         return;
       }
       const router = new ModelRouter(models);
+      const configured = new Map(models.endpoints.map((e) => [e.name, e]));
       const rows = router.list().map((e) => ({
         name: e.name,
         kind: e.kind,
         classes: e.classes.join(',') || '-',
         caps: e.caps.join(',') || '-',
+        // Whether those caps still describe the model this entry names
+        // (§10.2). `unknown` is an entry written before probes recorded their
+        // subject — not a claim that anything is wrong. An embedding or speech
+        // endpoint has no capability tags to be right or wrong about (§10.1),
+        // so it gets the same `-` its empty CAPS column already carries rather
+        // than an `unknown` implying something could be known.
+        tags: e.kind === 'chat' ? tagFreshness(configured.get(e.name) ?? {}) : '-',
         context: e.contextSize ?? '-',
         // Absent means the knob is never sent — the endpoint's own default
         // stands, unguessed (§10.6).
@@ -51,6 +65,7 @@ export function registerModelsCommand(program: Command): void {
         'kind',
         'classes',
         'caps',
+        'tags',
         'context',
         'efforts',
         'price',
@@ -64,6 +79,18 @@ export function registerModelsCommand(program: Command): void {
       process.stdout.write(`${line(columns.map((c) => c.toUpperCase()))}\n`);
       for (const row of rows) {
         process.stdout.write(`${line(columns.map((c) => String(row[c])))}\n`);
+      }
+
+      // A warning, never a refusal (§10.2): stale tags are still used, because
+      // they may well still be right and a router degrading on a suspicion
+      // helps nobody. Saying which command fixes it is the whole point.
+      for (const e of models.endpoints) {
+        if (tagFreshness(e) !== 'stale') continue;
+        process.stdout.write(
+          `\n! ${e.name}: caps and context were measured against ${e.probed_model}, ` +
+            `which is not the ${e.model} it now serves —\n` +
+            `  re-derive them with: turminder models probe ${e.name}\n`,
+        );
       }
 
       process.stdout.write('\nresolution by purpose (§10.6):\n');
@@ -123,5 +150,36 @@ export function registerModelsCommand(program: Command): void {
           'the table above.\n',
       );
       app.close();
+    });
+
+  /**
+   * `turminder models probe <name>` (§10.2) — the headless half of
+   * `setup.reprobe`, sharing its one implementation. For the case this exists
+   * for: a `model:` corrected by hand, leaving `caps` describing something
+   * else with nothing in the system aware of the mismatch.
+   */
+  group
+    .command('probe <name>')
+    .description("re-derive an endpoint's capability tags against the model it now names")
+    .action(async (name: string, _o: unknown, cmd: Command) => {
+      const app = bootstrap(globalOpts(cmd));
+      try {
+        const result = await reprobeEndpoint({ home: app.home, config: app.config }, name);
+        if ('error' in result) {
+          throw new UserFacingError(result.error, result.message);
+        }
+        for (const note of result.notes) process.stderr.write(`! ${note}\n`);
+        process.stdout.write(
+          `${result.endpoint}: caps ${result.caps.join(',') || '-'}, context ` +
+            `${result.context_size ?? '-'}, measured against ${result.probed_model ?? '-'}\n`,
+        );
+        process.stdout.write(
+          result.changed
+            ? `config/models.yaml updated${result.committed ? ' and committed' : ''}\n`
+            : 'nothing changed — the tags already describe this model\n',
+        );
+      } finally {
+        app.close();
+      }
     });
 }

@@ -5,8 +5,13 @@ import { errMessage } from '../../../core/errors.js';
 import type { Config } from '../../../core/config.js';
 import type { DataHome } from '../../../core/datadir.js';
 import { McpServerSchema, ModelEndpointSchema } from '../../../core/config-schemas.js';
-import { normaliseEndpointUrl, probeEndpoint, probeSpeech } from '../../../model/probe.js';
-import type { FieldSpec, FormValues } from '../../../chat/forms.js';
+import {
+  listModels,
+  normaliseEndpointUrl,
+  probeEndpoint,
+  probeSpeech,
+} from '../../../model/probe.js';
+import type { FieldSpec, FormBroker, FormValues } from '../../../chat/forms.js';
 import type { ToolHub } from '../../hub.js';
 
 const l = log('tool:setup');
@@ -20,6 +25,13 @@ export interface TemplateContext {
   tools: () => ToolHub | null;
   /** Rebuilds the model stack after models.yaml changes. */
   reloadModels: () => boolean;
+  /**
+   * For the one question an effect cannot ask before its own form is answered
+   * (§10.2, §19.3): which model an endpoint should serve, chosen from a listing
+   * that lives behind the URL this form was collecting. Same primitive, same
+   * run — a second form, never a second mechanism.
+   */
+  forms?: FormBroker;
   fetch?: typeof globalThis.fetch;
 }
 
@@ -27,6 +39,13 @@ export interface TemplateSubmission {
   values: FormValues;
   /** `${secret:KEY}` references, keyed by field name (§19.2). */
   secrets: Record<string, string>;
+  /**
+   * The run this form belongs to, so an effect that has to ask one more
+   * question raises it in the same conversation (§19.3). Absent means nothing
+   * further can be asked — an effect that needs an answer refuses rather than
+   * choosing one.
+   */
+  form?: { runId: string; conversationId: string };
 }
 
 export interface ConnectorTemplate {
@@ -309,6 +328,75 @@ const CLASS_CHOICES: Record<string, ('fast' | 'best')[]> = {
   best: ['best'],
 };
 
+/**
+ * Which model this endpoint should be measured against (§10.2) — the answer
+ * the probe cannot be run without.
+ *
+ * The order is the spec's: a typed name wins outright; an endpoint listing one
+ * model may use it unasked; more than one is a question, and it is asked here
+ * rather than defaulted, because list position is never a choice. The listing
+ * only becomes readable once the first form is answered — it lives behind the
+ * URL that form was collecting — so this is where the second question belongs,
+ * on the same primitive and in the same run (§19.3).
+ *
+ * A listing that cannot be read is not a failure: llama.cpp serves one model
+ * and often lists nothing, and the probe's own `/props` read names it.
+ */
+async function chooseModel(
+  input: {
+    name: string;
+    url: string;
+    apiKey?: string | undefined;
+    /** What the human typed on the first form, which outranks any listing. */
+    typed: string;
+    form?: TemplateSubmission['form'];
+  },
+  ctx: TemplateContext,
+): Promise<{ model?: string } | { error: string; message: string; models?: string[] }> {
+  const { name, url, apiKey, typed, form } = input;
+  if (typed) return { model: typed };
+
+  const listed = await listModels(url, {
+    ...(apiKey ? { apiKey } : {}),
+    ...(ctx.fetch ? { fetch: ctx.fetch } : {}),
+  });
+  if (listed.models.length <= 1) return listed.models[0] ? { model: listed.models[0] } : {};
+
+  const models = [...listed.models].sort((a, b) => a.localeCompare(b));
+  if (!form || !ctx.forms) {
+    return {
+      error: 'no_model_chosen',
+      message:
+        `${name} lists ${models.length} models and nothing said which to use — ` +
+        'add it from a chat conversation, where the choice can be offered',
+      models,
+    };
+  }
+  const picked = await ctx.forms.request({
+    ...form,
+    title: `Which model should ${name} serve?`,
+    // The consequence, where the decision is made: the pick is what gets
+    // measured, and the tags written are that model's, not the address's.
+    description:
+      `This endpoint lists ${models.length} models. Capability tags describe a model ` +
+      'rather than an address, so the one you pick here is the one probed, and its ' +
+      "answers become the entry's tags.",
+    template: 'model_endpoint:model',
+    fields: [{ name: 'model', label: 'Model', type: 'select', options: models }],
+  });
+  if (!picked.submitted) {
+    return {
+      error: 'no_model_chosen',
+      message: `no model was chosen for ${name} (${picked.reason}), so nothing was written`,
+    };
+  }
+  const model = String(picked.values.model ?? '').trim();
+  if (!model) {
+    return { error: 'no_model_chosen', message: `no model was chosen for ${name}` };
+  }
+  return { model };
+}
+
 const modelEndpoint: ConnectorTemplate = {
   name: 'model_endpoint',
   title: 'Add a model endpoint',
@@ -339,6 +427,17 @@ const modelEndpoint: ConnectorTemplate = {
         type: 'secret',
         required: false,
       },
+      // Free text, and asked *before* the listing is reachable, because a
+      // catalogue is not always complete and a name the user knows works
+      // outranks a list that omits it (§10.2). Left blank against a provider
+      // serving several, the effect comes back and asks with the list in hand.
+      {
+        name: 'model',
+        label:
+          "Model to serve — leave blank and you will be asked from the endpoint's own list",
+        type: 'text',
+        required: false,
+      },
       {
         name: 'classes',
         label: hasChatEndpoint
@@ -351,17 +450,32 @@ const modelEndpoint: ConnectorTemplate = {
     ];
   },
   /**
-   * Probe, don't ask (plan §3b): the same suite the first-run setup page uses,
-   * so capability tags come from what the endpoint actually did.
+   * Probe, don't ask (plan §3b) — but probe *what* is a question only a human
+   * can answer (§10.2): the suite tags one model, and an address serving
+   * several has no default that is not list position.
    */
-  async effect({ values, secrets }, ctx) {
+  async effect({ values, secrets, form }, ctx) {
     const name = serverName(values);
     const url = normaliseEndpointUrl(String(values.url ?? '')).api;
     // The probe needs the real key, so resolve the reference we just wrote.
     const ref = secrets.api_key;
     const apiKey = resolveRef(ctx.config, ref);
+
+    const chosen = await chooseModel(
+      {
+        name,
+        url,
+        ...(apiKey ? { apiKey } : {}),
+        typed: String(values.model ?? '').trim(),
+        ...(form ? { form } : {}),
+      },
+      ctx,
+    );
+    if ('error' in chosen) return { added: false, ...chosen };
+
     const probe = await probeEndpoint(url, {
       ...(apiKey ? { apiKey } : {}),
+      ...(chosen.model ? { model: chosen.model } : {}),
       ...(ctx.fetch ? { fetch: ctx.fetch } : {}),
       timeoutMs: 90_000,
     });
@@ -378,6 +492,10 @@ const modelEndpoint: ConnectorTemplate = {
       classes: CLASS_CHOICES[String(values.classes ?? 'fast and best')] ?? ['fast', 'best'],
       caps: probe.caps,
       ...(probe.context_size ? { context_size: probe.context_size } : {}),
+      // The tags and their subject are written together or not at all (§10.2):
+      // a `caps` list with nothing saying what it measured is the state this
+      // whole item exists to end.
+      ...(probe.model_id ? { probed_model: probe.model_id } : {}),
     });
 
     const file = ctx.home.path('config', 'models.yaml');
@@ -401,6 +519,7 @@ const modelEndpoint: ConnectorTemplate = {
       caps: probe.caps,
       context_size: probe.context_size ?? null,
       model_id: probe.model_id ?? null,
+      probed_model: probe.model_id ?? null,
       smoke: probe.smoke ?? null,
       notes: probe.notes,
       models_loaded: loaded,

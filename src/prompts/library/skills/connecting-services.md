@@ -26,7 +26,7 @@ reference.
    |---|---|---|
    | `mcp_stdio` | an MCP server that runs as a local command | `name`, `description`, `command`, `env_var` |
    | `mcp_http` | an MCP server behind a URL | `name`, `description`, `url` |
-   | `model_endpoint` | another OpenAI-compatible model | `name`, `url` |
+   | `model_endpoint` | another OpenAI-compatible model | `name`, `url`, `model` if the user named one |
    | *(no template)* | anything else you need structured input for | all of them |
 
    Prefill by passing `fields` entries with the same `name` as the template's:
@@ -83,6 +83,21 @@ paying, and a number you mishear becomes a number they get billed against.
   price at all, which is a different statement from costing nothing, and the
   usage figures say `local` rather than `0.00` for it.
 - `usage.summary` is where the totals live once there are prices to total.
+
+## When an endpoint changes which model it serves
+
+Capability tags — `tools`, `json`, `vision` — and the context size are
+**measurements of one model**, taken when the endpoint was added. Change which
+model an endpoint serves, by editing `models.yaml` or at the provider, and the
+tags stay behind describing the old one: that is how an install ends up
+reporting "no tool support" for a model that has it.
+
+`setup.reprobe {endpoint}` re-runs the tests against the model the entry names
+now and rewrites the tags. It touches nothing else — classes, price, key and
+routes are decisions, not measurements. Reach for it when the user says they
+changed the model behind an endpoint, when `setup.list_integrations` comes back
+with `stale_model_tags`, or when a capability you were told exists is reported
+missing. Nothing is written if the endpoint does not answer.
 
 ## Things that will bite you
 

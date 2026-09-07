@@ -1,5 +1,19 @@
  # Next
 
+ * Fixed: adding a hosted endpoint tagged the wrong model. Providers that serve
+   hundreds of models list them in no order anyone chose, and the form that
+   added one never asked which — it tested whichever happened to be first and
+   wrote down that model's abilities. The result was an endpoint that claimed
+   it could not use tools while running a model that plainly could. Adding an
+   endpoint now asks which model it should serve, offering the list the
+   endpoint itself publishes, and an endpoint serving one model is still no
+   question at all. Because those abilities are measured against a model rather
+   than an address, the entry now records which model was measured: change it
+   afterwards and `turminder models`, `turminder doctor` and the assistant's
+   own integration list all say the measurements no longer describe it. Ask it
+   to re-probe, or run `turminder models probe <name>`, and they are taken
+   again — leaving the price, the classes and the key exactly as they were.
+
  * Fixed: the assistant's own skills and handlers were frozen at the day you
    installed it. They ship with Turminder and were only ever written out when
    missing, so every improvement since your first start stayed on our side of
