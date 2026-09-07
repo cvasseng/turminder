@@ -23,6 +23,7 @@ import { registerAuthCommand } from './cli/auth.js';
 import { registerSourcesCommand } from './cli/sources.js';
 import { registerToolsCommand } from './cli/tools.js';
 import { registerEmbedsCommand } from './cli/embeds.js';
+import { registerAssetsCommand } from './cli/assets.js';
 
 const program = new Command();
 
@@ -56,6 +57,7 @@ registerAuthCommand(program);
 registerSourcesCommand(program);
 registerToolsCommand(program);
 registerEmbedsCommand(program);
+registerAssetsCommand(program);
 
 async function main(): Promise<void> {
   await program.parseAsync(process.argv);

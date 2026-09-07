@@ -1,6 +1,7 @@
 import type { Command } from 'commander';
 import { bootstrap } from '../app.js';
 import { UserFacingError } from '../core/errors.js';
+import { driftedShippedAssets } from '../prompts/shipped.js';
 import { SkillLoader } from '../tools/skills.js';
 import { globalOpts } from './common.js';
 
@@ -20,9 +21,17 @@ export function registerSkillsCommand(program: Command): void {
       const app = bootstrap(globalOpts(cmd));
       try {
         const loader = new SkillLoader(app.home);
+        const drifted = new Map(driftedShippedAssets(app.home).map((d) => [d.path, d.reason]));
         for (const s of loader.all()) {
-          out(`${s.name}`);
+          const reason = drifted.get(s.file);
+          out(`${s.name}${reason ? `  [differs from shipped: ${reason}]` : ''}`);
           out(`  ${s.description}`);
+        }
+        if (drifted.size) {
+          out(
+            `\n${drifted.size} shipped asset(s) differ and are left alone (§12.3).` +
+              ' Take ours with: turminder assets refresh <path>',
+          );
         }
         const errors = loader.errors();
         if (errors.length) {

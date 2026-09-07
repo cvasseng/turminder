@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { App } from './app.js';
 import { BackgroundTasks } from './core/background.js';
+import { assetHash, type AssetLoadFailure } from './core/datadir.js';
 import { GitRepo } from './core/git.js';
 import { nowIso } from './core/time.js';
 import { log } from './core/logger.js';
@@ -193,7 +194,7 @@ export class Service {
     this.repos.trace.observe((row) => this.callFeed.made(row));
     const settings = app.config.settings;
     this.intake = new EventIntake(this.repos, settings);
-    this.skills = new SkillLoader(app.home);
+    this.skills = new SkillLoader(app.home, (f) => this.reportAssetInvalid(f));
     this.uploads = new UploadStore({
       home: app.home,
       repo: this.repos.uploads,
@@ -201,7 +202,7 @@ export class Service {
     });
     this.chat = new ChatService(this.repos, app.config, this.intake, this.stream, this.uploads);
     this.memoryStore = new MemoryStore(app.home);
-    this.handlers = new HandlerLoader(app.home);
+    this.handlers = new HandlerLoader(app.home, (f) => this.reportAssetInvalid(f));
     this.channels = new ChannelRouter(this.repos.deliveries);
     this.outbox = new Outbox(this.repos, this.channels, app.config);
     this.confirm = new ConfirmBroker(this.outbox, app.config);
@@ -596,6 +597,7 @@ export class Service {
       config: this.app.config,
       intake: this.intake,
       meta: this.repos.meta,
+      files: this.files,
       ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}),
     });
 
@@ -795,6 +797,7 @@ export class Service {
       config: this.app.config,
       intake: this.intake,
       meta: this.repos.meta,
+      files: this.files,
       ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}),
     });
 
@@ -841,6 +844,29 @@ export class Service {
     const index = this.filesIndex;
     if (index) this.background.run('files:index', () => index.indexOne(rel, content));
     this.fileEvents.changed({ path: rel, change });
+  }
+
+  /**
+   * A handler or skill that failed to load, put on the rail (§12.3, App. B).
+   * The shipped `failure-notice` handler already matches `system.*` and turns
+   * it into a notification — the failure rail exists (§13.2) and this rides it
+   * rather than growing a second one.
+   *
+   * Idempotent on the file *and* the message, so a reload storm is one event
+   * and a new breakage is a new one.
+   */
+  private reportAssetInvalid(failure: AssetLoadFailure): void {
+    this.intake.submit({
+      type: 'system.asset_invalid',
+      source: 'system',
+      payload: {
+        category: failure.category,
+        file: failure.file,
+        message: failure.message,
+        shipped: failure.shipped,
+      },
+      idempotency_key: assetHash(failure.file + failure.message),
+    });
   }
 }
 

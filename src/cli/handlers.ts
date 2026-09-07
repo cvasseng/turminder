@@ -2,6 +2,7 @@ import type { Command } from 'commander';
 import { bootstrap } from '../app.js';
 import { UserFacingError } from '../core/errors.js';
 import { HandlerLoader } from '../exec/handlers.js';
+import { driftedShippedAssets } from '../prompts/shipped.js';
 import { globalOpts } from './common.js';
 
 const out = (s: string) => process.stdout.write(`${s}\n`);
@@ -17,6 +18,7 @@ export function registerHandlersCommand(program: Command): void {
       const app = bootstrap(globalOpts(cmd));
       try {
         const loader = new HandlerLoader(app.home);
+        const drifted = new Map(driftedShippedAssets(app.home).map((d) => [d.path, d.reason]));
         for (const h of loader.all()) {
           const match = h.frontmatter.match
             ? ` match=${JSON.stringify(h.frontmatter.match)}`
@@ -29,11 +31,21 @@ export function registerHandlersCommand(program: Command): void {
             h.frontmatter.endpoint ?? h.frontmatter.model_class ?? 'handler route',
             ...(h.frontmatter.effort ? [`effort ${h.frontmatter.effort}`] : []),
           ].join(', ');
-          out(`${h.name}  [${routing}]${match}`);
+          const reason = drifted.get(h.file);
+          out(
+            `${h.name}  [${routing}]${match}` +
+              (reason ? `  [differs from shipped: ${reason}]` : ''),
+          );
           out(`  ${h.description}`);
           if (h.frontmatter.tools.length) out(`  tools: ${h.frontmatter.tools.join(', ')}`);
           if (h.frontmatter.confirm.length)
             out(`  confirm: ${h.frontmatter.confirm.join(', ')}`);
+        }
+        if (drifted.size) {
+          out(
+            `\n${drifted.size} shipped asset(s) differ and are left alone (§12.3).` +
+              ' Take ours with: turminder assets refresh <path>',
+          );
         }
         const errors = loader.errors();
         if (errors.length) {

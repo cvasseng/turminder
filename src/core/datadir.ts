@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,13 +14,54 @@ import { tokenSha256 } from './tokens.js';
 const l = log('datadir');
 
 /** Data-dir layout version (App. G.10). Bumped only for on-disk layout changes. */
-export const LAYOUT_VERSION = 4;
+export const LAYOUT_VERSION = 5;
 
-const ManifestSchema = z.object({
+const ManifestSchema = z.strictObject({
   layout_version: z.number().int().positive(),
   created_at: z.string(),
+  /**
+   * What Turminder wrote, not what the user meant (§12.3, G.10): data-dir path
+   * -> sha256 of the content we installed. A file that still hashes to its
+   * recorded value is ours to keep current; one that does not is theirs, and
+   * is never touched again.
+   */
+  shipped: z.record(z.string(), z.string()).default({}),
 });
 export type Manifest = z.infer<typeof ManifestSchema>;
+
+/**
+ * One asset `src/prompts/library/` ships, handed *down* to this module rather
+ * than imported: `core` imports nothing above itself (App. I), and the layout-5
+ * migration needs to know what the shipped bytes are.
+ */
+export interface ShippedAssetContent {
+  path: string;
+  content: string;
+}
+
+/** The hash the `shipped:` map records (§12.3), and the one App. B keys on. */
+export function assetHash(content: string | Buffer): string {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+/**
+ * A handler or skill in the data dir that failed to parse or validate. Both
+ * loaders already collected these and both already logged them; what neither
+ * did was tell anyone, which is how two weeks passed with a dead handler
+ * (§12.3). The loaders are constructed below the intake in the module graph
+ * (App. I), so the event is emitted through an injected reporter rather than
+ * by importing upward.
+ */
+export interface AssetLoadFailure {
+  category: 'handlers' | 'skills';
+  /** Data-dir-relative, e.g. `handlers/watch-changed.md`. */
+  file: string;
+  message: string;
+  /** Whether the path is in the MANIFEST `shipped:` map — ours, or theirs. */
+  shipped: boolean;
+}
+
+export type AssetInvalidReporter = (failure: AssetLoadFailure) => void;
 
 /**
  * Directories that are part of the git-tracked "source half" (§12.2). `files/`
@@ -67,6 +109,7 @@ systools:                 # §23.1 — path overrides; default: probe $PATH
   chromium: null          # e.g. /usr/bin/chromium
   gpg: null               # §27.1 gpg secret backend
   git: null               # §12.2 data-repo versioning
+  pdftoppm: null          # §34.4 PDF → JPEG pages for printers with no PDF interpreter
 secrets:                  # §27.1
   backend: auto           # auto | os | gpg | plain — pinned at onboarding
   gpg_key: null           # recipient key id, gpg backend only
@@ -194,6 +237,18 @@ export class DataHome {
   writeManifest(m: Manifest): void {
     fs.writeFileSync(this.manifestPath, YAML.stringify(m), 'utf8');
   }
+
+  /** The `shipped:` map (G.10): data-dir path -> sha256 of what we installed. */
+  shippedHashes(): Record<string, string> {
+    return this.readManifest().shipped;
+  }
+
+  /** Merge entries into `shipped:`. Only ever called after writing the bytes. */
+  recordShipped(entries: Record<string, string>): void {
+    if (!Object.keys(entries).length) return;
+    const m = this.readManifest();
+    this.writeManifest({ ...m, shipped: { ...m.shipped, ...entries } });
+  }
 }
 
 function writeIfAbsent(file: string, contents: string, mode?: number): boolean {
@@ -301,14 +356,116 @@ function addUploadsIgnore(home: DataHome): void {
   home.git.commit('layout 4: keep chat attachments out of git', ['.gitignore']);
 }
 
+/**
+ * Rewrite the one dead frontmatter shape §10.6 left behind:
+ *
+ * ```yaml
+ * model:
+ *   class: fast
+ * ```
+ *
+ * became `model_class: fast`, and a handler still carrying the old spelling
+ * fails strict validation on every load — silently, which is how one install
+ * went two weeks without the watcher notifications it was configured for.
+ *
+ * Deliberately a literal two-line rewrite rather than a YAML parse-and-re-emit:
+ * re-emitting reflows quoting, key order and comments in *every* handler a user
+ * ever wrote, to fix a key in one of them. Anything more exotic under `model:`
+ * is left alone — it now raises `system.asset_invalid` instead of a log line.
+ */
+function repairHandlerFrontmatter(home: DataHome): string[] {
+  const dir = home.handlersDir;
+  if (!fs.existsSync(dir)) return [];
+  const repaired: string[] = [];
+  for (const entry of fs.readdirSync(dir).sort()) {
+    if (!entry.endsWith('.md')) continue;
+    const abs = path.join(dir, entry);
+    const before = fs.readFileSync(abs, 'utf8');
+    const after = rewriteModelClass(before);
+    if (after === before) continue;
+    fs.writeFileSync(abs, after, 'utf8');
+    repaired.push(`handlers/${entry}`);
+  }
+  return repaired;
+}
+
+/** The frontmatter half of the repair, kept pure so a test can pin it. */
+export function rewriteModelClass(source: string): string {
+  const lines = source.split('\n');
+  // Frontmatter only: a `model:` line in a handler's prose is prose.
+  if (lines[0]?.trim() !== '---') return source;
+  const end = lines.indexOf('---', 1);
+  if (end < 0) return source;
+
+  for (let i = 1; i < end - 1; i += 1) {
+    if (lines[i]?.replace(/\r$/, '') !== 'model:') continue;
+    const child = /^[ \t]+class:[ \t]*(["']?)([A-Za-z0-9_-]+)\1[ \t]*\r?$/.exec(
+      lines[i + 1] ?? '',
+    );
+    if (!child) continue;
+    // Exactly one child, or this is a shape we do not understand and must not
+    // guess at: a third line still indented means more keys under `model:`.
+    if (/^[ \t]/.test(lines[i + 2] ?? '') && i + 2 < end) continue;
+    const rebuilt = [...lines];
+    rebuilt.splice(i, 2, `model_class: ${child[2]}`);
+    return rebuilt.join('\n');
+  }
+  return source;
+}
+
+/**
+ * Layout 5 (§12.3, G.10): seed the `shipped:` map on an install that predates
+ * it — repair first, adopt second, **in this order and no other**. Adopting
+ * before repairing would record the broken content as the user's own and
+ * freeze the breakage permanently, which is the exact failure this migration
+ * exists to undo.
+ *
+ * Adoption is byte-for-byte only. Identical content proves nothing was edited;
+ * different content is unreadable evidence — a stale copy and a careful
+ * rewrite look the same — so the rest are left for `turminder doctor` and
+ * `turminder assets refresh` to resolve with a human in the loop.
+ */
+function repairAndAdoptShipped(home: DataHome, shipped: readonly ShippedAssetContent[]): void {
+  const repaired = repairHandlerFrontmatter(home);
+  if (repaired.length) l.info({ repaired }, 'repaired handler frontmatter');
+
+  const adopted: Record<string, string> = {};
+  const already = home.shippedHashes();
+  for (const asset of shipped) {
+    if (already[asset.path] !== undefined) continue;
+    const abs = home.path(asset.path);
+    if (!fs.existsSync(abs)) continue;
+    const hash = assetHash(fs.readFileSync(abs));
+    if (hash !== assetHash(asset.content)) continue;
+    adopted[asset.path] = hash;
+  }
+  home.recordShipped(adopted);
+  if (Object.keys(adopted).length) {
+    l.info({ adopted: Object.keys(adopted) }, 'adopted shipped assets that match');
+  }
+  home.git.commit('layout 5: repair handler frontmatter and record shipped assets', [
+    'handlers',
+    'skills',
+    'MANIFEST',
+  ]);
+}
+
 /** Layout migrations, keyed by the version they migrate *from*. */
-const LAYOUT_MIGRATIONS: Record<number, (home: DataHome) => void> = {
+const LAYOUT_MIGRATIONS: Record<
+  number,
+  (home: DataHome, shipped: readonly ShippedAssetContent[]) => void
+> = {
   1: foldSourcesIntoIntegrations,
   2: addEmbedsIgnore,
   3: addUploadsIgnore,
+  4: repairAndAdoptShipped,
 };
 
-function migrateLayout(home: DataHome, from: number): void {
+function migrateLayout(
+  home: DataHome,
+  from: number,
+  shipped: readonly ShippedAssetContent[],
+): void {
   let v = from;
   while (v < LAYOUT_VERSION) {
     const step = LAYOUT_MIGRATIONS[v];
@@ -319,7 +476,7 @@ function migrateLayout(home: DataHome, from: number): void {
       );
     }
     l.info({ from: v, to: v + 1 }, 'running layout migration');
-    step(home);
+    step(home, shipped);
     v += 1;
   }
   const m = home.readManifest();
@@ -330,7 +487,10 @@ function migrateLayout(home: DataHome, from: number): void {
  * Resolve, create-if-absent, and validate the data home. Idempotent: a second
  * call on an existing dir changes nothing. Refuses a MANIFEST from the future.
  */
-export function openDataHome(flag?: string): OpenDataHomeResult {
+export function openDataHome(
+  flag?: string,
+  shipped: readonly ShippedAssetContent[] = [],
+): OpenDataHomeResult {
   const root = resolveDataDir(flag);
   const home = new DataHome(root);
   const fresh = !home.exists();
@@ -375,7 +535,7 @@ export function openDataHome(flag?: string): OpenDataHomeResult {
   }
 
   if (fresh) {
-    home.writeManifest({ layout_version: LAYOUT_VERSION, created_at: nowIso() });
+    home.writeManifest({ layout_version: LAYOUT_VERSION, created_at: nowIso(), shipped: {} });
     l.info({ root }, 'created data home');
   }
 
@@ -387,7 +547,9 @@ export function openDataHome(flag?: string): OpenDataHomeResult {
       'upgrade Turminder, or point --data-dir somewhere else.',
     );
   }
-  if (manifest.layout_version < LAYOUT_VERSION) migrateLayout(home, manifest.layout_version);
+  if (manifest.layout_version < LAYOUT_VERSION) {
+    migrateLayout(home, manifest.layout_version, shipped);
+  }
 
   home.git.init();
   // Only commit when the scaffold actually laid something down: attempting a

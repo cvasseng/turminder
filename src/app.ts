@@ -4,7 +4,7 @@ import { DeviceTokens } from './core/tokens.js';
 import { log } from './core/logger.js';
 import type { SystoolRegistry } from './core/systools.js';
 import { openDb, dbVersion, type Db } from './db/index.js';
-import { installShippedAssets } from './prompts/shipped.js';
+import { installShippedAssets, SHIPPED_ASSETS } from './prompts/shipped.js';
 
 const l = log('app');
 
@@ -34,7 +34,10 @@ export interface App {
 }
 
 export function bootstrap(opts: BootOptions = {}): App {
-  const { home, created, newUiToken } = openDataHome(opts.dataDir);
+  // The library goes *down* into the data home: layout 5 has to know what the
+  // shipped bytes are to adopt an install that predates the `shipped:` map, and
+  // `core` may not import from `prompts` (App. I).
+  const { home, created, newUiToken } = openDataHome(opts.dataDir, SHIPPED_ASSETS);
   const config = new Config(home, resolveBindOverride(opts.bind));
   // Touch settings early so a broken turminder.yaml fails at boot, not mid-run.
   const settings = config.settings;

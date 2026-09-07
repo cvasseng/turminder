@@ -330,6 +330,73 @@ schedule, not of how the service came to notice.
   is open" is a deployment question — a second always-on install with the data
   dir synced — not code in this repo.
 
+### 6.2 A schedule needs a consumer (normative)
+
+The scheduler **emits**; it never acts. A `schedules` row is a promise to
+put an event on the rail at a time, and nothing more — what happens next is
+a handler's job or nobody's. That distinction is invisible from
+`schedule.create`, whose success return reads like the reminder itself was
+booked, and the gap is not theoretical: a daily digest was scheduled,
+fired punctually, ran the applicability gate, matched no handler, and ended
+`done` having done nothing. Every layer was working. The row was real, the
+fire was real, the trace was complete, and the user was told "first run:
+tomorrow morning" by an assistant with no way to know better.
+
+So the server closes the loop the same way it closes the lateness one
+(§6.1) — **the server knows, so the server says**:
+
+- **`schedule.create` reports its consumers.** The return carries
+  `consumers: [handler names]`, computed by running the §5.2 envelope
+  matcher over the event the schedule will emit. This is deterministic —
+  no model call, no cost, the same function the pipeline uses — and it is
+  computed at creation, when there is still a human in the conversation to
+  hear the answer.
+- **An empty list is a warning, not a silence.** `consumers: []` comes with
+  `warning` saying in one sentence that nothing will run this. An assistant
+  that reads it offers to write the handler; one that ignores it has been
+  told, and the trace records that it was told.
+- **`schedule.list` carries the same field**, so "why didn't my digest
+  run" is answerable from the tool the question is about, without reading
+  a trace.
+
+The list is a fact about the handlers on disk *now*. A handler deleted
+after a schedule was created makes the schedule inert again, and nothing
+re-checks — that is the §5.1 contract (handlers are files, the disk is the
+truth) and not a wrong to right here.
+
+**`event_type` is the schedule's contract with its handler.** The column
+has been parameterized since v1 and watchers already ride it (`watch.due`,
+§30.3); what was missing is that a *user's* schedule can name its own type
+too. This is how a purpose-built handler owns exactly its own schedule
+instead of competing with every other one:
+
+- `schedule.create` takes `event_type?`, default `timer.fired`. A custom
+  type must match `^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$` and must not claim a
+  namespace App. B has already spoken for (`system.`, `chat.`, `watch.`,
+  `file.`, `email.`, `embed.`, `page.`, `integration.`) —
+  `{error: "reserved_event_type"}` naming the taken prefix.
+- Its payload, trust class, idempotency key and serialization key are
+  `timer.fired`'s, unchanged (App. B): a schedule-defined type is a *label*
+  for routing, never a new trust story. Nothing a model names can earn a
+  `user_fields` entry.
+- The `consumers` check runs against the chosen type, which makes the
+  ordering obvious to anyone reading the reply: name the type, get
+  `consumers: []`, write the handler, and the next `schedule.list` shows it
+  owned.
+
+**The shipped fallback is deliberately small.** `handlers/scheduled-task.md`
+(§12.3) matches bare `timer.fired` and is granted `deliver.notify`,
+`memory.query`, `skills.fetch` and `time.*` — enough to *tell you something*
+at a time you asked to be told, and nothing else. A frontmatter grant
+auto-executes (§11.3), and a schedule fires at seven in the morning with
+nobody watching; the set of tools that may run unattended on a note a model
+wrote months ago is the smallest one that still delivers a reminder.
+Anything richer — a digest that reads a calendar, a check that files a
+task — is a handler the assistant authors with grants scoped to that job,
+which is also the only way the human ever sees what a scheduled task is
+allowed to do: it is written in a file, in their own data dir, one line per
+capability.
+
 ---
 
 ## 7. Egress: deliveries, channels, daemon
@@ -1135,6 +1202,50 @@ Three properties make it a facade rather than a rewrite:
   `tools.open` after that sort; re-sorting at the boundary would move it and
   break the prefix stability of §20.5.
 
+### 11.6 When an external server drops (normative)
+
+A bundled integration cannot go away — it is the same process. An external
+MCP server can, and does: a VPN route changes, a laptop moves networks, a
+stdio child exits. What must not happen is what did happen — the connection
+object stays in the map, `connected` keeps reporting `true` because it is
+answering "is there an entry" rather than "is there a server", every tool
+the server serves stays in the catalog, every call returns `tool_failed`,
+and the only cure is restarting the service. Fixing the actual fault does
+nothing, which teaches the user that the assistant lies about its own
+health.
+
+- **Liveness is observed, never inferred.** A connection carries `alive`,
+  set false by the transport's own `onclose`/`onerror`. Map membership is
+  not evidence of anything and may never stand in for this.
+- **`connected` in every status surface means alive** — `serverStatus()`,
+  `setup.list_integrations` (F.9), `turminder doctor`. A server that is
+  down says so, with the error that took it down.
+- **A dead connection reconnects on demand.** A call routed to a
+  not-alive server attempts one reconnect first, and on success runs the
+  call. This is what makes "fix the VPN and try again" true, and it is the
+  path a user actually takes: they fix the fault and ask the same question
+  again.
+- **And on its own, with backoff.** A dropped server is retried on a capped
+  exponential schedule (App. A `mcp_reconnect_backoff`) so a fault that was
+  fixed outside the conversation is picked up without one, and a server
+  that is gone for good costs a socket attempt every five minutes rather
+  than a spin. The loop stops when the server is removed from `mcp.yaml`.
+- **A successful reconnect refreshes the catalog.** The server may serve a
+  different tool set than it did an hour ago; the hub re-lists rather than
+  assuming.
+- **Its tools stay advertised while it is down.** This is the one
+  counter-intuitive rule and it is deliberate: withdrawing the tools
+  removes the model's only reason to call one, and the call is what
+  triggers the reconnect. A capability that exists but is unreachable must
+  say so when reached for, not vanish — so the call returns
+  `{error: "server_unavailable", message}` naming the server and when it
+  will next be retried. Errors teach; absence does not.
+- **Reconnecting is not re-reading config.** `mcp.yaml` is re-read for the
+  server's *own* definition when it reconnects (a URL or command edited
+  while the service ran is honoured), but a reconnect never adds, removes
+  or re-tiers servers — that is `setup.form`'s job (§19.3) and there is one
+  writer, not two (§12.2).
+
 ---
 
 ## 12. Storage and data home
@@ -1190,6 +1301,72 @@ data/
 - **MANIFEST versioning** from day one; the service refuses to start on a
   newer schema than it knows, and migrates older ones.
 - **Container story:** read-only image, one volume mount at `/data`, done.
+
+### 12.3 Shipped assets (normative)
+
+Turminder ships skills and handlers as markdown in
+`src/prompts/library/{skills,handlers}/` and installs them into the data
+dir at every start — the directory is the manifest, a file that exists is
+shipped, and there is no registry to forget (App. H). The install rule was
+"write it only when absent, so the user's edits always win", which is right
+about edits and wrong about everything else: an install freezes at its
+first start, and the shipped half of the assistant then ages out from under
+it. Measured on a live install five weeks old — every shipped skill was the
+version from its first day, `connecting-services` at half its current
+length, and `watch-changed` was **dead**: a routing change had renamed its
+frontmatter key and the frozen copy still carried the old one, so it failed
+validation on every load and the watchers it exists to announce had been
+silently unheard for two weeks. Nothing was broken. Everything was working
+as written.
+
+The rule that replaces it distinguishes *our copy* from *their copy*, and
+never guesses which it is looking at:
+
+- **The MANIFEST records what Turminder wrote.** `shipped:` maps each
+  installed asset's data-dir path to the sha256 of the content Turminder
+  put there (G.10). It is a record of authorship, never an assertion about
+  intent.
+- **Absent → install**, and record the hash. Unchanged from v1, including
+  the property that deleting a shipped asset brings it back.
+- **Present and the hash matches → refresh.** The user never touched this
+  file, so it tracks the shipped version: rewrite it, record the new hash,
+  commit it to the data repo like every other mutation (§12.2). This is the
+  whole fix — a shipped asset the user never edited is Turminder's to keep
+  current.
+- **Present and the hash differs → never touch it, ever.** The user edited
+  their copy and it outranks ours permanently. No merge, no prompt, no
+  "just this once": a file in the user's own data dir that Turminder
+  rewrites over an edit is a betrayal the user cannot audit.
+- **Present with no recorded hash → adopt only on a byte-for-byte match.**
+  An install that predates the map is unreadable evidence: identical
+  content proves nothing was edited, and different content could equally be
+  a stale copy or a careful rewrite. So the identical ones are recorded and
+  join the refresh path, and the rest are **reported, not resolved** —
+  `turminder doctor`, `turminder skills list`, `turminder handlers list` and
+  `turminder assets list` mark them as differing from the shipped version,
+  and `turminder assets refresh <path>…` (or `--all`) takes the update
+  explicitly. `refresh` **refuses with no target**: `--all` is a typed
+  choice, never a default, because this is the one command that may
+  overwrite something the user wrote. A guess here would silently eat
+  exactly the edits the rule above exists to protect.
+
+**Layout 5** (G.10, §12.2) seeds the map on an existing install, in this
+order and no other: repair first — rewrite `model:`/`class:` handler
+frontmatter to the `model_class:` spelling §10.6 settled on, because a
+handler that cannot load is not a preference to preserve — then adopt every
+asset that now matches the shipped bytes. Adopting before repairing would
+record the broken content as the user's own and freeze the breakage
+permanently.
+
+**A shipped asset that fails to load is an event, not a log line.** Both
+loaders already collect their validation errors and both already log them;
+what neither did was tell anyone, which is how two weeks passed. A
+handler or skill that fails to parse or validate emits
+`system.asset_invalid` (App. B), idempotent on the file and the message so
+a reload storm is one event and a *new* breakage is a new one. The shipped
+`failure-notice` handler already matches `system.*` and turns it into a
+notification — the failure rail exists (§13.2) and this rides it rather
+than growing a second one.
 
 ---
 
@@ -1756,7 +1933,8 @@ fields?: [FieldSpec] (activation form), provides: {tools: [...],
 events: [...], source?: bool}}`. Core facilities (`memory`, `files`,
 `schedule`, `deliver`, `events`, `web`, `weather`, `time`, `config`,
 `skills`, `setup`) are `activation: none` — always on. Credentialed
-integrations (Asana, Google Calendar, future ones) ship dormant and
+integrations (Asana, Google Calendar, `print-scan` — §34, form-activated for
+an address rather than a credential — and future ones) ship dormant and
 activate through the form flow:
 
 - **Discovery:** `setup.list_integrations` (App. F.9) returns every bundled
@@ -2602,7 +2780,8 @@ does. This is now a first-class concept:
   `git` (data-repo versioning, §12.2, path override `systools.git` —
   retroactively: it was an unstated hard dependency, which on a clean
   macOS meant a mid-onboarding Xcode dialog; absent git now degrades per
-  §12.2 instead).
+  §12.2 instead), and `pdftoppm` (poppler, §34.4 — PDF → JPEG pages for the
+  many printers with no PDF interpreter, path override `systools.pdftoppm`).
 - A feature whose tool is absent **degrades honestly**: the tool result /
   UI message names the missing binary and the install hint. Probing is
   cached per process; `turminder doctor` reports the registry.
@@ -2611,7 +2790,10 @@ does. This is now a first-class concept:
   pin the exact CLI contract used (flags, expected output), because
   "whatever flags work" is how shell-outs rot. Probing is `--version`,
   parsed for a major; `chromium` must be ≥ 112, the release where
-  `--headless=new` (§23.4) became the real thing rather than an alias.
+  `--headless=new` (§23.4) became the real thing rather than an alias. An
+  entry names **which stream carries its version**, because poppler prints
+  `pdftoppm version 24.08.0` on stderr, and a probe that reads only stdout
+  concludes the binary is missing while looking straight at it.
 - Invocations add whatever a *non-interactive* run of the same binary needs,
   and no more: the print pipeline passes `--user-data-dir=<temp>`
   `--no-first-run` `--disable-extensions` alongside §23.4's flags, because
@@ -2813,6 +2995,50 @@ document never loads one.
   supported. `pages` on a docx or `range` on a PDF →
   `{error: "bad_args", message}` naming the right selector — errors
   teach.
+
+### 23.6 A document that lives at a URL (normative)
+
+§23.5 reads documents in the files store and §11.2's `web.fetch` reads
+pages on the web, and between them was a hole big enough to lose a report
+in: a PDF at a URL could not be read at all. `web.fetch` refused
+`application/pdf` before reading a byte — honestly, with
+`unsupported_content` — and `docs.read` resolves store paths only, so the
+parser that was installed, working and tested had no way to be handed the
+bytes. Worse in the other direction, `.docx` was not on the refusal list
+and so was fetched as *text*: several megabytes of zip container decoded as
+UTF-8 and handed to a model, which is the failure mode the refusal exists
+to prevent, arriving through the gap in it.
+
+The fix is one hop, not a second reader:
+
+- **`web.download`** (F.5, `se`) fetches a URL and writes the bytes into
+  the files store, returning `{path, content_type, bytes}`. It is
+  side-effecting because it writes the user's store, and the file is
+  *kept* — a downloaded invoice can then be read, printed (§34.4), indexed
+  and found again next month, which a scratch copy in `cache/` could never
+  be. Default destination `downloads/<name from the URL>.<ext from the
+  content type>`; an explicit `path` overrides. Same URL policy as
+  `web.fetch` — one door to "may I fetch this", never two (§11.2) — plus a
+  size ceiling (App. A `download_max_mb`) enforced against
+  `Content-Length` *and* against the bytes actually read, because a header
+  is a claim.
+- **Then `docs.outline`, then `docs.read`** (F.14), unchanged. A 200-page
+  PDF from the web is not one read for exactly the reasons a 200-page PDF
+  from disk is not (§20, §23.5), and inventing a second, URL-shaped reading
+  path would have been a second answer to a question §23.5 already
+  answered.
+- **`web.fetch` never extracts a document.** Its refusal becomes an
+  allowlist rather than a blocklist — text and the text-shaped structured
+  types (`text/*`, `application/json`, `application/xml`, `+json`, `+xml`)
+  are read; everything else is refused. A blocklist is wrong here by
+  construction: it must be right about every format that will ever exist,
+  and it was already wrong about the second most common document on the
+  web.
+- **The refusal names the next step.** `{error: "unsupported_content",
+  content_type, url, message}` where the message says to use
+  `web.download` and then `docs.outline`. This is the §23.5 rule again —
+  errors teach — and it is the difference between a model reporting "I
+  can't read PDFs" and a model reading the PDF.
 
 ---
 
@@ -4561,6 +4787,265 @@ switches on a client machine; the assistant can say where the tray menu is.
 
 ---
 
+## 34. Print and scan
+
+Turminder talks to network printers and scanners the way a phone does:
+**IPP for printing, eSCL for scanning**, both of them ordinary HTTP requests
+to the device itself. No vendor SDK, no local spooler, no driver, no CUPS
+queue — the two protocols every AirPrint/Mopria device on the market answers
+are the whole transport, and a machine that answers neither is a machine this
+build does not support. That is a deliberate floor, not an oversight: the
+alternative is a driver database, and a driver database is a product.
+
+The integration is `print-scan`, tool namespace `print.*`, `activation: form`
+(§19.6). It is form-activated even though most home devices need no
+credential, because the thing being collected is not a secret — it is an
+address that will make paper come out of a machine in another room. That is a
+decision with consequences, so a human makes it on a form the code raised
+(§19.2), never one a model wrote into a config file.
+
+### 34.1 Devices
+
+A **device** is one network machine, not one capability. The all-in-one on the
+shelf prints *and* scans; splitting it into two records to satisfy a taxonomy
+would mean two setups, two names, and two chances to mistype the address.
+Print-only and scan-only devices are the same record with one half empty.
+
+The registry is the activation record's `settings.devices` (App. G.12) — a
+list, because "multiple printers" is the normal case and a single-device
+setting would have to be replaced by a list the first time someone bought a
+second one. Each entry carries:
+
+- **`name`** — the slug tools address it by (`office`, `label-printer`),
+  unique, and the default for a device argument when only one is enabled.
+- **`enabled`** — `false` keeps the record and takes the device out of every
+  tool's reach. This is the "disable" of the setup form: the printer that is
+  unplugged for the summer should not be *forgotten*, because forgetting it
+  means re-probing it in September.
+- **`print` / `scan`** — capability blocks, `null` when the device does not do
+  that half.
+- **`probed_at`** — when the capabilities were last read off the device.
+
+Capabilities are **probed, never declared**. The person adding a printer does
+not know its `document-format-supported` list and should not be asked; the
+device does, and it will say so in one request. The probe is re-taken on every
+edit and by `print.status`, and the record says when it was taken — a device
+that grew a duplexer since setup keeps under-reporting until someone re-probes
+it, which is honest as long as the timestamp is visible.
+
+A device may carry an IPP password in the secret store, keyed
+`PRINTER_<NAME>_PASSWORD` (§27, the form's `secret_key` templating, App. D.5).
+Most home devices need none, so the field is optional and blank is the
+expected answer.
+
+### 34.2 The transport, and the certificate problem
+
+Printers ship self-signed certificates, and a good many refuse plaintext IPP
+outright: the reference device (an Epson ET-3700, the machine this section was
+written against) answers `426 Upgrade Required` on `http://…:631` and serves
+both IPP and eSCL only over TLS it signed itself. There is no CA to check
+against and there never will be, so certificate verification cannot simply be
+switched on — and switching it off is an open invitation to anyone else on the
+LAN.
+
+**Trust on first use, then pin.** The SHA-256 fingerprint of the certificate
+seen while adding the device is written into its record. Every later request
+compares it; a mismatch is `{error: "certificate_changed"}` naming both
+fingerprints, and nothing prints or scans until a human re-adds the device
+through the form. A printer's certificate changes when it is factory-reset or
+replaced — both of them things a person did and can confirm. This is weaker
+than a CA and enormously stronger than nothing, which is the honest
+description of every consumer LAN device on the market.
+
+Plain-HTTP devices are supported and carry no fingerprint; a device that was
+added over HTTPS may never silently fall back to HTTP, because a downgrade is
+the one move an attacker on the path can always make.
+
+That rule is not only about redirects, and this is where it earns its keep: a
+device may hand back an absolute URL in a `Location` header, and it may be
+wrong. The reference ET-3700 serves eSCL over HTTPS on 443 and answers a
+successful scan POST with `Location: http://…` — plain, port 80, where
+`/eSCL` is a 404. **Only the path of a device-supplied URL is the device's to
+choose**; the scheme, host and port stay ours. A client that trusts the whole
+URL pulls the page over a scheme the scanner does not serve, waits forever,
+and leaves a job the firmware will not release.
+
+The device transport is a `fetch`-shaped function like every other external
+call in this system (injectable for tests, §11.1), backed by `node:https` for
+exactly one reason: TLS trust here is per-device and per-fingerprint, and the
+platform `fetch` has no way to say so.
+
+### 34.3 Discovery
+
+"Which printers are on this network" is a question the setup form answers
+itself, because the alternative is the user reading an IP address off a
+device's LCD.
+
+1. **mDNS/DNS-SD first** — a multicast PTR query for `_ipp._tcp.local`,
+   `_ipps._tcp.local`, `_uscan._tcp.local` and `_uscans._tcp.local`, listening
+   for `print_discovery_window_s` and assembling PTR/SRV/TXT/A into candidates.
+   This is what AirPrint itself uses; on a healthy LAN it is instant and exact,
+   and it names the device the way its owner already sees it named.
+2. **A bounded sweep when mDNS finds nothing** — multicast is blocked on plenty
+   of networks and absent on plenty of hosts. The fallback is a TCP connect
+   sweep of the host's own IPv4 `/24` on the three ports that matter (631, 443,
+   80), bounded by `print_sweep_concurrency` and `print_sweep_timeout_ms`, with
+   every hit confirmed by a real IPP `Get-Printer-Attributes` or eSCL
+   `ScannerCapabilities` call before it is offered to anyone. A port that is
+   open is not a printer; a device that answers IPP is.
+
+**Discovery never runs on its own.** It happens when a human opened the setup
+form or explicitly asked for it — never on a timer, never at startup. A service
+that sweeps the LAN unprompted is not a good neighbour, and there is nothing
+here worth polling for.
+
+### 34.4 Printing
+
+`print.document` prints a file from the file store (§18). Only the file store:
+it is the one place with real paths, a git history, and a user who can see what
+is in it. Something the assistant just authored is printed by writing it there
+first — which `docs.to_pdf` (§23.4) already does.
+
+**Format negotiation, because a printer's list is short and specific.** The
+device advertises `document-format-supported`, and the pipeline picks in this
+order:
+
+0. **`application/octet-stream` is not a format.** Nearly every printer
+   advertises it, and it means "hand me bytes and I will guess", not "I can
+   render this". It is struck from the device's list before negotiation
+   begins, and a file this system cannot identify — anything the store gives
+   an unknown extension, which includes markdown and plain text — is refused
+   with `render_first` rather than sent. Otherwise a note prints as a page of
+   hashes and asterisks: accepted by the printer, and not what anyone asked
+   for. The shipped `printing` skill says the same thing to the model:
+   `docs.to_pdf` first, print the PDF.
+1. The file's own type, when the printer accepts it. A PDF to a printer with a
+   PDF interpreter is one request and the best possible fidelity.
+2. **PDF → JPEG pages via `pdftoppm`** (§23.1 systool) when it does not.
+   This is not a corner case: the reference ET-3700 advertises
+   `image/urf, image/pwg-raster, image/jpeg` and `pdf-versions-supported: none`
+   — a very common shape for consumer inkjets, whose PDF rendering has always
+   happened on the phone. Pages are rasterised at the printer's own default
+   resolution and sent as `image/jpeg`.
+3. Neither → `{error: "format_unsupported"}` naming what the device does take.
+   No silent best-effort: a printer fed a format it cannot read produces
+   either nothing or forty pages of ASCII, and the second one is worse.
+
+**One document, one IPP job.** A rasterised PDF is several JPEGs, so it is
+several jobs, submitted in order, and the result reports every job id. Grouping
+them would mean `Create-Job`/`Send-Document` and a code path that the
+reference device — which reports `multiple-document-jobs-supported: false`,
+like most consumer machines — could never exercise. An untested branch that
+runs on somebody else's printer is worth less than an honest job list.
+
+**The printer and the scanner are one mechanism, and the firmware does not
+defend itself.** Starting a scan while a page is printing aborts that page
+mid-sheet, with no complaint from the device — observed, not theorised. So
+each side asks about the other before it starts, and asks the half that can
+actually answer: IPP is authoritative about printing, while on a shared engine
+eSCL's `State` reads `Processing` whenever the *printer* is busy, so only the
+scan job list distinguishes "someone is scanning". Either way the refusal is
+`device_busy`, naming what the machine is doing. A probe that fails is not a
+refusal: being unable to ask is a worse reason to stop than the risk it was
+avoiding.
+
+`print_max_pages` caps a single call. A 900-page PDF turned into 900 print jobs
+by a model that misread a request is the failure worth designing against; above
+the cap the tool refuses and says to narrow `pages`.
+
+Missing `pdftoppm` degrades the §23.1 way: the tool result names the binary and
+the install hint, and printing a JPEG or a PDF-capable printer still works.
+
+### 34.5 Scanning, and receiving a scan
+
+Two directions, and only one of them needs new code.
+
+**Pulling** is `print.scan`: an eSCL `ScanJobs` POST, then `NextDocument` until
+the device says there is no more, then one `writeBinary` into the file store
+(§18.2) and a commit. The result is a path, not bytes — the scan is a file in
+the workspace from the moment it exists, and every tool that reads files can
+reach it.
+
+Two details are the device's, not ours, and both were learned by asking one:
+
+- **The job body is minimal.** No `ScanRegions`, no `DocumentFormatExt` — the
+  reference ET-3700 answers `201` to the short form and `409 Conflict` to the
+  fuller shape other clients send. Where a guess and a measurement disagree,
+  the measurement ships.
+- **JPEG is the default format.** It is the one this build has watched a
+  device hand back — a real page in 24 s. PDF stays available for the
+  stack-of-pages case, where one document beats twelve, and is not known to
+  be worse; it is simply the one that has not been seen working, and a
+  default should be the format with evidence behind it.
+
+**A pull that is cut off wedges the job.** `NextDocument` is a long request —
+the device scans while it is open — and a client that walks away mid-scan
+leaves a job the firmware will not release: it answers `503` to further
+pulls, `200`-and-no-effect to `DELETE`, and refuses new jobs until the
+machine is hard-reset. So the scan budget (`scan_timeout_s`, App. A) is
+generous by design, and every job the tool opens is **deleted on the way
+out** — on success as much as on failure, because taking a platen job's one
+page does not close it either.
+
+**Receiving** — a scan someone started at the device's own panel — needs
+nothing new at all. The device's "scan to network folder" is pointed at a
+directory inside the file store (`scan_inbox`, default `scans/inbox`), and the
+existing §18.4 tier-3 subscription does the rest: the shipped `scan-received`
+handler declares `watch: ["scans/inbox/**"]`, the watcher emits `file.changed`
+after quiescence, and the handler files the scan and says it arrived. No
+poller, no new event type, no vendor push protocol — the file store was already
+the right shape for "a document appeared".
+
+This is deliberate rather than lazy. eSCL has no push, and a panel-initiated
+scan does not appear in the device's own job list; a poller would therefore
+mostly discover scans we started ourselves. The drop folder is the mechanism
+the hardware actually offers.
+
+What Turminder does **not** do is serve that folder. A printer scans to SMB,
+FTP or email, and standing up a file share is the operating system's job, not
+this service's — the setup form says where to point it and stops there. The
+half that is ours is the half after the file lands.
+
+The handler is honest about what it cannot do: **there is no OCR**, so a scanned
+page is an image and its text is not readable by anything here yet (§16). It
+files, names, and announces; it does not summarise what it cannot read.
+
+### 34.6 Setup: one door
+
+`setup.printers` (App. F.9) is the whole of device management — add, edit,
+enable, disable, remove — as a form wizard raised by code:
+
+- With devices already configured, a first form asks **which** one (a select
+  of names plus "add a new device"). With none, that step is skipped, because a
+  menu of one choice is furniture.
+- The **add** path runs discovery first (§34.3) and offers what it found as a
+  select, plus a free-text address for the device it did not find. The name is
+  prefilled from the device's own DNS-SD name.
+- The **edit** path opens the same fields prefilled from the record, with an
+  action select: save, disable, enable, or remove.
+- Either way the effect **probes the device before writing anything**. A record
+  for a machine that did not answer is worse than no record, because every
+  later print fails at the far end with the address already blessed.
+
+It lives in `setup.*` rather than `print.*` for a reason that is not
+cosmetic: before the first device exists there is no `print.*` namespace to
+call, so discovery would be unreachable exactly when it is needed. `setup.*` is
+granted to chat by default (F.7), so "find my printer" works on a fresh
+install.
+
+`setup.activate print-scan` and `setup.deactivate print-scan` remain the
+uniform on/off switch of §19.6 — activation adds the first device through the
+manifest's own form; deactivation hides the tools and **keeps the device list**,
+exactly as it keeps secrets, so switching back on is one confirm rather than a
+re-probe of every machine in the house.
+
+`print.*` is not in the default chat grant (F.7). Like Asana's and the
+calendar's, its tools are asked for with `setup.request_access` (§19.4) the
+first time the assistant needs them — which is also where the user gets to say
+*ask me each time* about a tool that consumes paper.
+
+---
+
 # Appendices — normative implementation detail
 
 These appendices are binding. Where an appendix is more specific than the
@@ -4639,6 +5124,14 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | `voice_followup_s` | 8s | §28.6 — shell follow-up window (shell state, not G.1) |
 | Voice first-word budget | ≤ 3s on the reference box, no tools | §33.4 — an exit criterion, measured, not enforced |
 | Voice preview sentence | "Hello — I'm <instance name>. This is how I sound." | §33.5 — the only text `GET /api/voice/preview` ever speaks |
+| `print_probe_timeout_s` | 10s | §34.1 — one IPP `Get-Printer-Attributes` or eSCL `ScannerCapabilities` call |
+| `print_discovery_window_s` | 4s | §34.3 — how long the mDNS listener stays open |
+| `print_sweep_concurrency` / `print_sweep_timeout_ms` | 32 / 400ms | §34.3 — the `/24` fallback sweep, only when mDNS found nothing |
+| `print_job_timeout_s` | 120s | §34.4 — submitting one document to the printer |
+| `print_max_pages` | 50 | §34.4 — pages converted (and jobs submitted) by one `print.document` call |
+| `print_status_cache_s` | 15s | §34.4 — live device status, cached in `meta` so a repeated question is not a repeated request |
+| `scan_timeout_s` | 300s | §34.5 — one eSCL page retrieval; 1200 dpi is genuinely slow |
+| `scan_dir` / `scan_inbox` | `scans/` / `scans/inbox/` | §34.5 — where a pulled scan lands, and the drop folder the shipped handler watches |
 | Secret value cap (`secret_value_max_kb`) | 64 KB per value (JSON blobs welcome) | §27.1 |
 | Capture content cap (`capture_max_chars`) | 100,000 chars | §29.3 |
 | Capture field cap (`capture_field_max_chars`) | 4000 chars per matcher field | §29.3 |
@@ -4650,6 +5143,10 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Watcher poll timeout | the §23.2 binding call timeout (10s), same constant | §30.1 |
 | SPA text floor (`spa_text_floor_chars`) | 500 chars extracted (with markup > 10×) → JS-rendered note | §20.9, App. F.5 |
 | Request log window (`request_log_window`) | last 100 calls, 24h; `limit` clamps to 200 | §10.8 |
+| Download size cap (`download_max_mb`) | 25 MB | §23.6, App. F.5 — checked against `Content-Length` *and* the bytes actually read |
+| `download_dir` | `downloads/` | §23.6 — where `web.download` puts a file when no `path` is given |
+| `download_timeout_s` | 60s | §23.6 — one `web.download`; longer than `fetch_timeout_s` because a document is not a page |
+| MCP reconnect backoff (`mcp_reconnect_backoff`) | 5s, 15s, 60s, 300s, then 300s forever | §11.6 — per dropped external server; reset on a successful connect |
 
 All of these are overridable in `config/turminder.yaml` (Appendix G.1) under
 the keys named there; the table above is the shipped default set.
@@ -4659,7 +5156,7 @@ the keys named there; the table above is the shipped default set.
 | Type | Source | Payload (JSON shape) |
 |---|---|---|
 | `chat.message` | `chat` | `{conversation_id, text, attachments?: [{upload_id, name, mime, bytes}]}` — attachment metadata only, never bytes (§26.2) |
-| `timer.fired` | `scheduler` | `{schedule_id, note, fire_at, late_by_s, data?}` — `data` is the stored payload. `fire_at` is the occurrence this fire is *for* and `late_by_s` how far behind it the fire is: **the server knows the event is six hours stale, so the server says so** rather than leaving a handler to infer it from `time.now` and a hope (§6). Zero on a punctual fire; never negative |
+| `timer.fired` | `scheduler` | `{schedule_id, note, fire_at, late_by_s, data?}` — `data` is the stored payload. `fire_at` is the occurrence this fire is *for* and `late_by_s` how far behind it the fire is: **the server knows the event is six hours stale, so the server says so** rather than leaving a handler to infer it from `time.now` and a hope (§6). Zero on a punctual fire; never negative. A schedule may name its own `event_type` instead (§6.2, F.2): the label routes, everything else here — payload, trust class, both keys — is unchanged, and a model-named type can never earn a `user_fields` entry |
 | `notification.action` | daemon device id | `{delivery_id, action, run_id?}` |
 | `desktop.session_locked` / `desktop.session_unlocked` | daemon device id | `{}` |
 | `desktop.idle` | daemon device id | `{idle_s}` |
@@ -4676,6 +5173,7 @@ the keys named there; the table above is the shipped default set.
 | `embed.action` | `embed.<id>` | `{embed_id, action, data?}` — fenced untrusted; rate-limited (§22.4) |
 | `page.captured` | capturing device id | `{url, title, domain, matcher, fields?, content, note?, truncated}` (§29.3) — `note` is user-authored per the trust map below; everything else fenced |
 | `watch.due` | `scheduler` | `{watch_id}` — consumed by the watcher engine (§30.2), **never offered to ingress** (typed skip, the `chat.message` precedent) |
+| `system.asset_invalid` | `system` | `{category: "handlers"\|"skills", file, message, shipped: bool}` — a handler or skill that failed to parse or validate at load (§12.3). Idempotency key `sha256(file + message)`, so a reload storm is one event and a *new* breakage is a new one; consumed by the shipped `failure-notice` handler like every other `system.*` |
 | `watch.changed` | `watcher` | `{watch_id, note, from, to, terminal: bool, state_file}` (§30.2) |
 | `watch.failed` | `watcher` | `{watch_id, note, error, consecutive_failures}` — edge-triggered per failure streak (§30.2) |
 
@@ -5261,8 +5759,8 @@ Every `se` call performs a git commit; commit message =
 
 | tool | tier | args | returns |
 |---|---|---|---|
-| `schedule.create` | se | `{fire_at: iso8601, note: string, rrule?: string, data?: object, grace_s?: int, on_miss?: "fire_late"\|"skip"}` | `{schedule_id, fire_at, rrule, grace_s, on_miss}` — `on_miss` (§6.1) defaults per kind: `fire_late` for a one-shot, `skip` for a recurrence. It comes back whether or not it was asked for, because "what happens if I close the lid" should be answerable from the reply |
-| `schedule.list` | ro | `{include_done?: bool=false}` | `{schedules: [{id, fire_at, rrule, note, status, grace_s, on_miss, last_fired_at}]}` — next fire and miss policy per row, so the same question is answerable without reading the spec |
+| `schedule.create` | se | `{fire_at: iso8601, note: string, rrule?: string, data?: object, grace_s?: int, on_miss?: "fire_late"\|"skip", event_type?: string}` | `{schedule_id, fire_at, rrule, grace_s, on_miss, event_type, consumers: [handler names], warning?}` — `on_miss` (§6.1) defaults per kind: `fire_late` for a one-shot, `skip` for a recurrence. It comes back whether or not it was asked for, because "what happens if I close the lid" should be answerable from the reply. `consumers` is the §5.2 envelope matcher run over the event this schedule will emit — deterministic, no model call — and an empty one carries `warning` saying nothing will run this (§6.2). `event_type` defaults to `timer.fired`; a custom one must be `^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$` and not claim a reserved namespace → `{error: "reserved_event_type", prefix}` |
+| `schedule.list` | ro | `{include_done?: bool=false}` | `{schedules: [{id, fire_at, rrule, note, status, grace_s, on_miss, last_fired_at, event_type, consumers}]}` — next fire, miss policy and *who will run it* per row, so "why didn't my digest run" is answerable from the tool the question is about rather than from a trace (§6.2) |
 | `schedule.cancel` | se | `{schedule_id: string}` | `{schedule_id, cancelled: true}` |
 
 ### F.3 `deliver` (§7.1)
@@ -5285,7 +5783,8 @@ itself during the §11.3 confirmation round-trip. No model ever requests one.
 | tool | tier | args | returns |
 |---|---|---|---|
 | `web.search` | ro | `{query: string, max_results?: int=5, category?: "general"\|"news"\|"it"\|"science"}` | `{results: [{title, url, snippet, engine}]}` — result strings are untrusted (App. H.2) |
-| `web.fetch` | ro | `{url: string, max_chars?: int=web.fetch_max_chars, format?: "text"\|"html"="text"}` | `{url, title?, content, truncated}` — extracted text (or raw HTML); content untrusted (App. H.2). URL policy: http(s) only, no in-URL credentials, cloud-metadata addresses refused; private/LAN hosts gated by `web.fetch_allow_private_hosts` (default true) |
+| `web.fetch` | ro | `{url: string, max_chars?: int=web.fetch_max_chars, format?: "text"\|"html"="text"}` | `{url, title?, content, truncated}` — extracted text (or raw HTML); content untrusted (App. H.2). URL policy: http(s) only, no in-URL credentials, cloud-metadata addresses refused; private/LAN hosts gated by `web.fetch_allow_private_hosts` (default true). Readable types are an **allowlist**, not a blocklist (§23.6): `text/*`, `application/json`, `application/xml`, `+json`, `+xml`. Anything else → `{error: "unsupported_content", content_type, url, message}` whose message names `web.download` then `docs.outline` — it never extracts a document itself |
+| `web.download` | se | `{url: string, path?: string (store-relative; default `download_dir`/<name from the URL>.<ext from the content type>)}` | `{path, content_type, bytes, url}` — fetches a URL and writes the bytes into the files store, so `docs.outline`/`docs.read` (F.14), `print.document` (F.19) and the index can all reach it (§23.6). Same URL policy as `web.fetch` — one door, never two. `{error: "too_large", limit_mb, message}` above `download_max_mb`, checked against `Content-Length` *and* the bytes actually read; `{error: "fetch_failed"\|"url_refused", message}` otherwise. Side-effecting because it writes the user's store, and the file is kept on purpose |
 | `web.query` | ro | `{url: string, selector?: string (CSS), find?: string (text search), attr?: string, max_matches?: int=20}` | `{url, matches: [...], match_count, truncated}` — pull specific things from a page instead of reading it whole |
 
 `web.query` semantics (all content untrusted per H.2; same URL policy as
@@ -5400,7 +5899,10 @@ form; `HandlerFrontmatterSchema` and `validateWrite` are unchanged (G.7).
 Default chat grant (configurable): `memory.*`, `schedule.*`, `watch.*`,
 `usage.*`, `project.*`, `web.*`,
 `time.*`, `weather.*`, `deliver.notify`, `docs.*`, `history.*`, `files.*`
-with `files.delete` at the `confirm` level, `embeds.*` with
+with `files.delete` at the `confirm` level, `web.download` inheriting
+`web.*` deliberately (§23.6 — it writes the store, but so does `files.write`,
+and it is bounded by `download_max_mb` and the same URL policy `web.fetch`
+runs under), `embeds.*` with
 `embeds.promote` and `embeds.delete` at the `confirm` level, and `setup.*`
 with `setup.deactivate` at the `confirm` level. Onboarding grant:
 `config.read`, `config.write`, `setup.token_create` (the "connect your
@@ -5433,7 +5935,7 @@ committing flow (memory, config, embeds).
 |---|---|---|---|
 | `setup.form` | se | `{template?: "mcp_stdio"\|"mcp_http"\|"model_endpoint"\|"speech_endpoint" (§10.9: kind `stt`\|`tts`, url, key, model, voice — probed before anything is written), title: string, embed_id?: string (render that embed in the form as a preview, App. D.5), fields?: [FieldSpec] (generic form when no template; templates supply their own fields, `fields` entries then override prefills by name)}` | `{submitted: true, values: {…non-secret…}, secrets: {field: "${secret:KEY}"}, effect?: {…template outcome, e.g. mcp: {connected, tools: […]}}}` or `{submitted: false, reason: "cancelled"\|"timeout"}` |
 | `setup.request_access` | se | `{tools: [string] (names or globs), reason: string, description?: string}` | `{granted: true, level: "tools"\|"confirm", patterns: [...], tools: [...]}` or `{granted: false, reason}`; `{error: "nothing_to_grant"\|"unknown_tools"}` when there is nothing to ask for (§19.4) |
-| `setup.list_integrations` | ro | `{}` | `{integrations: [{name, description, activation, active: bool, provides}], mcp_servers: [{name, transport, connected: bool, granted: [...]}], ungranted_tools: [...]}` (§19.6) — `connected` and `granted` are different questions (§19.4) |
+| `setup.list_integrations` | ro | `{}` | `{integrations: [{name, description, activation, active: bool, provides}], mcp_servers: [{name, transport, connected: bool, granted: [...]}], ungranted_tools: [...]}` (§19.6) — `connected` and `granted` are different questions (§19.4). `connected` means the transport is **alive** (§11.6), never that a config entry exists; a dropped server reports `false` with the error that took it down |
 | `setup.activate` | se | `{integration: string, prefill?: {name: value}}` | activation-form round-trip (§19.6); returns the activation outcome, or `{pending: true, auth_url}` for `oauth` integrations, or `{submitted: false, …}` |
 | `setup.deactivate` | se | `{integration: string}` | `{integration, deactivated: true}` — secrets retained (§19.6) |
 | `setup.rebuild_index` | se | `{}` | `{submitted, rebuilt, indexes?: {memory, files, history}}` each `{indexed, vectors}` — wipes and re-derives every search corpus (§8.3), **behind a form confirmation** (a one-choice button row, D.5): the model asks, the human clicks, deterministic code rebuilds. Decline or timeout → `{submitted: false}` / `{rebuilt: false}`, nothing discarded. For after an embedding endpoint or model change |
@@ -5443,6 +5945,7 @@ committing flow (memory, config, embeds).
 | `setup.pricing` | se | `{endpoint?: string}` | `{submitted: true, endpoint, cost: {in_per_mtok, out_per_mtok, currency}\|null, committed: bool, models_loaded: bool, note}` or `{submitted: false, reason}`; `{error: "unknown_endpoint"\|"no_endpoints"\|"no_conversation"\|"no_run"}`, and `{submitted: true, priced: false, error: "bad_price"}` when the typed figures do not validate — **nothing is written in any error case**. A form round-trip (§19.1), prefilled from the current block so it reads as an edit: three numbers a human types, because three numbers and a currency dictated by a model into a tool call is the anti-telephone problem with money attached. Omitting `endpoint` with more than one configured makes the form lead with a select. Carries an explicit **"no — local or free"** choice that removes the `cost` block, without which a mistyped price is permanent and §10.5's distinction between *free* and *unpriced* is unreachable from the surface that created it. Writes G.2 through the same `writeRaw` + git-commit + `reloadModels()` path the templates use — one writer, not two |
 | `setup.voice` | se | `{}` | `{submitted: true, language, voice, committed: bool, models_loaded: bool}` or `{submitted: false, reason}`; `{error: "no_speech_endpoint", kind}` when there is no `stt` or `tts` endpoint to configure (the answer is the `speech_endpoint` template), `{error: "no_conversation"\|"no_run"}` — one form (§33.5): `language` (select, prefilled from the `stt` entry or the identity locale; `auto` = let the transcriber detect), `voice` (D.5 `voice` type, previewable, prefilled from the `tts` entry, options from the endpoint's voice listing or the OpenAI six). Writes both G.2 entries through `writeRaw` + reload; **nothing is written on cancel or timeout** |
 | `setup.rename` | se | `{name: string, story?: string (a new identity body — the self-description prose; omitted, the old body keeps with whole-word occurrences of the old name swapped for the new)}` | `{name, previous, updated: "config/identity.md", committed: bool, old_name_still_in: [paths], note}` — renames the instance: one validated, committed rewrite of `config/identity.md` (frontmatter `instance_name` + body), then a scan of `config/personality.md` and `memory/*.md` reporting where the old name still appears — the model curates those with its own grants (`memory.update`, prose is judgment) rather than a tool sed-ing curated text. `{error: "not_onboarded"}` before an identity exists; `{error: "same_name"}` when nothing would change. Chat gets it via the default `setup.*` grant — the rename no longer needs onboarding's `config.write`. Connected screens learn the name at `hello`, so they show the new one after their next reconnect |
+| `setup.printers` | se | `{}` | `{submitted: true, action: "added"\|"updated"\|"enabled"\|"disabled"\|"removed", device, label?, can_print?, can_scan?, discovered?: int, activated?: bool, tools?: [...], secret_retained?: true (on removal — the password outlives the record, exactly as §19.6 keeps a credential through deactivation)}` or `{submitted: false, reason}`; `{submitted: true, added\|updated: false, error: "unreachable", message}` when the machine did not answer, and `{error: "no_address"\|"bad_device_name"\|"device_exists"}` — **nothing is written in any of those cases** (§34.6) — plus `{error: "no_conversation"}` when there is no chat to render a form in. The one door for printers and scanners (§34.6): with devices configured it opens on a select of them plus "add a new device"; the add path runs discovery (§34.3) first and offers what it found; the edit path prefills the record and offers save / disable / enable / remove. Writes `config/integrations.yaml` through the same `writeRecord` path activation uses — one writer, not two, and the device list survives deactivation |
 
 Suspension per F.7/D.5. Template and activation submissions execute their
 server-side effect (validate → write config → connect/probe → report)
@@ -5585,6 +6088,29 @@ the word (trace `01M0NKWJ7N5V62WJN1H10N1NJC`, 2026-08-22). The word is
 overloaded in every workspace this system will ever meet; the
 description is where the collision dies.
 
+### F.19 `print` (§34)
+
+| tool | tier | args | returns |
+|---|---|---|---|
+| `print.devices` | ro | `{}` | `{devices: [{name, label, host, enabled, can_print, can_scan, print: {formats, color, sides, media, media_default, resolution_dpi} \| null, scan: {sources, formats, resolutions_dpi, color_modes} \| null, probed_at}]}` — the configured registry with its **last probed** capabilities (§34.1), not a live call. Empty (§20.9) when nothing is configured, with the note that `setup.printers` adds one |
+| `print.status` | ro | `{device?: string}` | `{device, reachable: bool, state: "idle"\|"processing"\|"stopped", state_reasons: [...], accepting_jobs: bool, queued_jobs: int, supplies: [{name, level_pct, low: bool}], scanner_state?: "idle"\|"processing"\|"testing"\|"stopped"}` — the printer fields are present only for a device that prints, the scanner field only for one that scans; one live probe per device, cached `print_status_cache_s` (App. A). This is where "is it out of ink" is answered; `{error: "unreachable", message}` when the device does not answer, `{error: "certificate_changed", expected, seen}` per §34.2 |
+| `print.document` | se | `{path: string (file-store path, §18), device?: string, copies?: int=1, sides?: "one-sided"\|"two-sided-long-edge"\|"two-sided-short-edge", media?: string (a PWG size name the device listed), color?: "color"\|"monochrome"=device default, pages?: string ("2", "3-7" — PDF only), title?: string (the job name on the device's panel)}` | `{device, jobs: [{job_id, state}], pages, format, converted: bool, note?}` — one job per document: a rasterised PDF is one job per page (§34.4). `{error: "format_unsupported", supported: [...]}`, `{error: "too_many_pages", pages, max}`, `{error: "systool_missing", …}` when `pdftoppm` is needed and absent, `{error: "unreachable"\|"certificate_changed"\|"rejected"\|"conversion_failed", message}`, `{error: "no_printer"}` for a scan-only device, `{error: "render_first", hint}` for a file that is not a document (markdown, notes, anything the store cannot identify — §34.4), `{error: "device_busy", busy_with: "scanning"}` while a scan is running, `{error: "bad_args"}` for an unreadable `pages`; file-store failures return the F.8 error family (`not_found`, `path_rejected`, `is_directory`). A failure **after** some jobs went in returns the error with `jobs` and `partial: true` — page three being refused does not un-print pages one and two. Declares `confirmSummary` (§7.3): what, how many pages, how many copies, which machine — the four things a person about to spend paper wants in front of them |
+| `print.job` | ro | `{job_id: int, device?: string}` | `{device, job_id, state: "pending"\|"processing"\|"completed"\|"canceled"\|"aborted", state_reasons: [...], pages_completed: int}`; `{error: "no_such_job"}` — printers forget completed jobs quickly, and that is not an error worth dressing up. `state_reasons` **outrank** the enum where they disagree: the reference device settles a good print at `aborted` with `completed-successfully`, and reporting that as a failure would have the assistant apologise for a page the user is holding |
+| `print.cancel_job` | se | `{job_id: int, device?: string}` | `{device, job_id, cancelled: true}`; `{error: "no_such_job"}`, `{error: "not_cancellable", state}` when it already finished |
+| `print.scan` | se | `{device?: string, source?: "platen"\|"adf"=platen, resolution_dpi?: int=300, color?: "color"\|"gray"\|"bw"=color, format?: "pdf"\|"jpeg"=jpeg, path?: string (file-store path; default `scan_dir`/`<date>-scan.<ext>`), message?: string (commit message)}` | `{device, path, paths?: [string] (only when a feeder produced several files), mime, bytes, pages, committed: bool, note}` — the scan is a **file in the workspace**, never bytes in a tool result (§34.5). JPEG is the default because it is the format this build has watched a device actually hand back; the reference ET-3700 also advertises `application/pdf`, and a PDF job on it has not yet produced one (§34.5). `{error: "device_busy", busy_with: "printing", queued_jobs}` while the printer is working — starting a scan then aborts the page mid-sheet (§34.4) — `{error: "no_scanner"}` when the device cannot scan, `{error: "unsupported_setting", supported: {...}}` when the device does not offer the asked-for source/resolution/format, `{error: "scanner_busy"}` (the device's own 503/409), `{error: "no_documents"}` when the ADF was empty, `{error: "unreachable"\|"certificate_changed"}` |
+| `print.discover` | ro | `{}` | `{found: [{label, host, uris, can_print, can_scan, configured_as?: string}], method: "mdns"\|"sweep", note}` — §34.3, on demand only. `configured_as` names an already-registered device so "found four, three are yours" is one answer. Adding one is `setup.printers`, deliberately: this tool discovers, it never writes. `{error: "discovery_failed", message}`. The budget is App. A's rather than an argument: a caller who could shorten the window could make discovery useless and never know it |
+
+`device` is optional everywhere and defaults to the only enabled device;
+with several configured and none named the tools return
+`{error: "which_device", devices: [names]}` rather than guessing which
+machine to spend paper on. A disabled device is not found by name —
+`{error: "device_disabled", device}` — because "nothing happened and
+nothing said why" is the failure this whole namespace is trying not to have.
+
+`print.*` is **not** in the F.7 default chat grant; §19.4's
+`setup.request_access` is how a run gets it, which is also where the user
+chooses *ask me each time* for a tool that consumes paper.
+
 All YAML files are validated with zod schemas at load; validation errors
 name the file, key, and expected shape. All markdown frontmatter is YAML
 parsed with gray-matter.
@@ -5604,6 +6130,15 @@ data_defaults:            # Appendix A overrides, same key names
   conversation_idle_min: 30
 search:
   searxng_url: http://127.0.0.1:8080
+web:                      # §11.2, §23.6 — the two web readers share this block
+  fetch_max_chars: 20000
+  fetch_timeout_s: 20
+  fetch_allow_private_hosts: true   # self-hosted: the user's own services live on the LAN
+  download_max_mb: 25     # §23.6 — ceiling on one web.download
+  download_timeout_s: 60
+  download_dir: downloads/  # store-relative default destination
+mcp:                      # §11.6
+  reconnect_backoff: [5, 15, 60, 300]   # seconds; the last value repeats forever
 scheduler:
   background_concurrency: 1
 files:                    # §18
@@ -5617,6 +6152,7 @@ systools:                 # §23.1 — path overrides; default: probe $PATH
   chromium: null          # e.g. /usr/bin/chromium
   gpg: null               # §27.1 gpg backend
   git: null               # §12.2 data-repo versioning
+  pdftoppm: null          # §34.4 PDF → JPEG pages for printers with no PDF interpreter
 uploads:                  # §26.1
   max_mb: 20
   ttl_days: 30
@@ -5821,12 +6357,23 @@ the memory content. Filenames are kebab-case slugs of `name`.
 ### G.10 `MANIFEST`
 
 ```yaml
-layout_version: 1
+layout_version: 5
 created_at: 2026-08-20T…Z
+shipped:                        # §12.3 — what Turminder wrote, not what the user meant
+  skills/connecting-services.md: 9f2a…   # sha256 of the content we installed
+  handlers/watch-changed.md: 41c8…
 ```
 
 Service refuses to start when `layout_version` is greater than it knows
 (§12.2); lower versions run layout migrations before anything else.
+
+`shipped:` is a record of authorship (§12.3): a shipped asset whose file
+still hashes to its recorded value is ours to keep current and is rewritten
+on the next start; one that does not is the user's and is never touched
+again. An entry is absent only for an asset installed before the map
+existed, and layout 5 adopts those that still match the shipped bytes —
+repairing `model:`/`class:` handler frontmatter to `model_class:` *first*,
+so a broken file is never adopted as a preference.
 
 ### G.11 `files/.turminderignore`
 
@@ -5857,12 +6404,42 @@ integrations:
     settings:
       poll_interval_s: 300
       upcoming_lead_min: 15
+  print-scan:               # §34.1 — a list, because two printers is normal
+    active: true
+    activated_at: 2026-09-06T…Z
+    settings:
+      scan_dir: scans           # where print.scan lands a pulled scan
+      scan_inbox: scans/inbox   # the drop folder the scan-received handler watches
+      devices:
+        - name: office          # slug; how every print.* tool addresses it
+          label: EPSON ET-3700 Series
+          host: 192.168.0.90
+          enabled: true
+          probed_at: 2026-09-06T…Z
+          tls_fingerprint_sha256: "AB:CD:…"   # TOFU pin (§34.2); absent on plain HTTP
+          print:                # null when the device cannot print
+            uri: ipps://192.168.0.90:631/ipp/print
+            formats: [image/urf, image/pwg-raster, image/jpeg]
+            color: true
+            sides: [one-sided, two-sided-long-edge, two-sided-short-edge]
+            media: [iso_a4_210x297mm, na_letter_8.5x11in]
+            media_default: iso_a4_210x297mm
+            resolution_dpi: 600
+          scan:                 # null when the device cannot scan
+            uri: https://192.168.0.90/eSCL
+            sources: [platen]
+            formats: [application/pdf, image/jpeg]
+            resolutions_dpi: [100, 200, 300, 600, 1200]
+            color_modes: [RGB24, Grayscale8, BlackAndWhite1]
 ```
 
 Written only by the `setup` integration (activation/deactivation flows);
 carved out of `config.write` like `mcp.yaml`. Subsumes the interim
 `config/sources.yaml` — a layout migration folds existing entries in and
-deletes the old file.
+deletes the old file. `print-scan.settings.devices` is written by
+`setup.printers` and by activation, both through the same one writer
+(§34.6); an IPP password lives in the secret store as
+`PRINTER_<NAME>_PASSWORD`, never here.
 
 ### G.13 `config/grants.yaml` (§19.4)
 
@@ -6042,7 +6619,10 @@ src/
   tools/          # dispatcher, grants, run-grant registry (§23.2), mcp-client,
                   #   registry, integrations/{memory,schedule,deliver,events,web,config,
                   #   skills,asana,google,files,setup,time,weather,embeds,docs,
-                  #   history,usage,watch,project}
+                  #   history,usage,watch,project,print}
+                  #   print/ is IPP + eSCL by hand over a pinned-certificate
+                  #   transport (§34); setup/records.ts is the one writer of
+                  #   config/integrations.yaml, shared by activation and §34.6
   ingress/        # intake (dedupe/provenance), work queue, ingress agent
   exec/           # handler executor, confirm suspension
   memory/         # memory agent logic (used by its integration), distillation
@@ -6137,7 +6717,8 @@ Highcharts is NOT an npm dependency: embeds load it from the official CDN
 
 System binaries are governed by the §23.1 systool registry, not this
 table: entries are `chromium` (PDF print), `notify-send` (desktop
-notifications), and `gpg` (§27.1 secret-store backend) — all optional,
+notifications), `gpg` (§27.1 secret-store backend), and `pdftoppm`
+(§34.4, rasterising a PDF for a printer that cannot read one) — all optional,
 probed, degrading honestly (with the §27.1 exception: a *pinned* gpg
 backend whose binary vanishes is a startup failure, never a downgrade).
 
