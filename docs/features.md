@@ -216,6 +216,13 @@ answers this conversation, and every call records which endpoint served it
 and why. An endpoint that declares reasoning levels gets a second control
 beside it, and one that declares none is never sent the knob.
 
+Adding an endpoint asks which model it should serve, from the list the
+endpoint itself publishes, because what the assistant can do with an endpoint
+is measured against one model rather than an address. Change the model later
+and the endpoint listings say the measurements no longer describe it; ask it
+to re-probe and they are taken again, leaving the price, the classes and the
+key alone.
+
 ## Inspection
 
 `turminder events show` prints an event with its trace. There are listings

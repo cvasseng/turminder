@@ -807,6 +807,52 @@ what it honestly saw, and a sighted model was tagged blind for two days
 test — signature, every chunk CRC, dimensions — which is the honest check
 that needs no decoder in CI.
 
+**A tag names a model, not an address (normative).** An endpoint serving
+one model — the llama.cpp case this was designed around — makes "probe the
+endpoint" and "probe the model" the same sentence. A hosted provider makes
+them different sentences, and the difference is a silent wrong answer:
+`GET /models` there returns hundreds of entries in no order anyone
+promised, and taking the first one probes whatever the provider happened to
+list. Measured on OpenRouter, 2026-09-07: the `model_endpoint` form had no
+model field at all, its probe was called without one, and the entry it
+wrote named a **batch variant nobody chose** and carried that variant's
+capability tags. So:
+
+- **Whatever asks for a probe must say which model**, and every surface
+  that adds an endpoint must therefore ask a human — a select over the
+  endpoint's own `/models` listing where it has one, free text where it
+  does not, because a catalogue is not always complete and a name the user
+  knows works outranks a list that omits it.
+- **List position is never a choice.** An endpoint that lists exactly one
+  model may use it; more than one and unasked is an error, not a default —
+  the shape that quietly tags the wrong thing is exactly the shape that
+  must refuse.
+
+**Tags outlive the thing they measured, so re-probing is first-class.**
+`caps` and `context_size` are measurements of one model at one moment, and
+the field they sit beside — `model` — is editable by anyone with a text
+editor. Correct a mis-written `model` by hand and the tags stay behind,
+describing a model the entry no longer names, with nothing in the system
+aware of the mismatch: this install ran a tool-capable model tagged
+`caps: []` and reported "no tools" in chat, correctly, about a measurement
+of something else.
+
+- **`probed_model` records what was actually measured** (G.2), written
+  beside the tags by whatever wrote them. The same move as §12.3's hash
+  map: record what we did, so staleness is a comparison rather than a
+  guess.
+- **An entry whose `model` differs from its `probed_model` is stale**, and
+  every surface that shows endpoints says so — `turminder models`,
+  `turminder doctor`, `setup.list_integrations`. Stale tags are still used;
+  a warning is not a refusal, because the tags may well still be right and
+  the router degrading on a suspicion helps nobody.
+- **Re-deriving them is a command and a tool**, not a re-add:
+  `turminder models probe <name>` and `setup.reprobe {endpoint}` (F.9) run
+  the same suite against the model the entry currently names and rewrite
+  `caps`, `context_size` and `probed_model` in place. Everything else in
+  the entry — `classes`, `cost`, `api_key`, routes pointing at it — is
+  untouched, because re-measuring a capability is not re-making a decision.
+
 ### 10.3 Inference scheduler
 
 The GPU is a scarce, mostly-serial resource shared by chat, handlers, and
@@ -1028,7 +1074,11 @@ makes "configured ≠ served" a structural fact the system checks:
   the live endpoint and prints a **diff against the configured entry** —
   caps gained/lost, context, model id, efforts. Read-only by design: the
   human applies what they agree with; the probe result is the default,
-  the config is the decision (§10.2's rule, unchanged).
+  the config is the decision (§10.2's rule, unchanged). Note the shipped
+  neighbour: `turminder models probe <name>` (§10.2) re-derives the tags and
+  **writes** them. Two nearly identical spellings with opposite effects is a
+  trap, so when this lands it belongs on that subcommand as a `--dry-run`
+  flag rather than as a second entry point.
 - Unreachable endpoints at startup are not drift — they are the §8.3/
   degradation story and already logged; drift is the server *answering
   differently than configured*.
@@ -1884,7 +1934,21 @@ The agent never writes `config/mcp.yaml` by any path (§14.4.1); the human
 submitting the template form — exact command/URL visible — is the install
 gate. `model_endpoint` reuses the §3b probe suite and appends a `kind: chat`
 entry to `models.yaml` — this template never writes `kind: embedding` or the
-legacy `embedding:` block (§10.1, §8.3). Its `classes` field prefills
+legacy `embedding:` block (§10.1, §8.3).
+
+**An effect may raise one more form when its own form is what made the
+question askable.** `model_endpoint` is the case and the only one shipped:
+§10.2 requires a human to say which model gets probed, the choice wants a
+select over the endpoint's own `/models` listing, and that listing lives behind
+the URL the form was collecting — so it cannot be offered before the first
+answer exists. The second form is the *same* primitive in the *same* run
+(§19.1), not a second mechanism: same frame, same suspension, same
+first-submit-wins. It is raised only when the question is real — a typed model
+name skips it, and so does an endpoint listing one model or none — and an
+effect with no run to come back to refuses rather than choosing (§10.2: more
+than one and unasked is an error, not a default). The template's own free-text
+`model` field is asked first for the same reason a catalogue is not an
+authority: a name the user knows works outranks a list that omits it. Its `classes` field prefills
 `fast and best` only when the file has no other chat endpoint yet; with one
 already configured the field opens with no prefill, because "fast and best"
 is a reasonable default for the first endpoint and furniture — or wrong —
@@ -5933,9 +5997,9 @@ committing flow (memory, config, embeds).
 
 | tool | tier | args | returns |
 |---|---|---|---|
-| `setup.form` | se | `{template?: "mcp_stdio"\|"mcp_http"\|"model_endpoint"\|"speech_endpoint" (§10.9: kind `stt`\|`tts`, url, key, model, voice — probed before anything is written), title: string, embed_id?: string (render that embed in the form as a preview, App. D.5), fields?: [FieldSpec] (generic form when no template; templates supply their own fields, `fields` entries then override prefills by name)}` | `{submitted: true, values: {…non-secret…}, secrets: {field: "${secret:KEY}"}, effect?: {…template outcome, e.g. mcp: {connected, tools: […]}}}` or `{submitted: false, reason: "cancelled"\|"timeout"}` |
+| `setup.form` | se | `{template?: "mcp_stdio"\|"mcp_http"\|"model_endpoint" (§10.2: asks **which model** — a select over the endpoint's own `/models` listing, free text when it has none — and probes that one; never list position)\|"speech_endpoint" (§10.9: kind `stt`\|`tts`, url, key, model, voice — probed before anything is written), title: string, embed_id?: string (render that embed in the form as a preview, App. D.5), fields?: [FieldSpec] (generic form when no template; templates supply their own fields, `fields` entries then override prefills by name)}` | `{submitted: true, values: {…non-secret…}, secrets: {field: "${secret:KEY}"}, effect?: {…template outcome, e.g. mcp: {connected, tools: […]}}}` or `{submitted: false, reason: "cancelled"\|"timeout"}` |
 | `setup.request_access` | se | `{tools: [string] (names or globs), reason: string, description?: string}` | `{granted: true, level: "tools"\|"confirm", patterns: [...], tools: [...]}` or `{granted: false, reason}`; `{error: "nothing_to_grant"\|"unknown_tools"}` when there is nothing to ask for (§19.4) |
-| `setup.list_integrations` | ro | `{}` | `{integrations: [{name, description, activation, active: bool, provides}], mcp_servers: [{name, transport, connected: bool, tools: [...], granted: [...], error?, next_retry_at?}], ungranted_tools: [...]}` (§19.6) — `connected` and `granted` are different questions (§19.4). `connected` means the transport is **alive** (§11.6), never that a config entry exists; a dropped server reports `false` with the error that took it down and `next_retry_at`, the ISO time of its next automatic reconnect (App. A `mcp_reconnect_backoff`) — its tools stay listed (§11.6), so "down" has to say "and it will be tried again" or it reads as "gone" |
+| `setup.list_integrations` | ro | `{}` | `{integrations: [{name, description, activation, active: bool, provides}], mcp_servers: [{name, transport, connected: bool, tools: [...], granted: [...], error?, next_retry_at?}], ungranted_tools: [...], stale_model_tags?: [{endpoint, model, probed_model}]}` (§19.6) — `connected` and `granted` are different questions (§19.4). `stale_model_tags` rides along **only when non-empty** (§10.2): an endpoint whose `caps` were measured against a model it no longer names, which is the state that makes the assistant report a capability the model actually has as missing — `setup.reprobe` is the answer. `connected` means the transport is **alive** (§11.6), never that a config entry exists; a dropped server reports `false` with the error that took it down and `next_retry_at`, the ISO time of its next automatic reconnect (App. A `mcp_reconnect_backoff`) — its tools stay listed (§11.6), so "down" has to say "and it will be tried again" or it reads as "gone" |
 | `setup.activate` | se | `{integration: string, prefill?: {name: value}}` | activation-form round-trip (§19.6); returns the activation outcome, or `{pending: true, auth_url}` for `oauth` integrations, or `{submitted: false, …}` |
 | `setup.deactivate` | se | `{integration: string}` | `{integration, deactivated: true}` — secrets retained (§19.6) |
 | `setup.rebuild_index` | se | `{}` | `{submitted, rebuilt, indexes?: {memory, files, history}}` each `{indexed, vectors}` — wipes and re-derives every search corpus (§8.3), **behind a form confirmation** (a one-choice button row, D.5): the model asks, the human clicks, deterministic code rebuilds. Decline or timeout → `{submitted: false}` / `{rebuilt: false}`, nothing discarded. For after an embedding endpoint or model change |
@@ -5943,6 +6007,7 @@ committing flow (memory, config, embeds).
 | `setup.token_create` | se | `{device: string, label?: string}` | `{device, label, created: true, revealed_to_user: true}` — the value itself goes to the user in a one-time `token.reveal` frame and is **never** in the result, the trace, or any persisted turn (§24.2). `{error: "device_exists"}` on a name collision; `{error: "no_reveal_target"}` (and no row written) when no connected chat-capable device can receive the reveal |
 | `setup.pair_approve` | se | `{code: string, device: string, label?: string}` | `{device, label, approved: true, delivered_to_device: true}` — approves a device that asked to be paired from its own gate (§24.4); the value goes straight to that device and is **never** in the result, the trace, or any persisted turn. `{error: "no_such_request"}` on an unknown or expired code (no row written), `{error: "already_approved"}`, `{error: "device_exists"}` on a name collision or `{error: "bad_device_name"}` on an unusable one (the request survives either, so another name still works). There is deliberately no tool that lists pending requests — the code comes from the human |
 | `setup.pricing` | se | `{endpoint?: string}` | `{submitted: true, endpoint, cost: {in_per_mtok, out_per_mtok, currency}\|null, committed: bool, models_loaded: bool, note}` or `{submitted: false, reason}`; `{error: "unknown_endpoint"\|"no_endpoints"\|"no_conversation"\|"no_run"}`, and `{submitted: true, priced: false, error: "bad_price"}` when the typed figures do not validate — **nothing is written in any error case**. A form round-trip (§19.1), prefilled from the current block so it reads as an edit: three numbers a human types, because three numbers and a currency dictated by a model into a tool call is the anti-telephone problem with money attached. Omitting `endpoint` with more than one configured makes the form lead with a select. Carries an explicit **"no — local or free"** choice that removes the `cost` block, without which a mistyped price is permanent and §10.5's distinction between *free* and *unpriced* is unreachable from the surface that created it. Writes G.2 through the same `writeRaw` + git-commit + `reloadModels()` path the templates use — one writer, not two |
+| `setup.reprobe` | se | `{endpoint: string}` | `{endpoint, model, caps, context_size, probed_model, changed: bool, committed: bool, models_loaded: bool, notes: [...]}` — re-runs the §10.2 capability suite against the model the entry **currently names** and rewrites `caps`, `context_size` and `probed_model` in place (G.2). `classes`, `cost`, `api_key` and any route pointing at the endpoint are untouched: re-measuring a capability is not re-making a decision. A `context_size` the endpoint does not report leaves the configured one standing — hosted providers report none, and deleting a figure somebody set because this run could not see it is re-making a decision too. `changed: false` writes and commits nothing. `{error: "unknown_endpoint"}`, `{error: "not_a_chat_endpoint"}` (an embedding or speech entry declares no caps at all, §10.1), or `{error: "unreachable", detail}` with **nothing written**. The conversational half of `turminder models probe <name>`; for after a hand-edited `model:`, which is how an install ends up running a tool-capable model tagged `caps: []` |
 | `setup.voice` | se | `{}` | `{submitted: true, language, voice, committed: bool, models_loaded: bool}` or `{submitted: false, reason}`; `{error: "no_speech_endpoint", kind}` when there is no `stt` or `tts` endpoint to configure (the answer is the `speech_endpoint` template), `{error: "no_conversation"\|"no_run"}` — one form (§33.5): `language` (select, prefilled from the `stt` entry or the identity locale; `auto` = let the transcriber detect), `voice` (D.5 `voice` type, previewable, prefilled from the `tts` entry, options from the endpoint's voice listing or the OpenAI six). Writes both G.2 entries through `writeRaw` + reload; **nothing is written on cancel or timeout** |
 | `setup.rename` | se | `{name: string, story?: string (a new identity body — the self-description prose; omitted, the old body keeps with whole-word occurrences of the old name swapped for the new)}` | `{name, previous, updated: "config/identity.md", committed: bool, old_name_still_in: [paths], note}` — renames the instance: one validated, committed rewrite of `config/identity.md` (frontmatter `instance_name` + body), then a scan of `config/personality.md` and `memory/*.md` reporting where the old name still appears — the model curates those with its own grants (`memory.update`, prose is judgment) rather than a tool sed-ing curated text. `{error: "not_onboarded"}` before an identity exists; `{error: "same_name"}` when nothing would change. Chat gets it via the default `setup.*` grant — the rename no longer needs onboarding's `config.write`. Connected screens learn the name at `hello`, so they show the new one after their next reconnect |
 | `setup.printers` | se | `{}` | `{submitted: true, action: "added"\|"updated"\|"enabled"\|"disabled"\|"removed", device, label?, can_print?, can_scan?, discovered?: int, activated?: bool, tools?: [...], secret_retained?: true (on removal — the password outlives the record, exactly as §19.6 keeps a credential through deactivation)}` or `{submitted: false, reason}`; `{submitted: true, added\|updated: false, error: "unreachable", message}` when the machine did not answer, and `{error: "no_address"\|"bad_device_name"\|"device_exists"}` — **nothing is written in any of those cases** (§34.6) — plus `{error: "no_conversation"}` when there is no chat to render a form in. The one door for printers and scanners (§34.6): with devices configured it opens on a select of them plus "add a new device"; the add path runs discovery (§34.3) first and offers what it found; the edit path prefills the record and offers save / disable / enable / remove. Writes `config/integrations.yaml` through the same `writeRecord` path activation uses — one writer, not two, and the device list survives deactivation |
@@ -6182,6 +6247,9 @@ endpoints:
     classes: [fast, best]
     caps: [json, tools]           # probe-derived (§10.2); manual edits allowed
     context_size: 32768           # probe-derived
+    probed_model: z-ai/glm-5.3-flash  # §10.2 — the model those two were measured against.
+                                  # Differs from `model:` ⇒ the tags are stale and every
+                                  # endpoint surface says so; `setup.reprobe` re-derives
     cost:                         # §10.5 — omit entirely for a costless local box
       in_per_mtok: 3.0            # per million tokens
       out_per_mtok: 15.0

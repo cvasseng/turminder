@@ -209,6 +209,47 @@ describe('setup.list_integrations (App. F.9)', () => {
   });
 });
 
+describe('stale capability tags are visible (§10.2)', () => {
+  /** Rewrite models.yaml under a booted service, the way a text editor would. */
+  function editEndpoints(harness: ServiceHarness, edit: (e: any) => void): void {
+    const file = path.join(harness.dataDir, 'config', 'models.yaml');
+    const doc = YAML.parse(fs.readFileSync(file, 'utf8'));
+    for (const endpoint of doc.endpoints) edit(endpoint);
+    fs.writeFileSync(file, YAML.stringify(doc), 'utf8');
+    harness.app.config.reload();
+  }
+
+  it('reports an endpoint whose tags measured a different model', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    editEndpoints(h, (e) => {
+      if (e.name !== 'main') return;
+      e.model = 'now/serving-this';
+      e.probed_model = 'measured/something-else';
+    });
+
+    const parsed = await callTool(h, 'setup.list_integrations');
+    expect(parsed.stale_model_tags).toEqual([
+      { endpoint: 'main', model: 'now/serving-this', probed_model: 'measured/something-else' },
+    ]);
+  });
+
+  it('says nothing about an entry that never recorded what it measured', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    // The harness endpoint, and every entry written before `probed_model`
+    // existed: unknown, which is not the same claim as stale.
+    const parsed = await callTool(h, 'setup.list_integrations');
+    expect(parsed.stale_model_tags).toBeUndefined();
+
+    // Named and matching is not stale either.
+    editEndpoints(h, (e) => {
+      if (e.name !== 'main') return;
+      e.model = 'same/model';
+      e.probed_model = 'same/model';
+    });
+    expect((await callTool(h, 'setup.list_integrations')).stale_model_tags).toBeUndefined();
+  });
+});
+
 describe('activating asana (activation: form, §19.5)', () => {
   it('probes the token, starts the poller, and the tools work in the same conversation', async () => {
     const fake = new FakeAsana();

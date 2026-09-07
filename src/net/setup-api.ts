@@ -112,6 +112,10 @@ export function handleCommit(
       classes: e.classes,
       caps: e.caps,
       ...(e.context_size ? { context_size: e.context_size } : {}),
+      // The model those caps were measured against (§10.2) — written beside
+      // them by every writer that probes, or the tags outlive their subject
+      // with nothing able to notice.
+      ...(e.probed_model ? { probed_model: e.probed_model } : {}),
     };
   });
   // Declining is a real answer (§28.5): only guess an embedding URL when the

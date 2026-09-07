@@ -30,6 +30,7 @@ import {
 import { runActivation, runDeactivation } from './activate.js';
 import { recordFor, type ActivationContext } from './records.js';
 import { runPrinterWizard } from './printers.js';
+import { reprobeEndpoint, staleEndpoints } from './reprobe.js';
 import {
   TEMPLATES,
   TEMPLATE_NAMES,
@@ -289,7 +290,14 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
         let effect: unknown;
         try {
           effect = await template.effect(
-            { values: outcome.values, secrets: outcome.secrets },
+            {
+              values: outcome.values,
+              secrets: outcome.secrets,
+              // Which run to come back to, for the one template that has a
+              // second question (§10.2, §19.3) — the model select, which needs
+              // the URL this form just collected before it can be offered.
+              form: { runId: ctx.runId, conversationId: ctx.conversationId },
+            },
             deps,
           );
         } catch (e) {
@@ -400,6 +408,7 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
          */
         const callable = (tools: string[]) =>
           tools.filter((t) => deps.grants.covers(base, t) !== null);
+        const stale = staleEndpoints(deps.config.modelsOrNull().models?.endpoints ?? []);
 
         return {
           integrations: MANIFESTS.map((manifest) => ({
@@ -433,6 +442,13 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
           ungranted_tools: (hub?.handles() ?? [])
             .map((t) => t.name)
             .filter((t) => deps.grants.covers(base, t) === null),
+          /**
+           * Endpoints whose capability tags were measured against a different
+           * model than they now name (§10.2) — reported only when true, and as
+           * a warning: the tags may still be right, and `setup.reprobe` is how
+           * they are re-derived.
+           */
+          ...(stale.length ? { stale_model_tags: stale } : {}),
         };
       },
     },
@@ -819,6 +835,25 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
             ? 'applies to calls from now on; earlier runs keep the price they ran at'
             : 'this endpoint is costless by declaration again, reported as local rather than 0.00',
         };
+      },
+    },
+    {
+      name: 'setup.reprobe',
+      description:
+        "Re-derive an endpoint's capability tags by testing the model it currently serves. " +
+        'Use after the model behind an endpoint changed, or when tools, JSON or vision are ' +
+        'reported unavailable on a model that has them. Rewrites the tags only, never the ' +
+        "endpoint's settings.",
+      tier: 'se',
+      args: z.strictObject({
+        endpoint: z.string().min(1).describe('the endpoint name, as in models.yaml'),
+      }),
+      async execute(args: { endpoint: string }) {
+        try {
+          return await reprobeEndpoint(deps, args.endpoint);
+        } catch (e) {
+          return effectFailure(e);
+        }
       },
     },
     {

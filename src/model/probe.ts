@@ -178,6 +178,34 @@ async function getJson(
   }
 }
 
+/**
+ * Every model id an endpoint lists, so a form can offer the choice §10.2 says
+ * has to be made. The same `GET /v1/models` read `probeEndpoint` opens with,
+ * minus the capability suite — this runs while somebody waits on a form, and
+ * the question it answers is only "what is there".
+ *
+ * An endpoint that lists nothing is not an error: llama.cpp serves one model
+ * and a listing is a convenience, so an empty list means "do not ask", not
+ * "this is broken".
+ */
+export async function listModels(
+  rawUrl: string,
+  opts: Pick<ProbeOptions, 'apiKey' | 'fetch' | 'timeoutMs'> = {},
+): Promise<{ ok: boolean; models: string[]; error?: string }> {
+  const { api } = normaliseEndpointUrl(rawUrl);
+  const listed = await getJson(`${api}/models`, {
+    ...opts,
+    timeoutMs: opts.timeoutMs ?? 20_000,
+  });
+  if (!listed.ok)
+    return { ok: false, models: [], ...(listed.error ? { error: listed.error } : {}) };
+  const data: any[] = Array.isArray(listed.body?.data) ? listed.body.data : [];
+  return {
+    ok: true,
+    models: data.map((m) => m?.id).filter((id): id is string => typeof id === 'string'),
+  };
+}
+
 /** The embedding half of App. E's probe: does this endpoint embed, and how wide? */
 export interface EmbeddingProbeResult {
   /** The root the config will hold — `embeddings.ts` appends its own routes. */

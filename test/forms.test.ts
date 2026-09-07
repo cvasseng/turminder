@@ -9,8 +9,10 @@ import { FormBroker, type FieldSpec, type FormSink } from '../src/chat/forms.js'
 import { resolveWritablePath, PathRejected } from '../src/tools/paths.js';
 import { redactTraceArgs } from '../src/tools/redact.js';
 import { splitCommand } from '../src/tools/integrations/setup/templates.js';
+import { reprobeEndpoint } from '../src/tools/integrations/setup/reprobe.js';
 import { fillSecretKeys, mergeFields } from '../src/tools/integrations/setup/tools.js';
 import { bootService, TestClient, type ServiceHarness } from './service-harness.js';
+import { FakeLlama } from './fake-llama.js';
 import { FakeSpeech } from './fake-speech.js';
 import { clearVoiceCache } from '../src/model/probe.js';
 import { OPENAI_VOICES, STT_LANGUAGES } from '../src/tools/integrations/setup/tools.js';
@@ -749,6 +751,289 @@ describe('connector templates (§19.3)', () => {
     const classesField = form.payload.fields.find((f: any) => f.name === 'classes');
     expect(classesField.value).toBeUndefined();
     expect(classesField.label).toContain('already has a chat endpoint');
+  });
+});
+
+describe('the model_endpoint template asks which model (§10.2, F.9)', () => {
+  let provider: FakeLlama;
+
+  afterEach(async () => {
+    await provider?.stop();
+  });
+
+  /**
+   * The endpoint being *added*, deliberately not the one the harness chats
+   * with: a hosted provider serving several models is the whole case, and the
+   * assertion is which of them the capability probe actually talked to.
+   */
+  async function startProvider(ids: string[]): Promise<string> {
+    provider = new FakeLlama();
+    provider.modelId = ids[0]!;
+    provider.otherModels = ids.slice(1);
+    provider.always((req: any) =>
+      req.body.response_format ? { text: '{"ok":true,"note":"hello"}' } : { text: 'ready' },
+    );
+    return provider.startV1();
+  }
+
+  /** Drive `setup.form` with the model template and submit the first form. */
+  async function addEndpoint(
+    values: Record<string, string>,
+  ): Promise<{ client: TestClient; eventId: string }> {
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    let asked = false;
+    h.fake.always((req: any) => {
+      if (req.body.tools && !asked) {
+        asked = true;
+        return {
+          toolCalls: [
+            {
+              name: 'setup.form',
+              args: { title: 'Add an endpoint', template: 'model_endpoint' },
+            },
+          ],
+        };
+      }
+      return { text: 'ready' };
+    });
+    const sent = h.service.chat.send({ text: 'add the provider' });
+    const form = await client.next('form.request', 15000);
+    client.send('form.submit', { form_id: form.payload.form_id, values });
+    return { client, eventId: sent.eventId };
+  }
+
+  const endpointsOf = (): any[] =>
+    YAML.parse(fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8'))
+      .endpoints;
+
+  /** Every model id this endpoint was asked to generate with. */
+  const modelsCalled = (): string[] => [
+    ...new Set(
+      provider.requests
+        .filter((r) => r.path.endsWith('/chat/completions'))
+        .map((r) => String(r.body.model)),
+    ),
+  ];
+
+  it('probes the model the human picked, not the one listed first', async () => {
+    h = await bootService({ onboarded: true });
+    // Listing order and alphabetical order disagree on purpose: neither
+    // position may decide what gets tagged (§10.2).
+    const url = await startProvider(['zz/batch-variant', 'aa/vision-preview', 'mm/the-one']);
+
+    const { client } = await addEndpoint({
+      name: 'provider',
+      url,
+      // The listing is often behind the credential, so the key now travels one
+      // hop further than it used to: it must still land in exactly one place.
+      api_key: 'sentinel-provider-key',
+      classes: 'fast',
+    });
+
+    // The URL only exists once the first form is answered, so the listing —
+    // and therefore the select over it — cannot be offered before that.
+    const pick = await client.next('form.request', 15000);
+    const field = pick.payload.fields.find((f: any) => f.name === 'model');
+    expect(field.type).toBe('select');
+    expect(field.options).toEqual(
+      expect.arrayContaining(['zz/batch-variant', 'aa/vision-preview', 'mm/the-one']),
+    );
+    client.send('form.submit', {
+      form_id: pick.payload.form_id,
+      values: { model: 'mm/the-one' },
+    });
+    await drain(h);
+
+    const added = endpointsOf().find((e: any) => e.name === 'provider');
+    expect(added.model).toBe('mm/the-one');
+    // The tags and the model they were measured against travel together (G.2).
+    expect(added.probed_model).toBe('mm/the-one');
+    expect(added.caps).toContain('json');
+    expect(modelsCalled()).toEqual(['mm/the-one']);
+    expect(added.api_key).toBe('${secret:PROVIDER_API_KEY}');
+    expect(sweep(h.dataDir, 'sentinel-provider-key')).toEqual(['secrets/secrets.yaml']);
+  });
+
+  it('writes nothing when more than one model is listed and none is chosen', async () => {
+    h = await bootService({ onboarded: true });
+    const url = await startProvider(['zz/batch-variant', 'aa/vision-preview']);
+
+    const { client, eventId } = await addEndpoint({ name: 'provider', url, classes: 'fast' });
+    const pick = await client.next('form.request', 15000);
+    client.send('form.cancel', { form_id: pick.payload.form_id });
+    await drain(h);
+
+    expect(endpointsOf().find((e: any) => e.name === 'provider')).toBeUndefined();
+    const call = h.service.repos.trace.forEvent(eventId).find((t) => t.kind === 'tool_call')!
+      .data as any;
+    expect(call.result_excerpt).toContain('no_model_chosen');
+    // Never a capability probe against a model nobody picked.
+    expect(modelsCalled()).toEqual([]);
+  });
+
+  it('uses the only model an endpoint lists without asking', async () => {
+    h = await bootService({ onboarded: true });
+    const url = await startProvider(['solo/model']);
+
+    const { client } = await addEndpoint({ name: 'solo', url, classes: 'fast' });
+    await drain(h);
+
+    const added = endpointsOf().find((e: any) => e.name === 'solo');
+    expect(added.model).toBe('solo/model');
+    expect(added.probed_model).toBe('solo/model');
+    expect(modelsCalled()).toEqual(['solo/model']);
+    // One model is not a choice, so there is no second form to answer.
+    expect(client.frames.some((f) => f.type === 'form.request')).toBe(false);
+  });
+
+  it('takes a typed model over the listing, and never opens the select', async () => {
+    h = await bootService({ onboarded: true });
+    const url = await startProvider(['zz/batch-variant', 'aa/vision-preview']);
+
+    // A catalogue is not always complete: a name the user knows works
+    // outranks a list that omits it (§10.2).
+    const { client } = await addEndpoint({
+      name: 'typed',
+      url,
+      classes: 'fast',
+      model: 'unlisted/model',
+    });
+    await drain(h);
+
+    const added = endpointsOf().find((e: any) => e.name === 'typed');
+    expect(added.model).toBe('unlisted/model');
+    expect(added.probed_model).toBe('unlisted/model');
+    expect(modelsCalled()).toEqual(['unlisted/model']);
+    expect(client.frames.some((f) => f.type === 'form.request')).toBe(false);
+  });
+});
+
+describe('setup.reprobe re-measures and decides nothing (§10.2, F.9)', () => {
+  let provider: FakeLlama;
+  let t: { dir: string; cleanup: () => void } | null = null;
+
+  afterEach(async () => {
+    await provider?.stop();
+    t?.cleanup();
+    t = null;
+  });
+
+  /** A data home with one hand-written chat endpoint in it. */
+  function env(yaml: string): { home: DataHome; config: Config; file: string } {
+    t = tmpDir('turminder-reprobe-');
+    const { home } = openDataHome(path.join(t.dir, 'home'));
+    const file = home.path('config', 'models.yaml');
+    write(file, yaml);
+    return { home, config: new Config(home), file };
+  }
+
+  async function startProvider(): Promise<string> {
+    provider = new FakeLlama();
+    provider.modelId = 'listed/first';
+    provider.always((req: any) =>
+      req.body.response_format ? { text: '{"ok":true,"note":"hello"}' } : { text: 'ready' },
+    );
+    return provider.startV1();
+  }
+
+  it('rewrites the three measured fields and leaves every decision alone', async () => {
+    const url = await startProvider();
+    // The live shape this exists for: `model:` corrected by hand, tags left
+    // behind describing something else, and a price somebody just set.
+    const { home, config, file } = env(`endpoints:
+  - name: hosted
+    url: ${url}
+    api_key: \${secret:HOSTED_KEY}
+    model: chosen/model
+    kind: chat
+    classes: [fast]
+    caps: []
+    context_size: 8192
+    probed_model: old/batch-variant
+    cost:
+      in_per_mtok: 0.07125
+      out_per_mtok: 0.2375
+      currency: USD
+routes:
+  chat: { class: fast }
+`);
+    const before = fs.readFileSync(file, 'utf8');
+
+    const result: any = await reprobeEndpoint({ home, config }, 'hosted');
+    expect(result.error).toBeUndefined();
+    expect(result.changed).toBe(true);
+    expect(result.caps).toContain('json');
+    expect(result.probed_model).toBe('chosen/model');
+
+    const after = YAML.parse(fs.readFileSync(file, 'utf8'));
+    const entry = after.endpoints.find((e: any) => e.name === 'hosted');
+    // Measured: rewritten.
+    expect(entry.caps).toContain('json');
+    expect(entry.context_size).toBe(32768);
+    expect(entry.probed_model).toBe('chosen/model');
+    // Decided: untouched, down to the unexpanded secret reference (§27).
+    expect(entry.classes).toEqual(['fast']);
+    expect(entry.api_key).toBe('${secret:HOSTED_KEY}');
+    expect(entry.cost).toEqual(YAML.parse(before).endpoints[0].cost);
+    expect(entry.model).toBe('chosen/model');
+    expect(after.routes).toEqual({ chat: { class: 'fast' } });
+  });
+
+  it('writes nothing at all when the endpoint cannot be reached', async () => {
+    // Port 1 answers nothing, which is the "the box is off" case verbatim.
+    const { home, config, file } = env(`endpoints:
+  - name: hosted
+    url: http://127.0.0.1:1/v1
+    model: chosen/model
+    kind: chat
+    classes: [fast]
+    caps: [json, tools]
+    context_size: 8192
+`);
+    const before = fs.readFileSync(file, 'utf8');
+
+    const result: any = await reprobeEndpoint({ home, config }, 'hosted');
+    expect(result.error).toBe('unreachable');
+    // A network that is down today is not evidence a model lost a capability.
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+  });
+
+  it('says nothing changed rather than committing an identical file', async () => {
+    const url = await startProvider();
+    const { home, config } = env(`endpoints:
+  - name: hosted
+    url: ${url}
+    model: chosen/model
+    kind: chat
+    classes: [fast]
+    caps: []
+    context_size: 8192
+`);
+    const first: any = await reprobeEndpoint({ home, config }, 'hosted');
+    expect(first.changed).toBe(true);
+    const settled = fs.readFileSync(home.path('config', 'models.yaml'), 'utf8');
+
+    const again: any = await reprobeEndpoint({ home, config }, 'hosted');
+    expect(again.changed).toBe(false);
+    expect(again.committed).toBe(false);
+    expect(fs.readFileSync(home.path('config', 'models.yaml'), 'utf8')).toBe(settled);
+  });
+
+  it('refuses an endpoint it does not know, and one with no capabilities to measure', async () => {
+    const { home, config } = env(`endpoints:
+  - name: emb
+    url: http://127.0.0.1:1
+    kind: embedding
+`);
+    const unknown: any = await reprobeEndpoint({ home, config }, 'nope');
+    expect(unknown.error).toBe('unknown_endpoint');
+    expect(unknown.message).toContain('emb');
+
+    // An embedding endpoint declares no caps at all (§10.1) — there is
+    // nothing here a capability suite could re-derive.
+    const wrongKind: any = await reprobeEndpoint({ home, config }, 'emb');
+    expect(wrongKind.error).toBe('not_a_chat_endpoint');
   });
 });
 
