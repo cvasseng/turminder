@@ -599,7 +599,6 @@ export class Service {
       config: this.app.config,
       intake: this.intake,
       meta: this.repos.meta,
-      files: this.files,
       ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}),
     });
 
@@ -802,7 +801,6 @@ export class Service {
       config: this.app.config,
       intake: this.intake,
       meta: this.repos.meta,
-      files: this.files,
       ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}),
     });
 
