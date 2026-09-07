@@ -871,11 +871,13 @@ describe('integration wiring (activation vs watcher)', () => {
       e.config.reload();
     }
     const config = new Config(e.home);
+    const { FileStore } = await import('../src/files/store.js');
     return createSourceStack({
       home: e.home,
       config,
       intake: e.intake,
       meta: e.repos.meta,
+      files: new FileStore({ root: e.home.filesDir, git: null }),
     });
   };
 

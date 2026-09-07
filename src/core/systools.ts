@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { log } from './logger.js';
@@ -10,7 +10,7 @@ const l = log('systools');
  * is the whitelist: reaching for a binary that is not here is a spec change,
  * not an implementation decision — the same rule App. J applies to npm.
  */
-export type SystoolName = 'chromium' | 'notify-send' | 'gpg' | 'git';
+export type SystoolName = 'chromium' | 'notify-send' | 'gpg' | 'git' | 'pdftoppm';
 
 export interface SystoolContract {
   name: SystoolName;
@@ -24,6 +24,12 @@ export interface SystoolContract {
   versionArgs: readonly string[];
   /** What acceptable version output looks like, with the major in group 1. */
   versionRe: RegExp;
+  /**
+   * Which stream carries the version (§23.1). Poppler prints
+   * `pdftoppm version 24.08.0` on **stderr**, so a probe that reads only
+   * stdout concludes the binary is missing while looking straight at it.
+   */
+  versionStream?: 'stdout' | 'stderr';
   /** Refuse anything older: the flags we pin did not exist before this. */
   minMajor?: number;
   /** Said to the user, verbatim, when the binary is absent. */
@@ -71,6 +77,14 @@ export const SYSTOOL_CONTRACTS: Record<SystoolName, SystoolContract> = {
     probeByPath: true,
     hint: 'install git (Debian/Ubuntu: apt install git; macOS: xcode-select --install) or set systools.git in config/turminder.yaml — without it the data dir works but keeps no history',
   },
+  pdftoppm: {
+    name: 'pdftoppm',
+    candidates: ['pdftoppm'],
+    versionArgs: ['-v'],
+    versionRe: /pdftoppm version (\d+)\.\d+/,
+    versionStream: 'stderr',
+    hint: 'install poppler-utils (Debian/Ubuntu: apt install poppler-utils; Fedora: dnf install poppler-utils; macOS: brew install poppler) or set systools.pdftoppm in config/turminder.yaml — without it, printing a PDF works only on printers that read PDF themselves',
+  },
   'notify-send': {
     name: 'notify-send',
     candidates: ['notify-send'],
@@ -112,7 +126,7 @@ export interface SystoolDeps {
    * Runs a candidate's version command. Injected so tests never depend on what
    * happens to be installed on the machine running them.
    */
-  run?: (command: string, args: readonly string[]) => string;
+  run?: (command: string, args: readonly string[], stream?: 'stdout' | 'stderr') => string;
 }
 
 /**
@@ -140,12 +154,30 @@ export function lookupOnPath(command: string): string | null {
   return null;
 }
 
-function defaultRun(command: string, args: readonly string[]): string {
-  return execFileSync(command, [...args], {
-    encoding: 'utf8',
-    timeout: 5000,
-    stdio: ['ignore', 'pipe', 'ignore'],
-  });
+function defaultRun(
+  command: string,
+  args: readonly string[],
+  stream: 'stdout' | 'stderr' = 'stdout',
+): string {
+  if (stream === 'stdout') {
+    return execFileSync(command, [...args], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  }
+  // `pdftoppm -v` writes to stderr and exits non-zero on some builds, which
+  // execFileSync reports as a throw with the output attached. Both halves are
+  // the same answer: whatever the binary said about itself.
+  try {
+    const result = spawnSync(command, [...args], { encoding: 'utf8', timeout: 5000 });
+    if (result.error) throw result.error;
+    return `${result.stderr ?? ''}${result.stdout ?? ''}`;
+  } catch (e) {
+    const output = (e as { stderr?: string }).stderr;
+    if (typeof output === 'string' && output) return output;
+    throw e;
+  }
 }
 
 /**
@@ -155,7 +187,11 @@ function defaultRun(command: string, args: readonly string[]): string {
  */
 export class SystoolRegistry {
   private readonly cache = new Map<SystoolName, SystoolProbe>();
-  private readonly run: (command: string, args: readonly string[]) => string;
+  private readonly run: (
+    command: string,
+    args: readonly string[],
+    stream?: 'stdout' | 'stderr',
+  ) => string;
   private readonly lookup: (command: string) => string | null;
 
   constructor(private readonly deps: SystoolDeps = {}) {
@@ -226,7 +262,7 @@ export class SystoolRegistry {
     for (const command of candidates) {
       let output: string;
       try {
-        output = this.run(command, contract.versionArgs);
+        output = this.run(command, contract.versionArgs, contract.versionStream ?? 'stdout');
       } catch (e) {
         failures.push(`${command}: ${(e as { code?: string }).code ?? 'failed'}`);
         continue;

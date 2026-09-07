@@ -58,6 +58,7 @@ export const BootYamlSchema = z
         chromium: z.string().nullable().optional(),
         gpg: z.string().nullable().optional(),
         git: z.string().nullable().optional(),
+        pdftoppm: z.string().nullable().optional(),
       })
       .partial()
       .optional(),
@@ -156,6 +157,8 @@ export const TurminderYamlSchema = z.strictObject({
       gpg: z.string().nullable().optional(),
       /** Absolute path to git for data-repo versioning (§12.2). */
       git: z.string().nullable().optional(),
+      /** Absolute path to poppler's pdftoppm, for printing a PDF (§34.4). */
+      pdftoppm: z.string().nullable().optional(),
     })
     .optional(),
   secrets: z

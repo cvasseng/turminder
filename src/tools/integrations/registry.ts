@@ -131,6 +131,7 @@ export const MANIFESTS: IntegrationManifest[] = [
       'setup.rename',
       'setup.pricing',
       'setup.voice',
+      'setup.printers',
     ],
   ),
   {
@@ -183,6 +184,46 @@ export const MANIFESTS: IntegrationManifest[] = [
       ],
       events: ['asana.inbox_item', 'asana.task_scheduled'],
       source: true,
+    },
+  },
+  {
+    name: 'print-scan',
+    description:
+      'Printers and scanners on the local network: print a document from the workspace, scan a page into it, and see whether the machine is out of ink.',
+    // Form-activated with no credential in sight (§34): what the form collects
+    // is an address that will make paper come out of a machine in another
+    // room, and that is a decision a human makes on a form, not one a model
+    // writes into a config file.
+    activation: 'form',
+    fields: [
+      {
+        name: 'name',
+        label: 'Short name for this printer or scanner, e.g. office',
+        type: 'text',
+      },
+      {
+        name: 'address',
+        label: "Its address on the network — the IP or hostname from the device's own display",
+        type: 'text',
+      },
+      {
+        name: 'password',
+        label: 'Password, if the printer asks for one — almost none do',
+        type: 'secret',
+        required: false,
+        secret_key: 'PRINTER_{name}_PASSWORD',
+      },
+    ],
+    provides: {
+      tools: [
+        'print.devices',
+        'print.status',
+        'print.document',
+        'print.job',
+        'print.cancel_job',
+        'print.scan',
+        'print.discover',
+      ],
     },
   },
   {

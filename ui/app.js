@@ -235,6 +235,12 @@ const state = {
   /** Endpoints and this conversation's override (§10.6). */
   models: { endpoints: [], override: null, effort: null, pending: null },
   retryMs: 500,
+  /**
+   * Which `connect()` attempt is current. A close handler that has awaited the
+   * token probe compares against this to find out whether it is still speaking
+   * for the live socket (§24.4).
+   */
+  generation: 0,
 };
 
 function token() {
@@ -444,20 +450,8 @@ function pollPairing() {
   }, PAIR_POLL_MS);
 }
 
-/**
- * A refused upgrade and an unreachable server both reach the browser as a bare
- * 1006, so ask the health endpoint — which needs no token — which one it was.
- * Getting this wrong either hides a dead server behind "bad token" or leaves
- * someone reconnecting forever against a token that will never be accepted.
- */
-async function serverIsUp() {
-  try {
-    const res = await fetch('/healthz', { cache: 'no-store' });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
+/* `tokenVerdict` lives in verdict.js — the decision that can delete a token is
+   worth testing on its own; see the note there. */
 
 /**
  * Connection state is a dot on the right of the top row, and when all is well
@@ -1295,6 +1289,7 @@ function connect() {
     openGate();
     return;
   }
+  const generation = ++state.generation;
   state.authed = false;
   state.opened = false;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -1325,18 +1320,30 @@ function connect() {
   socket.onclose = async () => {
     state.socket = null;
     clearTimeout(state.greetTimer);
-    // The upgrade itself was refused, with the server plainly up: the token is
-    // the problem, and retrying it forever helps nobody. A socket that opened
-    // and then dropped is a different story — never blame the token for that.
-    if (!state.opened && (await serverIsUp())) {
-      localStorage.removeItem(TOKEN_KEY);
-      setStatus('token rejected', false);
-      openGate('That token was not accepted — it was probably revoked or replaced.');
-      return;
+    const opened = state.opened;
+    const retryMs = state.retryMs;
+    // A socket that opened and then dropped is never the token's fault. One
+    // that never opened *might* be — but it is equally a restart, or a phone
+    // whose radio was still waking — so establish which before touching the
+    // credential. Retrying a revoked token forever helps nobody; deleting a
+    // good one because the network blinked is worse, because it costs a
+    // re-pairing and the user cannot tell it was not their fault.
+    if (!opened) {
+      const verdict = await tokenVerdict(token());
+      // A newer socket exists — a pasted token, a claimed pairing — so this
+      // handler is stale: it must not clear a token it is no longer about, and
+      // must not start a second retry chain alongside the live one.
+      if (generation !== state.generation) return;
+      if (verdict === 'rejected') {
+        localStorage.removeItem(TOKEN_KEY);
+        setStatus('token rejected', false);
+        openGate('That token was not accepted — it was probably revoked or replaced.');
+        return;
+      }
     }
     setStatus(state.ungreeted ? 'server is up but not answering' : 'disconnected', false);
-    setTimeout(connect, state.retryMs);
-    state.retryMs = Math.min(state.retryMs * 2, 10000);
+    setTimeout(connect, retryMs);
+    state.retryMs = Math.min(retryMs * 2, 10000);
   };
 
   socket.onmessage = (ev) => {

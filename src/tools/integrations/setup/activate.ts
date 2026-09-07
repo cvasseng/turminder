@@ -1,10 +1,6 @@
 import { log } from '../../../core/logger.js';
 import { errMessage } from '../../../core/errors.js';
-import { writeIntegrations, type Config } from '../../../core/config.js';
-import type { DataHome } from '../../../core/datadir.js';
-import type { IntegrationsYaml } from '../../../core/config-schemas.js';
 import { nowIso } from '../../../core/time.js';
-import type { EventIntake } from '../../../ingress/intake.js';
 import type { FormValues } from '../../../chat/forms.js';
 import { AsanaClient } from '../asana/client.js';
 import {
@@ -14,21 +10,11 @@ import {
   GoogleTokenStore,
 } from '../google/auth.js';
 import type { IntegrationManifest } from '../registry.js';
+import { recordFor, writeRecord, type ActivationContext } from './records.js';
+import { activatePrintScan } from './printers.js';
 import { resolveRef } from './templates.js';
 
 const l = log('tool:setup');
-
-export interface ActivationContext {
-  home: DataHome;
-  config: Config;
-  intake: EventIntake;
-  /**
-   * Rebuilds the source stack and the tool hub from the activation records —
-   * how tools appear and pollers start without a restart (§19.5).
-   */
-  reloadIntegrations: () => Promise<string[]>;
-  fetch?: typeof globalThis.fetch;
-}
 
 export interface ActivationSubmission {
   values: FormValues;
@@ -45,34 +31,6 @@ function settingsFrom(values: FormValues): Record<string, unknown> {
     out[key] = value;
   }
   return out;
-}
-
-export function recordFor(
-  config: Config,
-  name: string,
-): IntegrationsYaml['integrations'][string] | undefined {
-  return config.integrations().integrations[name];
-}
-
-/** Write one activation record, leaving the others alone. */
-export function writeRecord(
-  ctx: ActivationContext,
-  name: string,
-  record: { active: boolean; activated_at?: string; settings?: Record<string, unknown> } | null,
-  message: string,
-): void {
-  const doc = ctx.config.integrations();
-  const integrations = { ...doc.integrations };
-  if (record === null) delete integrations[name];
-  else {
-    integrations[name] = {
-      active: record.active,
-      ...(record.activated_at ? { activated_at: record.activated_at } : {}),
-      settings: record.settings ?? {},
-    };
-  }
-  writeIntegrations(ctx.home, { integrations }, message);
-  ctx.config.reload();
 }
 
 /**
@@ -206,6 +164,7 @@ const EFFECTS: Record<
 > = {
   asana: activateAsana,
   'google-calendar': activateGoogleCalendar,
+  'print-scan': activatePrintScan,
 };
 
 export async function runActivation(

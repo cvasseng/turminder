@@ -27,12 +27,9 @@ import {
   matchAccess,
   patternsToRecord,
 } from './access.js';
-import {
-  recordFor,
-  runActivation,
-  runDeactivation,
-  type ActivationContext,
-} from './activate.js';
+import { runActivation, runDeactivation } from './activate.js';
+import { recordFor, type ActivationContext } from './records.js';
+import { runPrinterWizard } from './printers.js';
 import {
   TEMPLATES,
   TEMPLATE_NAMES,
@@ -941,6 +938,26 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
         const loaded = deps.reloadModels();
         l.info({ language, voice, committed, loaded }, 'voice configuration written');
         return { submitted: true, language, voice, committed, models_loaded: loaded };
+      },
+    },
+    /*
+     * §34.6. In `setup.*` rather than `print.*` because before the first
+     * device exists there is no `print.*` namespace to call — discovery would
+     * be unreachable exactly when it is needed.
+     */
+    {
+      name: 'setup.printers',
+      description:
+        'Add, change, switch off or remove a printer or scanner. It looks for machines on the network and shows the user a form to pick from — so "set up my printer", "the printer moved", and "forget the old one" all come here. It never writes anything the user did not confirm on the form.',
+      tier: 'se',
+      args: z.object({}),
+      async execute(_args: Record<string, never>, ctx: ToolContext) {
+        try {
+          return await runPrinterWizard(deps, ctx);
+        } catch (e) {
+          l.warn({ err: errMessage(e) }, 'printer setup failed');
+          return effectFailure(e);
+        }
       },
     },
     {

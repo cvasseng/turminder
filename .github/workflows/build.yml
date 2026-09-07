@@ -118,7 +118,13 @@ jobs:
       # runner has apt, and the .deb wants system sonames anyway — a bundle
       # linked against a /nix/store path runs on the build box and nowhere
       # else, which is the trap that took AppImage off the target list.
-      - name: Webview and tray libraries
+      #
+      # ALSA joined the list with the voice tier (§28.6): `cpal` locates
+      # `alsa-sys` through pkg-config, and an absent `alsa.pc` panics that
+      # build script before anything of this repository compiles. It is the
+      # apt half of `app/shell.nix`'s `alsa-lib` — the pair has to move
+      # together, and the first time it did not, CI is where it showed.
+      - name: Webview, tray and audio libraries
         if: startsWith(matrix.runner, 'ubuntu')
         run: |
           sudo apt-get update
@@ -130,6 +136,7 @@ jobs:
             libsoup-3.0-dev \
             libxdo-dev \
             libdbus-1-dev \
+            libasound2-dev \
             libssl-dev \
             build-essential \
             patchelf \

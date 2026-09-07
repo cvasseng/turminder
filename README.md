@@ -70,6 +70,7 @@ pairing](docs/running.md).
 - Watchers that poll in plain code and wake the model only when the answer changes.
 - Asana, Google Calendar, weather, web search, page fetch and file download built in, anything else over MCP.
 - An MCP server that drops is reported as down and reconnected on the next call, with no restart.
+- Printers and scanners on your network, found for you: print a file from the workspace, scan a page into it, ask whether it is out of ink. Talks IPP and AirScan directly — no driver, no print queue — and remembers the certificate each machine showed the first time.
 - Credentials go to your OS keychain or a GPG file; the model only ever sees `${secret:KEY}`.
 - Embeds: sandboxed charts, dashboards and slides whose numbers come from frozen tool calls.
 - PDF and .docx reading by outline, from the workspace or from a web address, and PDF export of any embed or markdown file.

@@ -258,6 +258,8 @@ export interface Settings {
   systoolGpg: string | null;
   /** Path override for git, the §12.2 data-repo binary. */
   systoolGit: string | null;
+  /** Path override for pdftoppm, which rasterises a PDF to print it (§34.4). */
+  systoolPdftoppm: string | null;
   /** Where secrets live at rest (§27.1). */
   secretsBackend: 'auto' | 'os' | 'gpg' | 'plain';
   /** Recipient key id for the `gpg` backend. */
@@ -335,6 +337,7 @@ export const DEFAULT_SETTINGS: Settings = {
   systoolChromium: null,
   systoolGpg: null,
   systoolGit: null,
+  systoolPdftoppm: null,
   secretsBackend: 'auto',
   secretsGpgKey: null,
   gatewayPublicUrl: null,
@@ -510,6 +513,7 @@ export function resolveSettings(
   if (raw.systools?.chromium !== undefined) s.systoolChromium = raw.systools.chromium;
   if (raw.systools?.gpg !== undefined) s.systoolGpg = raw.systools.gpg;
   if (raw.systools?.git !== undefined) s.systoolGit = raw.systools.git;
+  if (raw.systools?.pdftoppm !== undefined) s.systoolPdftoppm = raw.systools.pdftoppm;
   if (raw.secrets?.backend !== undefined) s.secretsBackend = raw.secrets.backend;
   if (raw.secrets?.gpg_key !== undefined) s.secretsGpgKey = raw.secrets.gpg_key;
   if (raw.uploads?.max_mb !== undefined) s.uploadMaxMb = raw.uploads.max_mb;
@@ -551,6 +555,7 @@ export class Config {
     systoolChromium: string | null;
     systoolGpg: string | null;
     systoolGit: string | null;
+    systoolPdftoppm: string | null;
     daemonNotifyCommand: string;
   } | null = null;
   private settingsCache: Settings | null = null;
@@ -601,6 +606,7 @@ export class Config {
     systoolChromium: string | null;
     systoolGpg: string | null;
     systoolGit: string | null;
+    systoolPdftoppm: string | null;
     daemonNotifyCommand: string;
   } {
     if (!this.bootCache) {
@@ -616,6 +622,7 @@ export class Config {
         systoolChromium: raw.systools?.chromium ?? DEFAULT_SETTINGS.systoolChromium,
         systoolGpg: raw.systools?.gpg ?? DEFAULT_SETTINGS.systoolGpg,
         systoolGit: raw.systools?.git ?? DEFAULT_SETTINGS.systoolGit,
+        systoolPdftoppm: raw.systools?.pdftoppm ?? DEFAULT_SETTINGS.systoolPdftoppm,
         daemonNotifyCommand: raw.daemon?.notify_command ?? DEFAULT_SETTINGS.daemonNotifyCommand,
       };
     }
@@ -641,6 +648,8 @@ export class Config {
               return this.bootSettings.systoolGpg;
             case 'git':
               return this.bootSettings.systoolGit;
+            case 'pdftoppm':
+              return this.bootSettings.systoolPdftoppm;
             case 'notify-send':
               return this.bootSettings.daemonNotifyCommand;
           }

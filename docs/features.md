@@ -103,6 +103,29 @@ Fix the fault, ask the same question again, and it answers. There is also a
 capped retry in the background, so a fault fixed outside the conversation is
 picked up without one.
 
+## Printing and scanning
+
+"Print the lease." "Scan this." Turminder talks to network printers and
+scanners the way a phone does — IPP for printing, AirScan for scanning, both
+straight to the machine, with no driver and no print queue in between. Setup
+looks for devices itself: it asks the network by name, and on a network where
+that is blocked it sweeps the local subnet and confirms every hit by actually
+speaking the protocol, so what you pick from is a list of real printers rather
+than a list of open ports. Several machines are the normal case; each can be
+edited, switched off for the summer, or removed.
+
+A printer that cannot read PDF — which is most consumer inkjets — gets the
+pages rasterised on the way out, and says so if the converter is not
+installed rather than printing nothing. A scan lands in your workspace as a
+committed file. A page scanned at the machine's own panel arrives too, if you
+point its "scan to network folder" at the scan inbox: a shipped handler
+notices and tells you. There is no OCR yet, and it says so instead of
+guessing what the page said.
+
+Printers ship self-signed certificates, so the first setup records the
+certificate each machine presented and every later job checks it. A printer
+that comes back wearing a different one stops the job and says so, rather
+than quietly trusting whatever answered.
 
 ## Embeds
 
