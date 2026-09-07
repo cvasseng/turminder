@@ -421,11 +421,16 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
             hub?.serverStatus().map((s) => ({
               name: s.name,
               transport: s.transport,
+              /** Alive, not "there is a config entry" (§11.6). */
               connected: s.connected,
               tools: s.tools,
               /** Of those, the ones you may actually call. */
               granted: callable(s.tools),
               ...(s.error ? { error: s.error } : {}),
+              // A dropped server's tools stay listed on purpose (§11.6) — so
+              // say when it will be tried again, or "connected: false" reads
+              // as "gone" when it means "reach for it and it will retry".
+              ...(s.next_retry_at ? { next_retry_at: s.next_retry_at } : {}),
             })) ?? [],
           /** Everything in the process you cannot call yet, whatever serves it. */
           ungranted_tools: (hub?.handles() ?? [])

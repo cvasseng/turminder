@@ -246,6 +246,8 @@ export interface Settings {
   downloadTimeoutS: number;
   /** Store-relative directory a download lands in when no `path` is given. */
   downloadDir: string;
+  /** Reconnect schedule for a dropped external MCP server (§11.6, App. A). */
+  mcpReconnectBackoffS: number[];
   backgroundConcurrency: number;
   daemonBundled: boolean;
   daemonDevice: string;
@@ -325,6 +327,7 @@ export const DEFAULT_SETTINGS: Settings = {
   downloadMaxMb: 25,
   downloadTimeoutS: 60,
   downloadDir: 'downloads/',
+  mcpReconnectBackoffS: [5, 15, 60, 300],
   backgroundConcurrency: 1,
   daemonBundled: false,
   daemonDevice: 'local',
@@ -489,6 +492,9 @@ export function resolveSettings(
     s.downloadTimeoutS = raw.web.download_timeout_s;
   }
   if (raw.web?.download_dir !== undefined) s.downloadDir = raw.web.download_dir;
+  if (raw.mcp?.reconnect_backoff?.length) {
+    s.mcpReconnectBackoffS = raw.mcp.reconnect_backoff;
+  }
   if (raw.scheduler?.background_concurrency !== undefined) {
     s.backgroundConcurrency = raw.scheduler.background_concurrency;
   }

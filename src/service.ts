@@ -13,7 +13,7 @@ import { createPipeline } from './ingress/pipeline.js';
 import { createModelStack, type ModelStack } from './model/index.js';
 import { InferenceScheduler } from './model/scheduler.js';
 import type { GatewayOptions } from './model/gateway.js';
-import { ToolHub } from './tools/hub.js';
+import { ToolHub, type HubClock } from './tools/hub.js';
 import { SkillLoader } from './tools/skills.js';
 import { MemoryStore } from './memory/store.js';
 import { MemoryAgent } from './memory/agent.js';
@@ -77,6 +77,8 @@ export interface ServiceOptions {
   gateway?: GatewayOptions;
   /** Injected into tools that reach the network, e.g. web.search. */
   fetch?: typeof globalThis.fetch;
+  /** The clock the MCP reconnect backoff runs on (§11.6); tests own it. */
+  hubClock?: HubClock;
   /** Idle-conversation distillation sweep interval; 0 disables it. */
   sweepMs?: number;
   /** Rebuild the RAG index from scratch on start (`--rebuild-index`, §8.3). */
@@ -613,6 +615,7 @@ export class Service {
       projectScope: this.projectScope,
       handlers: () => this.handlers.all(),
       files: this.files,
+      ...(this.opts.hubClock ? { clock: this.opts.hubClock } : {}),
       extra: {
         deliver: deliverTools(this.outbox, () => this.app.config.settings.spokenMaxChars),
         files: filesTools({
