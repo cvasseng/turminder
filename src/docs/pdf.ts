@@ -84,10 +84,18 @@ let fontUrl: string | null | undefined;
 
 function standardFonts(): string | null {
   if (fontUrl === undefined) {
+    fontUrl = null;
     try {
-      fontUrl = import.meta.resolve('pdfjs-dist/standard_fonts/');
+      const resolved = import.meta.resolve('pdfjs-dist/standard_fonts/');
+      // Verified, not trusted. Under `tsx` this resolver does not throw for a
+      // package subpath it cannot place — it answers with a plausible-looking
+      // path inside the *repo* (`<root>/pdfjs-dist/standard_fonts/index.ts`),
+      // so the catch below never fired and pdf.js rejected the value at open
+      // time with "must include trailing slash". Every PDF read then failed in
+      // dev mode while the tests, on a different resolver, stayed green.
+      // Reading text works without the fonts; it only costs a pdf.js warning.
+      if (resolved.endsWith('/') && fs.existsSync(new URL(resolved))) fontUrl = resolved;
     } catch {
-      // Reading text works without them; it only costs a pdf.js warning.
       fontUrl = null;
     }
   }

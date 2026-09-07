@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { log } from '../../core/logger.js';
 import { errMessage } from '../../core/errors.js';
 import type { Settings } from '../../core/config.js';
-import type { ToolDefinition } from '../types.js';
+import type { FileStore } from '../../files/store.js';
+import type { ConfirmLines, ToolDefinition } from '../types.js';
 
 const l = log('tool:web');
 
@@ -11,6 +12,45 @@ export interface WebFetchDeps {
   fetch?: typeof globalThis.fetch;
   /** Shared with `web.query` (App. F.5); its own when nobody hands one over. */
   pages?: PageCache;
+  /**
+   * The files store, for `web.download` (§23.6). Absent in the narrow callers
+   * that only want a page reader — `web.download` is then simply not offered,
+   * which is honest: there is nowhere to put a file.
+   */
+  files?: FileStore;
+}
+
+/**
+ * What `web.fetch` will read, as an **allowlist** (§23.6). A blocklist was the
+ * bug: it has to be right about every format that will ever exist, and it was
+ * already wrong about the second most common document on the web — `.docx` was
+ * not on it, so several megabytes of zip container came back decoded as UTF-8
+ * and went to a model as "the page".
+ */
+const READABLE_TYPES = [
+  /^text\//i,
+  /^application\/json\b/i,
+  /^application\/xml\b/i,
+  /^application\/[\w.+-]*\+json\b/i,
+  /^application\/[\w.+-]*\+xml\b/i,
+];
+
+function isReadableAsText(contentType: string): boolean {
+  // No content-type at all is the old web being the old web; read it, the
+  // extractor copes. A *stated* type we do not recognise is a refusal.
+  const type = contentType.split(';')[0]?.trim() ?? '';
+  if (!type) return true;
+  return READABLE_TYPES.some((re) => re.test(type));
+}
+
+/** The refusal names the next step, because errors teach (§23.5, §23.6). */
+function unsupportedContent(contentType: string, url: string): PageError {
+  return {
+    error: 'unsupported_content',
+    content_type: contentType,
+    url,
+    message: `${contentType} is not text. Use web.download to save it into the files store, then docs.outline to see what is in it.`,
+  };
 }
 
 /** Never legitimate for an assistant, always the first SSRF target. */
@@ -228,13 +268,7 @@ export async function fetchPage(
         content_type: contentType,
       };
     }
-    if (/^(image|audio|video|application\/(pdf|zip|octet-stream))/i.test(contentType)) {
-      return {
-        error: 'unsupported_content',
-        message: `${contentType} is not readable as text yet`,
-        url: key,
-      };
-    }
+    if (!isReadableAsText(contentType)) return unsupportedContent(contentType, key);
 
     // A ceiling on what is kept, and `complete` says when it bit — so a
     // caller that needs more of the page can ask for more of the page.
@@ -328,7 +362,191 @@ export function webFetchTools(deps: WebFetchDeps): ToolDefinition[] {
         };
       },
     },
+
+    ...(deps.files ? [downloadTool(deps.files, deps)] : []),
   ];
+}
+
+/**
+ * Extensions for the types worth naming, so a downloaded file arrives with a
+ * name `docs.outline` and `print.document` can act on. Anything else keeps
+ * whatever the URL gave it — guessing an extension from an unknown MIME type
+ * would be inventing a fact about the bytes.
+ */
+const EXTENSIONS: Record<string, string> = {
+  'application/pdf': 'pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+  'application/epub+zip': 'epub',
+  'application/zip': 'zip',
+  'application/json': 'json',
+  'text/csv': 'csv',
+  'text/plain': 'txt',
+  'text/html': 'html',
+  'text/markdown': 'md',
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/tiff': 'tiff',
+};
+
+/** `<download_dir>/<name from the URL>.<ext from the content type>` (§23.6). */
+export function downloadPath(url: URL, contentType: string, dir: string): string {
+  // Strip the store's own separators rather than sanitising by hand: whatever
+  // survives goes through `resolveInside`, which is the one path authority.
+  const last = decodeURIComponent(url.pathname.split('/').filter(Boolean).pop() ?? '').replace(
+    /[/\\]/g,
+    '',
+  );
+  const type = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
+  const known = EXTENSIONS[type];
+  // An extension starts with a letter: `1706.03762` is a name with a dot in
+  // it, not `1706` with a `.03762` extension, and arXiv URLs look exactly
+  // like that.
+  const had = /\.([A-Za-z][A-Za-z0-9]{0,7})$/.exec(last)?.[1]?.toLowerCase();
+  // The hostname is the fallback *whole* name, never a stem with an extension
+  // to strip — `example.com` is the name, and `example` is a different word.
+  const stem = had ? last.slice(0, -(had.length + 1)) : last;
+  const base = stem || url.hostname || 'download';
+  const suffix = known ?? (stem ? had : undefined);
+  return `${dir.replace(/\/+$/, '')}/${base}${suffix ? `.${suffix}` : ''}`;
+}
+
+/**
+ * `web.download` (F.5, `se`) — the one hop §23.6 adds between a URL and the
+ * document readers. It lives beside `web.fetch` because it shares that tool's
+ * URL policy: `checkFetchUrl` is the **one** door to "may I fetch this"
+ * (§11.2), and a second door is how the first one stops being true.
+ *
+ * The file is *kept*, on purpose. A downloaded invoice can then be read,
+ * printed (§34.4), indexed and found again next month, which a scratch copy in
+ * `cache/` could never be — and that is also why this is side-effecting.
+ */
+function downloadTool(files: FileStore, deps: WebFetchDeps): ToolDefinition {
+  return {
+    name: 'web.download',
+    description:
+      'Download a file from a URL into the files store — a PDF, a spreadsheet, a document. Use it when web.fetch says the content is not text; then read it with docs.outline and docs.read. The file is kept.',
+    tier: 'se',
+    args: z.object({
+      url: z.string().min(1).describe('absolute http(s) URL'),
+      path: z
+        .string()
+        .optional()
+        .describe('store-relative destination; default downloads/<name from the url>'),
+    }),
+    confirmSummary(args: { url: string; path?: string }): ConfirmLines {
+      return {
+        action: `download ${args.url}`,
+        lines: [
+          { label: 'From', value: args.url },
+          { label: 'Save as', value: args.path ?? 'downloads/, named from the URL' },
+        ],
+      };
+    },
+    async execute(args: { url: string; path?: string }) {
+      const { settings } = deps;
+      let url: URL;
+      try {
+        url = checkFetchUrl(args.url, settings.fetchAllowPrivateHosts);
+      } catch (e) {
+        return { error: 'url_refused', message: errMessage(e) };
+      }
+
+      const limitBytes = Math.round(settings.downloadMaxMb * 1024 * 1024);
+      const doFetch = deps.fetch ?? globalThis.fetch;
+      let res: Response;
+      try {
+        res = await doFetch(url, {
+          redirect: 'follow',
+          headers: { 'user-agent': 'turminder/0.1 (personal assistant)' },
+          signal: AbortSignal.timeout(settings.downloadTimeoutS * 1000),
+        });
+      } catch (e) {
+        return { error: 'fetch_failed', message: errMessage(e), url: url.toString() };
+      }
+      const contentType = res.headers.get('content-type') ?? 'application/octet-stream';
+      if (!res.ok) {
+        return {
+          error: 'fetch_failed',
+          message: `HTTP ${res.status}`,
+          url: url.toString(),
+          content_type: contentType,
+        };
+      }
+
+      // A header is a claim, so it is checked *and* then not believed: the cap
+      // is enforced again against the bytes actually read, or a lying server
+      // could fill the disk by understating one number.
+      const declared = Number(res.headers.get('content-length') ?? NaN);
+      if (Number.isFinite(declared) && declared > limitBytes) {
+        return tooLarge(settings.downloadMaxMb, declared);
+      }
+
+      let body: Buffer;
+      try {
+        body = await readCapped(res, limitBytes);
+      } catch (e) {
+        if (e instanceof TooLarge) return tooLarge(settings.downloadMaxMb, e.bytes);
+        return { error: 'fetch_failed', message: errMessage(e), url: url.toString() };
+      }
+
+      // Nothing has been written yet, so an over-size body leaves no partial
+      // file behind — the read is capped before the store ever sees it.
+      const dest = args.path ?? downloadPath(url, contentType, settings.downloadDir);
+      try {
+        const saved = files.writeBinary(dest, body, `download: ${dest} from ${url.hostname}`);
+        l.info({ url: url.toString(), path: saved.path, bytes: saved.bytes }, 'downloaded');
+        return {
+          path: saved.path,
+          content_type: contentType,
+          bytes: saved.bytes,
+          url: url.toString(),
+        };
+      } catch (e) {
+        return { error: 'write_failed', message: errMessage(e), url: url.toString() };
+      }
+    },
+  };
+}
+
+class TooLarge extends Error {
+  constructor(readonly bytes: number) {
+    super('too large');
+  }
+}
+
+function tooLarge(limitMb: number, bytes: number): { error: string; message: string } {
+  return {
+    error: 'too_large',
+    limit_mb: limitMb,
+    message: `that file is ${(bytes / 1024 / 1024).toFixed(1)} MB and the ceiling is ${limitMb} MB — nothing was saved.`,
+  } as { error: string; limit_mb: number; message: string };
+}
+
+/** Read a response body, giving up the moment it passes the cap. */
+async function readCapped(res: Response, limitBytes: number): Promise<Buffer> {
+  const reader = res.body?.getReader();
+  if (!reader) {
+    const whole = Buffer.from(await res.arrayBuffer());
+    if (whole.length > limitBytes) throw new TooLarge(whole.length);
+    return whole;
+  }
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > limitBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new TooLarge(total);
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks);
 }
 
 /**

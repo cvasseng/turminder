@@ -405,6 +405,11 @@ describe('onboarding (plan §3c)', () => {
      * (§19). What a *fresh* conversation renders is the core namespaces
      * (§21.2.1) plus `tools.open`; the rest is one catalog line each until the
      * model asks for it. Grants did not change, only what is drawn.
+     *
+     * `web.download` is in here because it inherits `web.*` deliberately
+     * (App. F.7, §23.6): it writes the store, but so does `files.write`, and
+     * it is bounded by `download_max_mb` and the same URL policy `web.fetch`
+     * runs under.
      */
     expect(tools.sort()).toEqual([
       'deliver.notify',
@@ -426,6 +431,7 @@ describe('onboarding (plan §3c)', () => {
       'time.now',
       'tools.open',
       'weather.forecast',
+      'web.download',
       'web.fetch',
       'web.query',
       'web.search',
