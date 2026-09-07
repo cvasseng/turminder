@@ -612,6 +612,7 @@ export class Service {
       memory: this.memoryAgent,
       projectScope: this.projectScope,
       handlers: () => this.handlers.all(),
+      files: this.files,
       extra: {
         deliver: deliverTools(this.outbox, () => this.app.config.settings.spokenMaxChars),
         files: filesTools({

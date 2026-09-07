@@ -241,6 +241,11 @@ export interface Settings {
   fetchMaxChars: number;
   fetchTimeoutS: number;
   fetchAllowPrivateHosts: boolean;
+  /** Ceiling on one `web.download`, header *and* body (§23.6, App. A). */
+  downloadMaxMb: number;
+  downloadTimeoutS: number;
+  /** Store-relative directory a download lands in when no `path` is given. */
+  downloadDir: string;
   backgroundConcurrency: number;
   daemonBundled: boolean;
   daemonDevice: string;
@@ -317,6 +322,9 @@ export const DEFAULT_SETTINGS: Settings = {
   fetchMaxChars: 20_000,
   fetchTimeoutS: 20,
   fetchAllowPrivateHosts: true,
+  downloadMaxMb: 25,
+  downloadTimeoutS: 60,
+  downloadDir: 'downloads/',
   backgroundConcurrency: 1,
   daemonBundled: false,
   daemonDevice: 'local',
@@ -476,6 +484,11 @@ export function resolveSettings(
   if (raw.web?.fetch_allow_private_hosts !== undefined) {
     s.fetchAllowPrivateHosts = raw.web.fetch_allow_private_hosts;
   }
+  if (raw.web?.download_max_mb !== undefined) s.downloadMaxMb = raw.web.download_max_mb;
+  if (raw.web?.download_timeout_s !== undefined) {
+    s.downloadTimeoutS = raw.web.download_timeout_s;
+  }
+  if (raw.web?.download_dir !== undefined) s.downloadDir = raw.web.download_dir;
   if (raw.scheduler?.background_concurrency !== undefined) {
     s.backgroundConcurrency = raw.scheduler.background_concurrency;
   }

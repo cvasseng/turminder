@@ -67,11 +67,11 @@ export const MANIFESTS: IntegrationManifest[] = [
   ),
   core('deliver', 'Desktop notifications, and approve/deny requests.', ['deliver.notify']),
   core('events', 'Emitting events onto the assistant’s own loop.', ['events.emit']),
-  core('web', 'Web search, reading a page, and pulling named pieces out of one.', [
-    'web.search',
-    'web.fetch',
-    'web.query',
-  ]),
+  core(
+    'web',
+    'Web search, reading a page, pulling named pieces out of one, and saving a document from a URL.',
+    ['web.search', 'web.fetch', 'web.query', 'web.download'],
+  ),
   core('weather', 'Forecasts from MET Norway, and place-name geocoding.', ['weather.forecast']),
   core('time', 'The current date and time, in any timezone.', ['time.now']),
   core('config', 'Reading and writing the assistant’s own configuration.', [

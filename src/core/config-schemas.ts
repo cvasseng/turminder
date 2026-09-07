@@ -90,6 +90,12 @@ export const TurminderYamlSchema = z.strictObject({
       /** Allow fetching LAN/loopback addresses. On by default: this is a
        *  self-hosted assistant and the user's own services live there. */
       fetch_allow_private_hosts: z.boolean().optional(),
+      /** Ceiling on one `web.download` (§23.6, App. A). */
+      download_max_mb: z.number().positive().optional(),
+      /** Longer than `fetch_timeout_s` because a document is not a page. */
+      download_timeout_s: z.number().int().positive().optional(),
+      /** Store-relative default destination for a downloaded file. */
+      download_dir: z.string().min(1).optional(),
     })
     .optional(),
   scheduler: z

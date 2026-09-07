@@ -15,6 +15,7 @@ import { configTools } from './integrations/config.js';
 import { eventsTools } from './integrations/events.js';
 import { memoryTools } from './integrations/memory.js';
 import type { LoadedHandler } from '../exec/handlers.js';
+import type { FileStore } from '../files/store.js';
 import type { ProjectScope } from '../projects/scope.js';
 import { scheduleTools } from './integrations/schedule.js';
 import { webTools } from './integrations/web.js';
@@ -45,6 +46,8 @@ export interface ToolHubDeps {
   /** Live, because the model stack can be rebuilt after `ToolHub` is built
    *  (a models.yaml reload) — a snapshot taken at construction would go stale. */
   router: () => ModelRouter | null;
+  /** The files store, for `web.download` (§23.6, F.5). */
+  files?: FileStore;
   /** Integrations wired by the service rather than built here (deliver). */
   extra?: Record<string, ToolDefinition[]>;
   /**
@@ -100,6 +103,9 @@ export class ToolHub {
         ...webFetchTools({
           settings: deps.config.settings,
           pages,
+          // `web.download` writes the user's store, so it only exists where
+          // there is a store to write to (§23.6).
+          ...(deps.files ? { files: deps.files } : {}),
           ...(deps.fetch ? { fetch: deps.fetch } : {}),
         }),
         ...webQueryTools({
