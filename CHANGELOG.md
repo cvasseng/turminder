@@ -1,5 +1,76 @@
  # Next
 
+ * Fixed: the assistant's own skills and handlers were frozen at the day you
+   installed it. They ship with Turminder and were only ever written out when
+   missing, so every improvement since your first start stayed on our side of
+   the fence — and one handler had been failing to load, silently, since a
+   change renamed a setting inside it, which meant a whole class of
+   notification had simply stopped arriving. Now a shipped file you never
+   touched keeps up with the version we ship, and one you edited is yours and
+   is never overwritten, ever. Files from before this change are left alone
+   unless they are byte-for-byte ours: `turminder doctor` lists what it
+   declined to touch and why, and `turminder assets refresh <path>` (or
+   `--all`) takes our version when you decide to. A skill or handler that
+   fails to load now tells you, as a notification, instead of a line in a log
+   nobody reads.
+
+ * Fixed: a scheduled task could fire perfectly on time and do absolutely
+   nothing. Scheduling something and *handling* it are two halves, and only
+   the first had a voice — so "remind me every morning" was booked, fired,
+   and vanished, while the assistant reported success. Now the reply to
+   scheduling something says which of your handlers will run it, and warns you
+   in the same breath when none will. Plain reminders need no setup at all any
+   more: they arrive as a notification, and say so when they are late. And a
+   scheduled job can claim its own kind of event, so one purpose-built handler
+   owns it outright instead of competing with every other timer.
+
+ * It can read a document that lives at a web address. Give it a link to a PDF
+   and it saves the file into your workspace and reads it from there — so the
+   invoice you asked about is still there next month to print, index or search.
+   Fixed at the same time: a Word document at a URL used to be fetched as if it
+   were a web page, which handed the assistant several megabytes of gibberish
+   and no way to know it was gibberish. Anything that is not text is now
+   refused with a note saying to download it first.
+
+ * Fixed: when a connected server went away — a VPN dropping, a laptop changing
+   networks — the assistant kept insisting it was connected, every attempt to
+   use it failed with a shrug, and the only cure was restarting the service.
+   Fixing the actual fault did nothing. It now knows the difference between a
+   server that is there and one that merely used to be: it says which is down
+   and what happened, tells you when it will try again, and retries by itself
+   in the background. Fix the problem, ask the same question again, and it
+   answers — no restart.
+
+ * It can print and scan. Point it at a printer or scanner — it looks for them
+   on the network itself, so usually you pick yours off a list rather than
+   reading an IP address off a display — and then "print the lease" and "scan
+   this" work. It talks to the machine directly, with no driver and no print
+   queue in between, and it knows what each one can actually do: a printer that
+   cannot read PDF gets the pages converted on the way out, and one that has no
+   feeder says so instead of waiting. Several printers are fine; each can be
+   switched off while it is unplugged, moved to a new address, or removed. Scans
+   land in your workspace as ordinary files.
+
+ * Printing renders first. Ask it to print a note and it turns the note into a
+   proper document before sending it, rather than handing the printer raw
+   markdown and getting a page of hashes and asterisks back. Photographs and
+   PDFs print as they are.
+
+ * It knows the printer and the scanner are the same machine. Asking for a scan
+   while a page is printing used to abort that page mid-sheet — the printer
+   allows it without complaint — so it now says what the machine is busy with
+   and waits to be asked again.
+
+ * A page scanned at the machine's own panel can arrive too: point the
+   printer's "scan to network folder" at the scan inbox and the assistant
+   notices it and tells you. It will not pretend to have read it — there is no
+   text extraction for scans yet, and it says so rather than guessing.
+
+ * Printers use certificates they signed themselves, so the assistant records
+   the one each machine presented when you added it and checks it on every job
+   after. A device that answers with a different certificate stops the job and
+   says which is which, instead of quietly trusting whoever picked up.
+
  * A Stop button. While the assistant is answering, a stop button sits beside
    Send (Esc does the same); pressing it ends the answer mid-word. What it had
    already said stays in the conversation — you watched it stream, it is yours

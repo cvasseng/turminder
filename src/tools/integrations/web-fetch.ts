@@ -485,19 +485,23 @@ function downloadTool(files: FileStore, deps: WebFetchDeps): ToolDefinition {
         return tooLarge(settings.downloadMaxMb, declared);
       }
 
-      let body: Buffer;
+      let read: CappedRead;
       try {
-        body = await readCapped(res, limitBytes);
+        read = await readCapped(res, limitBytes);
       } catch (e) {
-        if (e instanceof TooLarge) return tooLarge(settings.downloadMaxMb, e.bytes);
         return { error: 'fetch_failed', message: errMessage(e), url: url.toString() };
       }
+      if ('too_large' in read) return tooLarge(settings.downloadMaxMb, read.bytes);
 
       // Nothing has been written yet, so an over-size body leaves no partial
       // file behind — the read is capped before the store ever sees it.
       const dest = args.path ?? downloadPath(url, contentType, settings.downloadDir);
       try {
-        const saved = files.writeBinary(dest, body, `download: ${dest} from ${url.hostname}`);
+        const saved = files.writeBinary(
+          dest,
+          read.body,
+          `download: ${dest} from ${url.hostname}`,
+        );
         l.info({ url: url.toString(), path: saved.path, bytes: saved.bytes }, 'downloaded');
         return {
           path: saved.path,
@@ -512,12 +516,6 @@ function downloadTool(files: FileStore, deps: WebFetchDeps): ToolDefinition {
   };
 }
 
-class TooLarge extends Error {
-  constructor(readonly bytes: number) {
-    super('too large');
-  }
-}
-
 function tooLarge(limitMb: number, bytes: number): { error: string; message: string } {
   return {
     error: 'too_large',
@@ -526,13 +524,17 @@ function tooLarge(limitMb: number, bytes: number): { error: string; message: str
   } as { error: string; limit_mb: number; message: string };
 }
 
+/** Over the cap is an outcome, not an exception — same rule as a tool result. */
+type CappedRead = { body: Buffer } | { too_large: true; bytes: number };
+
 /** Read a response body, giving up the moment it passes the cap. */
-async function readCapped(res: Response, limitBytes: number): Promise<Buffer> {
+async function readCapped(res: Response, limitBytes: number): Promise<CappedRead> {
   const reader = res.body?.getReader();
   if (!reader) {
     const whole = Buffer.from(await res.arrayBuffer());
-    if (whole.length > limitBytes) throw new TooLarge(whole.length);
-    return whole;
+    return whole.length > limitBytes
+      ? { too_large: true, bytes: whole.length }
+      : { body: whole };
   }
   const chunks: Buffer[] = [];
   let total = 0;
@@ -541,12 +543,14 @@ async function readCapped(res: Response, limitBytes: number): Promise<Buffer> {
     if (done) break;
     total += value.length;
     if (total > limitBytes) {
+      // Stop pulling immediately: the point of the cap is that a lying server
+      // never gets to send the rest of it.
       await reader.cancel().catch(() => undefined);
-      throw new TooLarge(total);
+      return { too_large: true, bytes: total };
     }
     chunks.push(Buffer.from(value));
   }
-  return Buffer.concat(chunks);
+  return { body: Buffer.concat(chunks) };
 }
 
 /**
