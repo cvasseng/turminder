@@ -121,7 +121,7 @@ export function skillTools(loader: SkillLoader): ToolDefinition[] {
     {
       name: 'skills.fetch',
       description:
-        'Fetch the full text of a skill by name. Do this when a skill listed in your system prompt looks relevant to the task.',
+        'Fetch the full text of a skill by name. Do this when a skill listed in your system prompt looks relevant to the task. Skills are data-dir files at skills/<name>.md — config.read and config.write reach them, files.* does not.',
       tier: 'ro',
       args: z.object({ name: z.string().min(1) }),
       async execute(args: { name: string }) {

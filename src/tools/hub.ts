@@ -14,6 +14,7 @@ import { McpConnection } from './mcp/connect.js';
 import { configTools } from './integrations/config.js';
 import { eventsTools } from './integrations/events.js';
 import { memoryTools } from './integrations/memory.js';
+import type { LoadedHandler } from '../exec/handlers.js';
 import type { ProjectScope } from '../projects/scope.js';
 import { scheduleTools } from './integrations/schedule.js';
 import { webTools } from './integrations/web.js';
@@ -46,6 +47,13 @@ export interface ToolHubDeps {
   router: () => ModelRouter | null;
   /** Integrations wired by the service rather than built here (deliver). */
   extra?: Record<string, ToolDefinition[]>;
+  /**
+   * The handlers on disk, for `schedule.*`'s `consumers` (§6.2). A function
+   * because the loader is built beside the hub and its cache is invalidated on
+   * every reload; absent in the few callers that build a hub with no handler
+   * layer at all, where nothing consumes a schedule by definition.
+   */
+  handlers?: () => LoadedHandler[];
   /** Injected in tests so web.search never touches the network. */
   fetch?: typeof globalThis.fetch;
 }
@@ -102,7 +110,14 @@ export class ToolHub {
       ],
       skills: skillTools(deps.skills),
       usage: usageTools({ trace: deps.repos.trace }),
-      schedule: scheduleTools(deps.repos, deps.config.settings.scheduleGraceS),
+      schedule: scheduleTools({
+        repos: deps.repos,
+        graceS: deps.config.settings.scheduleGraceS,
+        // Live, and never a snapshot: `consumers` is a fact about the files on
+        // disk right now (§6.2), so a handler written during the conversation
+        // counts in the very next `schedule.list`.
+        handlers: () => deps.handlers?.() ?? [],
+      }),
       time: timeTools({ config: deps.config }),
       weather: weatherTools({
         config: deps.config,

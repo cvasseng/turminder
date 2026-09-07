@@ -51,6 +51,64 @@ account of what you did.
   so you learn not to bother next time. Only a human editing the file by hand
   sets these directly.
 
+## A schedule needs a consumer
+
+The scheduler emits; it never acts. A `schedules` row is a promise to put an
+event on the rail at a time, and nothing more — what happens next is a
+handler's job or nobody's. This is not theoretical: a daily digest was
+scheduled, fired punctually, matched no handler, and the user was told "first
+run: tomorrow morning" by an assistant with no way to know better.
+
+So `schedule.create` and `schedule.list` both tell you. **`consumers: []` is
+the signal.** It comes with a `warning` saying nothing will run this. Read it
+and offer to write the handler — do not report success and move on.
+
+**Give purpose-built scheduled work its own `event_type`.** The default is
+`timer.fired`, which the shipped `scheduled-task` handler picks up and turns
+into a plain notification. That is right for "remind me on Friday" and wrong
+for anything that has to *do* something, because every other `timer.fired`
+schedule competes for the same handler. A named type makes ownership
+structural rather than a judgement call: nothing else matches it, and the
+handler that does is the only thing that runs.
+
+Worked example — a morning digest:
+
+1. `schedule.create` with `event_type: "digest.due"`, `fire_at` the next
+   07:00 local, `rrule: "FREQ=DAILY"`. The reply comes back
+   `consumers: []` with a warning, because nothing handles that type yet.
+2. Write `handlers/morning-digest.md` matching it, granting only the tools
+   the digest actually reads:
+
+```markdown
+---
+name: morning-digest
+description: Use when the daily digest is due — assemble and deliver the morning briefing. Not for anything else.
+match:
+  types: ["digest.due"]
+tools: [skills.fetch, weather.forecast, calendar.list_events, web.fetch, deliver.notify]
+budgets:
+  max_turns: 12
+---
+
+The daily digest is due. Fetch the `morning-digest` skill and follow it.
+
+`late_by_s` in the payload says how far behind 07:00 this fire is. If it is
+not zero, open with that — "this is yesterday's" beats pretending it is
+morning. Finish with one `deliver.notify`.
+```
+
+3. `schedule.list` now shows `consumers: ["morning-digest"]`. That is the
+   check: an owned schedule names its owner.
+
+Scope `tools:` to that one job. The grant is what a human reads to find out
+what a scheduled behaviour may do while nobody is watching, and it is the only
+place they can read it — so a digest that reads a calendar lists
+`calendar.list_events` and not `calendar.*`.
+
+Reserved namespaces are refused (`system.`, `chat.`, `watch.`, `file.`,
+`email.`, `embed.`, `page.`, `integration.`): those belong to events the
+system itself emits, and a schedule may not impersonate one.
+
 ## Before writing one
 
 Ask for what you cannot guess: which events should trigger it, what it should
@@ -64,4 +122,5 @@ replaces the file. To retire a behaviour without deleting it, add
 `enabled: false` to the frontmatter. Every write is a git commit, so nothing
 is lost either way; use the commit message to say why.
 
-*(Shipped with Turminder. Edit it freely — it is only re-created when missing.)*
+*(Shipped with Turminder. Edit it freely — an edited copy is yours and is
+never overwritten; an untouched one tracks the version Turminder ships.)*

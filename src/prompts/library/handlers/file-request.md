@@ -47,5 +47,6 @@ Two things to remember:
 - **This can run twice** on the same request after a retry. Check whether the
   answer is already in the file before adding it again.
 
-*(Shipped with Turminder. Edit it freely — it is only re-created when missing.
+*(Shipped with Turminder. Edit it freely — an edited copy is yours and is
+never overwritten; an untouched one tracks the version Turminder ships.
 Set `enabled: false` to switch off marker handling entirely.)*

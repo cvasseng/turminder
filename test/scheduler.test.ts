@@ -446,3 +446,218 @@ describe('schedule tools (App. F.2)', () => {
     expect(run?.status).toBe('done');
   });
 });
+
+describe('a schedule needs a consumer (§6.2, F.2)', () => {
+  const dispatch = async (harness: ServiceHarness, name: string, args: unknown) => {
+    const { GrantedDispatcher } = await import('../src/tools/dispatcher.js');
+    const d = new GrantedDispatcher(
+      harness.service.tools.handles(),
+      { tools: ['schedule.*'] },
+      { runId: null, eventId: null },
+    );
+    return d.dispatch({ toolCallId: '1', name, args });
+  };
+
+  const writeHandler = async (harness: ServiceHarness, name: string, frontmatter: string) => {
+    const { write } = await import('./helpers.js');
+    const path = await import('node:path');
+    write(
+      path.join(harness.dataDir, 'handlers', `${name}.md`),
+      `---\nname: ${name}\n${frontmatter}---\n\nDo the thing.\n`,
+    );
+    harness.service.handlers.reload();
+  };
+
+  it('names the handlers that will run it', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    await writeHandler(
+      h,
+      'reminder',
+      'description: Use for reminders that have come due.\nmatch:\n  types: ["timer.fired"]\n',
+    );
+
+    const created = await dispatch(h, 'schedule.create', {
+      fire_at: isoPlusSeconds(3600),
+      note: 'call the dentist',
+    });
+    const out = created.output as any;
+    expect(out.event_type).toBe('timer.fired');
+    expect(out.consumers).toContain('reminder');
+    expect(out.warning).toBeUndefined();
+
+    const listed = (await dispatch(h, 'schedule.list', {})).output as any;
+    expect(listed.schedules[0].consumers).toContain('reminder');
+    expect(listed.schedules[0].event_type).toBe('timer.fired');
+  });
+
+  it('warns, in the same call, when nothing will run it', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    // Nothing in a fresh data dir matches a type nobody has claimed.
+    const created = await dispatch(h, 'schedule.create', {
+      fire_at: isoPlusSeconds(3600),
+      note: 'the morning digest',
+      event_type: 'digest.due',
+    });
+    const out = created.output as any;
+    expect(out.event_type).toBe('digest.due');
+    expect(out.consumers).toEqual([]);
+    expect(out.warning).toMatch(/nothing will run/i);
+    // The row still exists: the warning is information, not a refusal.
+    expect(h.service.repos.schedules.list()).toHaveLength(1);
+  });
+
+  it('computes consumers against the custom type, not always timer.fired', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    await writeHandler(
+      h,
+      'morning-digest',
+      'description: Use when the daily digest is due.\nmatch:\n  types: ["digest.due"]\n',
+    );
+
+    const digest = (
+      await dispatch(h, 'schedule.create', {
+        fire_at: isoPlusSeconds(3600),
+        note: 'digest',
+        event_type: 'digest.due',
+      })
+    ).output as any;
+    expect(digest.consumers).toEqual(['morning-digest']);
+
+    // ...and the same handler is *not* offered for a plain timer.
+    const plain = (
+      await dispatch(h, 'schedule.create', {
+        fire_at: isoPlusSeconds(3600),
+        note: 'bins',
+      })
+    ).output as any;
+    expect(plain.consumers).not.toContain('morning-digest');
+  });
+
+  it('refuses a reserved namespace, and writes nothing', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    for (const prefix of [
+      'system.',
+      'chat.',
+      'watch.',
+      'file.',
+      'email.',
+      'embed.',
+      'page.',
+      'integration.',
+    ]) {
+      const refused = (
+        await dispatch(h, 'schedule.create', {
+          fire_at: isoPlusSeconds(3600),
+          note: 'sneaky',
+          event_type: `${prefix}mine`,
+        })
+      ).output as any;
+      expect(refused.error).toBe('reserved_event_type');
+      expect(refused.prefix).toBe(prefix);
+    }
+    expect(h.service.repos.schedules.list()).toEqual([]);
+  });
+
+  it('refuses a malformed event type, and writes nothing', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    for (const bad of ['Digest.Due', 'digest', 'digest.', '.due', 'digest..due', '9.due']) {
+      const refused = (
+        await dispatch(h, 'schedule.create', {
+          fire_at: isoPlusSeconds(3600),
+          note: 'sneaky',
+          event_type: bad,
+        })
+      ).output as any;
+      expect(refused.error).toBe('invalid_arguments');
+    }
+    expect(h.service.repos.schedules.list()).toEqual([]);
+  });
+
+  /**
+   * The test that would have caught #2 and did not exist: a schedule created
+   * through the tool, fired by the loop, reaching a delivery. Every layer was
+   * working the day this broke; only the whole rope was untested.
+   */
+  it('fires a plain reminder all the way to a notification, with no handler authored', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    // The shipped `scheduled-task` handler is the only consumer, and it is
+    // there because installShippedAssets put it there.
+    const created = (
+      await dispatch(h, 'schedule.create', {
+        fire_at: isoPlusSeconds(-1),
+        note: 'take the bins out',
+      })
+    ).output as any;
+    expect(created.consumers).toContain('scheduled-task');
+    expect(created.warning).toBeUndefined();
+
+    let notified = false;
+    h.fake.always((req) => {
+      if (req.body.response_format) {
+        return {
+          text: JSON.stringify({
+            summary: 'a reminder came due: take the bins out',
+            verdicts: [
+              { handler: 'scheduled-task', matched: true, reason: 'a plain reminder' },
+            ],
+          }),
+        };
+      }
+      if (notified) return { text: 'Reminded.' };
+      notified = true;
+      return {
+        toolCalls: [
+          {
+            name: 'deliver.notify',
+            args: { title: 'Take the bins out', body: 'You asked to be reminded.' },
+          },
+        ],
+      };
+    });
+
+    expect(h.service.scheduler.tick()).toBe(1);
+    await h.service.queue.drain();
+
+    const fired = h.service.repos.events
+      .recent({ limit: 10 })
+      .find((e) => e.type === 'timer.fired')!;
+    expect(fired.status).toBe('done');
+    const run = h.service.repos.runs.forEvent(fired.id).find((r) => r.kind === 'handler');
+    expect(run?.handler_name).toBe('scheduled-task');
+    const delivered = h.service.repos.deliveries.pending();
+    expect(delivered.map((d) => (d.payload as any).title)).toContain('Take the bins out');
+    // The before-shot for this test had zero runs and zero deliveries.
+    expect(delivered.length).toBeGreaterThan(0);
+  });
+
+  it('offers a custom type to its own handler only', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    await writeHandler(
+      h,
+      'morning-digest',
+      'description: Use when the daily digest is due.\nmatch:\n  types: ["digest.due"]\n',
+    );
+    h.service.repos.schedules.create({
+      fireAt: isoPlusSeconds(-1),
+      note: 'digest',
+      eventType: 'digest.due',
+    });
+
+    const offered: string[][] = [];
+    h.fake.always((req) => {
+      if (!req.body.response_format) return { text: 'done' };
+      const prompt = JSON.stringify(req.body.messages);
+      offered.push(['morning-digest', 'scheduled-task'].filter((n) => prompt.includes(n)));
+      return {
+        text: JSON.stringify({ summary: 'digest due', verdicts: [] }),
+      };
+    });
+
+    h.service.scheduler.tick();
+    await h.service.queue.drain();
+
+    // Structural, before the gate is consulted: `scheduled-task` matches
+    // `timer.fired` only, so a custom type never reaches it (§6.2).
+    expect(offered[0]).toEqual(['morning-digest']);
+  });
+});

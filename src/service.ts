@@ -611,6 +611,7 @@ export class Service {
       router: () => this.models?.router ?? null,
       memory: this.memoryAgent,
       projectScope: this.projectScope,
+      handlers: () => this.handlers.all(),
       extra: {
         deliver: deliverTools(this.outbox, () => this.app.config.settings.spokenMaxChars),
         files: filesTools({

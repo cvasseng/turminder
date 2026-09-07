@@ -108,4 +108,5 @@ paying, and a number you mishear becomes a number they get billed against.
   `tools.open` (or just call the tool, which opens it for you). `unknown_tool`
   means ungranted; a name missing from your tool list usually just means closed.
 
-*(Shipped with Turminder. Edit it freely — it is only re-created when missing.)*
+*(Shipped with Turminder. Edit it freely — an edited copy is yours and is
+never overwritten; an untouched one tracks the version Turminder ships.)*
