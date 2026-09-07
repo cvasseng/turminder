@@ -31,7 +31,7 @@ is no tagged release, only a rolling `nightly` prerelease built from `main`.
 The context rules are what make a local model workable: 30,000 tokens per
 run, tool results capped at 4,000 characters where they enter the transcript,
 and 8 tool namespaces in the prompt until the model asks for more. The suite
-is 59 test files (`npm test`), three of which exist to keep those numbers
+is 67 test files (`npm test`), three of which exist to keep those numbers
 from drifting.
 
 ## Run it
@@ -65,12 +65,14 @@ pairing](docs/running.md).
 - Memory as markdown files with RAG retrieval, every change a git commit.
 - A file workspace, optionally your Obsidian vault, where `@turminder do X` becomes an event.
 - Schedules and reminders as desktop notifications, with approve/deny buttons on gated actions.
+- Booking a schedule says which handler will run it, and warns you when nothing will.
 - Schedules that know the laptop was shut: a late reminder still arrives, a stale digest does not.
 - Watchers that poll in plain code and wake the model only when the answer changes.
-- Asana, Google Calendar, weather, web search and page fetch built in, anything else over MCP.
+- Asana, Google Calendar, weather, web search, page fetch and file download built in, anything else over MCP.
+- An MCP server that drops is reported as down and reconnected on the next call, with no restart.
 - Credentials go to your OS keychain or a GPG file; the model only ever sees `${secret:KEY}`.
 - Embeds: sandboxed charts, dashboards and slides whose numbers come from frozen tool calls.
-- PDF and .docx reading by outline, and PDF export of any embed or markdown file.
+- PDF and .docx reading by outline, from the workspace or from a web address, and PDF export of any embed or markdown file.
 - Projects: islands of files, memories and past chats that reach a prompt only while loaded.
 - Voice: send it a recording, hear the answer back, and read what it heard as an ordinary conversation. Any OpenAI-audio-compatible transcriber and synthesiser, connected by asking, with the language and the speaking voice chosen from a form you can hear before you pick.
 - Clients: a Linux desktop app, a browser extension, and phone pairing you approve from a device you trust.

@@ -18,6 +18,19 @@ author in chat: a description the LLM ingress matches events against, a body
 that says what to do, and frontmatter listing the tools the handler may use.
 Nothing outside that list is callable during the run.
 
+Some handlers and skills ship with Turminder and are installed into your data
+directory at every start. One you have edited is yours and is never
+overwritten; one you never touched tracks the version we ship, so improvements
+reach an install that is already running. The difference is decided by a hash
+of what we wrote, recorded in the data directory, which is a record of
+authorship and not a guess about intent. A file installed before that record
+existed is only adopted when it still matches ours byte for byte — the rest
+are reported by `turminder doctor`, `turminder skills list` and
+`turminder handlers list`, and `turminder assets refresh <path>` (or `--all`)
+takes our version when you say so. A handler or skill that fails to load
+raises an event, so it becomes a notification rather than a log line nobody
+reads.
+
 ## Memory
 
 Markdown memory files with RAG retrieval, distilled from conversations, five
@@ -57,6 +70,15 @@ rather than posted in the afternoon as though it were morning. A week away
 produces one catch-up and one note saying how many occurrences went by. A daily
 time stays the time you asked for when the clocks change.
 
+The scheduler emits and never acts, so a schedule is only half a promise: the
+other half is a handler. Booking one therefore comes back with the handlers
+that will run it, and a warning in the same reply when none will — worked out
+from the handler files on disk, with no model call. A plain reminder needs no
+handler at all: one ships, and it delivers a notification saying what you
+asked to be told and how late it is. Anything richer gets its own kind of
+event and its own handler file, so nothing else competes for it and the tools
+it may use while nobody is watching are written down in one place you can read.
+
 ## Watchers
 
 "Track this package." A status is checked on a timer by plain code, and the
@@ -67,9 +89,20 @@ five minutes, and five consecutive failures raise an event of their own.
 ## Integrations
 
 Asana, Google Calendar, weather from MET/yr.no, time, web search through
-SearXNG, and page fetching are built in. Anything else connects over MCP,
-installed through a form you submit in chat, with credentials typed into a
-field that writes straight to the secret store.
+SearXNG, page fetching and file download are built in. Anything else connects
+over MCP, installed through a form you submit in chat, with credentials typed
+into a field that writes straight to the secret store.
+
+An external MCP server can go away — a VPN route changes, a laptop moves
+network, a child process exits. Liveness is observed rather than assumed, so a
+server that is down is reported as down, with the error that took it, rather
+than reported as healthy while every call fails. Its tools stay listed on
+purpose: reaching for one is what triggers the reconnect, and the call comes
+back naming the server and when it will next be tried instead of vanishing.
+Fix the fault, ask the same question again, and it answers. There is also a
+capped retry in the background, so a fault fixed outside the conversation is
+picked up without one.
+
 
 ## Embeds
 
@@ -85,6 +118,13 @@ PDFs and Word documents are read outline first, then the pages or sections
 that matter; a tracked-changes `.docx` reads as its final text. Any embed or
 markdown file exports to PDF through headless chromium, and the PDF is the
 exact page you previewed.
+
+A document at a web address takes one extra hop rather than a second reader:
+it is downloaded into your workspace and then read from there, so the invoice
+you asked a question about is still there next month to print, index or find
+again. Page fetching only reads text and the text-shaped structured formats;
+anything else is refused with a note naming the download step, which is what
+stops a Word file arriving as several megabytes of decoded zip container.
 
 ## Projects
 
