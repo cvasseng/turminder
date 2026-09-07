@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadMarkdownFile } from '../core/config.js';
 import { HandlerFrontmatterSchema, type HandlerFrontmatter } from '../core/config-schemas.js';
-import type { DataHome } from '../core/datadir.js';
+import type { AssetInvalidReporter, DataHome } from '../core/datadir.js';
 import { globMatchAny } from '../core/glob.js';
 import { log } from '../core/logger.js';
 import type { EventRecord } from '../db/repos/events.js';
@@ -32,8 +32,17 @@ export interface HandlerLoadError {
 export class HandlerLoader {
   private cache: LoadedHandler[] | null = null;
   private loadErrors: HandlerLoadError[] = [];
+  /** Files already reported this process, so a reload storm stays quiet. */
+  private readonly reported = new Set<string>();
 
-  constructor(private readonly home: DataHome) {}
+  constructor(
+    private readonly home: DataHome,
+    /**
+     * Where a load failure goes when there is an event loop to put it on
+     * (§12.3). Absent for the CLI loaders, which print the errors themselves.
+     */
+    private readonly onInvalid?: AssetInvalidReporter,
+  ) {}
 
   reload(): void {
     this.cache = null;
@@ -76,6 +85,7 @@ export class HandlerLoader {
           const message = detail ? `${(e as Error).message} (${detail})` : (e as Error).message;
           this.loadErrors.push({ file: rel, message });
           l.error({ file: rel, err: message }, 'handler failed to load');
+          this.report(rel, message);
         }
       }
     }
@@ -86,6 +96,24 @@ export class HandlerLoader {
   errors(): HandlerLoadError[] {
     this.all();
     return [...this.loadErrors];
+  }
+
+  /**
+   * A broken handler is an event, not a log line (§12.3). The intake dedupes
+   * on the App. B key, so this is belt-and-braces against the *cost* of a
+   * reload storm rather than against duplicate events.
+   */
+  private report(file: string, message: string): void {
+    if (!this.onInvalid) return;
+    const key = `${file}\u0000${message}`;
+    if (this.reported.has(key)) return;
+    this.reported.add(key);
+    this.onInvalid({
+      category: 'handlers',
+      file,
+      message,
+      shipped: this.home.shippedHashes()[file] !== undefined,
+    });
   }
 
   get(name: string): LoadedHandler | null {

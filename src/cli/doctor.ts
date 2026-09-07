@@ -1,6 +1,7 @@
 import type { Command } from 'commander';
 import { bootstrap } from '../app.js';
 import { dbVersion } from '../db/index.js';
+import { driftedShippedAssets } from '../prompts/shipped.js';
 import { globalOpts } from './common.js';
 
 export function registerDoctorCommand(program: Command): void {
@@ -33,6 +34,13 @@ export function registerDoctorCommand(program: Command): void {
           .filter(([, r]) => r.active)
           .map(([name]) => name),
         mcp_servers: app.config.mcp().servers.map((server) => server.name),
+        // What Turminder keeps current, and what it declined to touch (§12.3).
+        // `edited` is permanent by decree; `unknown` predates the hash map and
+        // is resolved by `turminder assets refresh`, never by a guess.
+        shipped_assets: {
+          tracked: Object.keys(manifest.shipped).length,
+          differs: driftedShippedAssets(app.home),
+        },
         // Tool access the user approved at runtime, on top of chat.tools (§19).
         granted_at_runtime: grants.map((g) => `${g.pattern} (${g.level})`),
         // Where secrets rest, and whether that backend is answering (§27.1).

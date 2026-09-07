@@ -3,7 +3,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { loadMarkdownFile } from '../core/config.js';
 import { SkillFrontmatterSchema } from '../core/config-schemas.js';
-import type { DataHome } from '../core/datadir.js';
+import type { AssetInvalidReporter, DataHome } from '../core/datadir.js';
 import { log } from '../core/logger.js';
 import type { ToolDefinition } from './types.js';
 
@@ -29,8 +29,17 @@ export interface SkillLoadError {
 export class SkillLoader {
   private cache: Skill[] | null = null;
   private loadErrors: SkillLoadError[] = [];
+  /** Files already reported this process, so a reload storm stays quiet. */
+  private readonly reported = new Set<string>();
 
-  constructor(private readonly home: DataHome) {}
+  constructor(
+    private readonly home: DataHome,
+    /**
+     * Where a load failure goes when there is an event loop to put it on
+     * (§12.3). Absent for the CLI loader, which prints the errors itself.
+     */
+    private readonly onInvalid?: AssetInvalidReporter,
+  ) {}
 
   reload(): void {
     this.cache = null;
@@ -68,6 +77,7 @@ export class SkillLoader {
           const message = detail ? `${(e as Error).message} (${detail})` : (e as Error).message;
           this.loadErrors.push({ file: `skills/${entry}`, message });
           l.warn({ file: `skills/${entry}`, err: message }, 'skipping bad skill');
+          this.report(`skills/${entry}`, message);
         }
       }
     }
@@ -79,6 +89,20 @@ export class SkillLoader {
   errors(): SkillLoadError[] {
     this.all();
     return [...this.loadErrors];
+  }
+
+  /** A broken skill is an event, not a log line (§12.3) — see HandlerLoader. */
+  private report(file: string, message: string): void {
+    if (!this.onInvalid) return;
+    const key = `${file}\u0000${message}`;
+    if (this.reported.has(key)) return;
+    this.reported.add(key);
+    this.onInvalid({
+      category: 'skills',
+      file,
+      message,
+      shipped: this.home.shippedHashes()[file] !== undefined,
+    });
   }
 
   /** Description-only roster for the system prompt (App. H.1 step 3). */
