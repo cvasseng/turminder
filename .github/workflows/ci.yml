@@ -111,7 +111,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Webview and tray libraries
+      # Webview, tray, keyring — and, since the voice tier landed (§28.6),
+      # ALSA. `cpal` locates `alsa-sys` through pkg-config on Linux, so an
+      # absent `alsa.pc` panics that crate's build script before a line of
+      # this repository compiles; the failure names pkg-config and reads like
+      # a missing tool rather than a missing package. `app/shell.nix` grew
+      # `alsa-lib` in the commit that added the crates and this list did not,
+      # which is the whole bug — a nix box and a runner get their system
+      # libraries from different files, and both have to move together.
+      - name: Webview, tray and audio libraries
         if: startsWith(matrix.runner, 'ubuntu')
         run: |
           sudo apt-get update
@@ -123,6 +131,7 @@ jobs:
             libsoup-3.0-dev \
             libxdo-dev \
             libdbus-1-dev \
+            libasound2-dev \
             libssl-dev \
             build-essential \
             patchelf \

@@ -127,6 +127,7 @@ export default tseslint.config(
         previewKind: 'readonly',
         TOKEN_KEY: 'readonly',
         greetingLine: 'readonly',
+        tokenVerdict: 'readonly',
       },
       sourceType: 'script',
     },
@@ -164,14 +165,15 @@ export default tseslint.config(
     // defined in ui/preview.js and `greeting*` in ui/greeting.js, each called
     // from ui/app.js — which in a no-build UI is what "exported" means.
     // `greetingFor` is reached only through `greetingLine`, and is named here
-    // so the boundary test can call it directly.
+    // so the boundary test can call it directly. `tokenVerdict` is
+    // ui/verdict.js's, called from the reconnect path in ui/app.js.
     files: ['ui/**/*.js'],
     rules: {
       '@typescript-eslint/no-unused-vars': [
         'error',
         {
           argsIgnorePattern: '^_',
-          varsIgnorePattern: '^(_|previewKind$|greetingFor$|greetingLine$)',
+          varsIgnorePattern: '^(_|previewKind$|greetingFor$|greetingLine$|tokenVerdict$)',
         },
       ],
     },

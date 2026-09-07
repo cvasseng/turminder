@@ -5,6 +5,7 @@ import type { Config } from '../../core/config.js';
 import type { DataHome } from '../../core/datadir.js';
 import type { IntegrationRecord } from '../../core/config-schemas.js';
 import type { MetaRepo } from '../../db/repos/meta.js';
+import type { FileStore } from '../../files/store.js';
 import type { EventIntake } from '../../ingress/intake.js';
 import type { ToolDefinition } from '../types.js';
 import { PollingSource, type SourceDeps } from '../../ingress/source.js';
@@ -13,6 +14,8 @@ import { CalendarSource } from './google/calendar-source.js';
 import { AsanaClient } from './asana/client.js';
 import { AsanaInboxSource, DEFAULT_ASANA_CONFIG } from './asana/inbox-source.js';
 import { asanaTools } from './asana/tools.js';
+import { printTools } from './print/tools.js';
+import { PrintScanSettingsSchema } from './print/devices.js';
 import { manifestFor, namespaceOf } from './registry.js';
 
 const l = log('source');
@@ -31,6 +34,13 @@ export const AsanaSettingsSchema = z.strictObject({
   max_per_poll: z.coerce.number().int().min(1).max(200).default(25),
   watch_daily: z.boolean().default(false),
 });
+
+/**
+ * The print-and-scan record is a device *list* (§34.1, G.12) rather than the
+ * flat settings its siblings have — which is what "support several printers"
+ * means once it stops being a sentence and becomes a file.
+ */
+export { PrintScanSettingsSchema };
 
 export const CalendarSettingsSchema = z.strictObject({
   poll_interval_s: z.coerce.number().int().min(30).default(300),
@@ -65,6 +75,8 @@ export interface SourceStackDeps {
   config: Config;
   intake: EventIntake;
   meta: MetaRepo;
+  /** Where a scan lands (§34.5) — the only integration here that writes files. */
+  files: FileStore;
   fetch?: typeof globalThis.fetch;
 }
 
@@ -96,6 +108,11 @@ export interface SourceStack {
   /** Tools to hand the hub, keyed by namespace. */
   tools: Record<string, ToolDefinition[]>;
   status: IntegrationStatus[];
+}
+
+/** The activation record as it stands *now*, not as it stood at construction. */
+function recordOf(deps: SourceStackDeps, name: string): IntegrationRecord | undefined {
+  return deps.config.integrations().integrations[name];
 }
 
 /**
@@ -191,6 +208,44 @@ export function createSourceStack(deps: SourceStackDeps): SourceStack {
     asanaRuntime.detail = 'not activated — "set up asana" in chat';
   }
   runtimes.push(asanaRuntime);
+
+  /* ── Print and scan ───────────────────────────────────────────────────── */
+  const printRecord = records['print-scan'];
+  const printActive = printRecord?.active === true;
+  const printRuntime: IntegrationRuntime = {
+    name: 'print-scan',
+    namespace: 'print',
+    active: printActive,
+    tools: [],
+    source: null,
+  };
+  if (printActive) {
+    try {
+      const cfg = settings(PrintScanSettingsSchema, printRecord, 'print-scan');
+      printRuntime.tools = printTools({
+        // Read per call, not captured: `setup.printers` can add a device in
+        // the middle of the conversation that is about to use it.
+        settings: () =>
+          settings(PrintScanSettingsSchema, recordOf(deps, 'print-scan'), 'print-scan'),
+        files: deps.files,
+        meta: deps.meta,
+        systools: deps.config.systools,
+        secret: (key) => deps.config.secrets[key],
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+      });
+      const enabled = cfg.devices.filter((d) => d.enabled);
+      printRuntime.detail = enabled.length
+        ? `${enabled.length} device${enabled.length === 1 ? '' : 's'}: ${enabled.map((d) => d.name).join(', ')}`
+        : 'activated, but every device is switched off — "set up my printer" adds one';
+    } catch (e) {
+      l.warn({ err: errMessage(e) }, 'print-scan is active but unusable');
+      printRuntime.active = false;
+      printRuntime.detail = errMessage(e);
+    }
+  } else {
+    printRuntime.detail = 'not activated — "set up my printer" in chat';
+  }
+  runtimes.push(printRuntime);
 
   const tools: Record<string, ToolDefinition[]> = {};
   const sources: PollingSource[] = [];

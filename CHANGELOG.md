@@ -389,6 +389,15 @@
    the assistant remembers reads as headings rather than as the memories
    themselves.
 
+ * Chats stop forgetting which device they are. A phone waking from sleep, or a
+   restart of the service, could make the chat page throw away its connect
+   token and send you back to pairing — it had no way to see why the connection
+   failed, so it blamed the token and deleted it. It now asks the service
+   whether the token is actually the problem, and only a straight refusal
+   clears it; anything else is treated as what it usually was, a connection
+   that will come back on its own. Devices you had to re-pair for this reason
+   are still listed, and can be cleaned up with `turminder token revoke`.
+
  # 1.0.0
 
  Initial public release.

@@ -112,7 +112,7 @@ describe('the systool registry (§23.1)', () => {
         .report()
         .map((p) => p.name)
         .sort(),
-    ).toEqual(['chromium', 'git', 'gpg', 'notify-send']);
+    ).toEqual(['chromium', 'git', 'gpg', 'notify-send', 'pdftoppm']);
   });
 });
 
