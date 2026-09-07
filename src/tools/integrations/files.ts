@@ -36,7 +36,7 @@ export function filesTools(deps: FilesDeps): ToolDefinition[] {
       /** An empty directory listing (§20.9). */
       isEmpty: (result) => ((result as { entries?: unknown[] }).entries ?? []).length === 0,
       description:
-        "List files in the shared workspace — the user's notes, todo lists, drafts and plans. Use it to find out what exists before reading or searching.",
+        "List files in the shared workspace — the user's notes, todo lists, drafts and plans. Use it to find out what exists before reading or searching. Your own skills and handlers are not here; config.read reaches those.",
       tier: 'ro',
       args: z.object({
         dir: z.string().optional().describe('subdirectory to list; omit for the whole store'),

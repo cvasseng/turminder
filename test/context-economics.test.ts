@@ -268,7 +268,7 @@ describe('tool paging (§21.2)', () => {
 
     const prompt = system(h);
     expect(prompt).toMatch(/^- config: 2 tools — .+ \(closed; open with tools\.open\)$/m);
-    expect(prompt).toContain('- setup: 11 tools —');
+    expect(prompt).toContain('- setup: 12 tools —');
     // A description from the integration manifest, not a list of tool names.
     expect(prompt).toContain('Reading and writing the assistant’s own configuration.');
   });
@@ -914,7 +914,14 @@ describe('prompt and schema economics (§21.3, §21.4)', () => {
       // two values and eight words saying what they default to, for a machine
       // that is not always on. Capability, not prose — the *why* of each value
       // is in the skill, which is the split this ceiling exists to enforce.
-      'schedule.create': 860,
+      // Raised 860 → 1010 when `event_type` landed (§6.2, App. F.2): one
+      // optional string, eleven words saying what it defaults to and that a
+      // custom type gets one owner, and six words in the description saying
+      // the reply names who will run it. Same split — *why* a schedule needs
+      // a consumer is a section in `authoring-handlers`, and the empty-list
+      // `warning` does the telling in the result, where it costs nothing
+      // until it is true.
+      'schedule.create': 1010,
       // Raised 800 → 915 when `spoken` landed (§33.3, F.3): a capped optional
       // string and eleven words saying what a speaker reads instead of the
       // title and body. Capability, not prose — a handler that cannot say

@@ -47,5 +47,6 @@ Two things this handler deliberately cannot do:
 - **It cannot delete.** Writing and appending are enough for filing something;
   removing the user's files on the strength of a captured page is not.
 
-*(Shipped with Turminder. Edit it freely — it is only re-created when missing.
+*(Shipped with Turminder. Edit it freely — an edited copy is yours and is
+never overwritten; an untouched one tracks the version Turminder ships.
 Set `enabled: false` to ignore captures entirely.)*

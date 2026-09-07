@@ -17,4 +17,5 @@ Body: the tools it brought with it, by name, so the user knows what to ask for.
 
 Do not try to use the new tools, test them, or offer to. Report and stop.
 
-*(Shipped with Turminder. Edit it freely — it is only re-created when missing.)*
+*(Shipped with Turminder. Edit it freely — an edited copy is yours and is
+never overwritten; an untouched one tracks the version Turminder ships.)*

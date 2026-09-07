@@ -223,7 +223,7 @@ export function configTools(home: DataHome, deps: ConfigToolsDeps): ToolDefiniti
     {
       name: 'config.read',
       description:
-        'Read a configuration, handler or skill file. Path is relative to the data directory, e.g. config/personality.md.',
+        'Read a configuration, handler or skill file. Path is relative to the data directory: config/personality.md, handlers/<name>.md, skills/<name>.md. Your own skills and handlers live here, not in the files.* workspace.',
       tier: 'ro',
       args: z.object({
         path: z.string().describe('data-dir-relative path under config/, handlers/ or skills/'),
@@ -237,6 +237,9 @@ export function configTools(home: DataHome, deps: ConfigToolsDeps): ToolDefiniti
     {
       name: 'config.write',
       description:
+        // Where handlers and skills live is `config.read`'s line, not this
+        // one: this description sits on its §21.4 ceiling, and "which drawer"
+        // is prose, which is exactly what that ceiling exists to keep out.
         "Write a config, handler or skill file and commit it. Overwrites the whole file — read it first if editing. Refuses anything the loader would reject. Handler routing keys are the user's choice, not yours.",
       tier: 'se',
       // §20.6: config.read is the way back to it.

@@ -31,5 +31,6 @@ read on a lock screen and put the detail in the body.
 Nothing here decides whether to keep watching — that already happened. If the
 user should do something about it, say what, and let them.
 
-*(Shipped with Turminder. Edit it freely — it is only re-created when missing.
+*(Shipped with Turminder. Edit it freely — an edited copy is yours and is
+never overwritten; an untouched one tracks the version Turminder ships.
 Set `enabled: false` to stop being told about watchers.)*

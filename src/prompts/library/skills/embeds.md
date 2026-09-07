@@ -227,4 +227,5 @@ will eventually expire and offer to keep it. That is the one case the expiry
 rule gets wrong on its own: the quarterly dashboard that is rarely opened and
 very much wanted.
 
-*(Shipped with Turminder. Edit it freely — it is only re-created when missing.)*
+*(Shipped with Turminder. Edit it freely — an edited copy is yours and is
+never overwritten; an untouched one tracks the version Turminder ships.)*

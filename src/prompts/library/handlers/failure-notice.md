@@ -23,5 +23,6 @@ event and silence.
 If the payload is a missed schedule, say what was missed and when it was due —
 the user may still want to do the thing themselves.
 
-*(Shipped with Turminder. Edit it freely — it is only re-created when missing.
+*(Shipped with Turminder. Edit it freely — an edited copy is yours and is
+never overwritten; an untouched one tracks the version Turminder ships.
 Set `enabled: false` to silence it.)*

@@ -142,7 +142,16 @@ export function impliedEmbedMatch(embedId: string): { types: string[]; sources: 
   return { types: ['embed.action'], sources: [`embed.${embedId}`] };
 }
 
-export function matches(frontmatter: HandlerFrontmatter, event: EventRecord): boolean {
+/**
+ * The §5.2 envelope matcher. Deliberately takes only the envelope, not a whole
+ * `EventRecord`: `schedule.create` asks "who would run this" about an event
+ * that does not exist yet (§6.2), and a matcher that needed a row to answer
+ * would have forced a fake one into existence.
+ */
+export function matches(
+  frontmatter: HandlerFrontmatter,
+  event: Pick<EventRecord, 'type' | 'source'>,
+): boolean {
   // A bound handler with no matcher of its own is scoped to its own embed, not
   // offered everything: a mini-app's handler firing on the morning email would
   // be a surprising way to learn what `embed:` means (§22.5).

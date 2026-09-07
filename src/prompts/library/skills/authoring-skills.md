@@ -56,4 +56,5 @@ automatically" is worth more than one that only lists endpoints.
   and tells you what is wrong — read the error and fix it rather than writing the
   same thing again.
 
-*(Shipped with Turminder. Edit it freely — it is only re-created when missing.)*
+*(Shipped with Turminder. Edit it freely — an edited copy is yours and is
+never overwritten; an untouched one tracks the version Turminder ships.)*

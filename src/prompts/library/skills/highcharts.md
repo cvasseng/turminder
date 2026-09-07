@@ -72,4 +72,5 @@ Three numbers are a sentence, not a pie chart. A single trend with an
 obvious direction is a sparkline sentence ("up 12% since May"). Chart when
 comparison, distribution, or shape is the point.
 
-*(Shipped with Turminder. Edit it freely — it is only re-created when missing.)*
+*(Shipped with Turminder. Edit it freely — an edited copy is yours and is
+never overwritten; an untouched one tracks the version Turminder ships.)*
