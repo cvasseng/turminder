@@ -98,6 +98,16 @@ export const TurminderYamlSchema = z.strictObject({
       download_dir: z.string().min(1).optional(),
     })
     .optional(),
+  mcp: z
+    .strictObject({
+      /**
+       * Seconds between reconnect attempts for a dropped external server
+       * (§11.6, App. A). The last value repeats forever, so a server that is
+       * gone for good costs one socket attempt per interval rather than a spin.
+       */
+      reconnect_backoff: z.array(z.number().int().positive()).min(1).optional(),
+    })
+    .optional(),
   scheduler: z
     .strictObject({ background_concurrency: z.number().int().positive().optional() })
     .optional(),

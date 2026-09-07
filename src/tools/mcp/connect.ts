@@ -20,11 +20,30 @@ const l = log('mcp');
 
 type McpServerConfig = McpYaml['servers'][number];
 
+/**
+ * What a not-alive connection does when a call arrives (§11.6). The hub owns
+ * it, because reviving means re-reading `mcp.yaml` for this server's own
+ * definition and re-listing the catalog afterwards — both hub concerns. The
+ * message it returns on failure names the server and when it will next be
+ * retried, because an error that teaches beats an absence that does not.
+ */
+export type Revive = () => Promise<{ ok: true } | { ok: false; message: string }>;
+
 /** One connected MCP server — bundled in-process or external. */
 export class McpConnection {
+  /**
+   * Observed, never inferred (§11.6). Map membership is not evidence of
+   * anything: the connection object outlives the server, which is exactly how
+   * `connected: true` kept being reported about a process that had exited.
+   */
+  private live = true;
+  private failure: string | null = null;
+  /** Installed by the hub on external connections only. */
+  revive: Revive | null = null;
+
   private constructor(
     readonly name: string,
-    private readonly client: Client,
+    private client: Client,
     private readonly readOnlyPatterns: readonly string[],
     private readonly defaultTier: 'ro' | 'se',
     /** Per-tool transcript budgets, from the definitions (§20.3). */
@@ -46,7 +65,55 @@ export class McpConnection {
       string,
       (args: unknown) => ConfirmLines
     > = new Map(),
+    /**
+     * In-process connections are trivially alive and must stay that way: a
+     * bundled integration is the same process, and it cannot drop.
+     */
+    private readonly external = false,
   ) {}
+
+  get alive(): boolean {
+    return !this.external || this.live;
+  }
+
+  /** The error that took the server down, for every status surface (§11.6). */
+  get error(): string | null {
+    return this.external && !this.live ? this.failure : null;
+  }
+
+  /** Wire the transport's own signals to `live`. External connections only. */
+  private watch(client: Client): void {
+    client.onclose = () => {
+      if (!this.live) return;
+      this.live = false;
+      this.failure ??= 'the connection closed';
+      l.warn({ server: this.name }, 'external mcp server dropped');
+    };
+    client.onerror = (e: Error) => {
+      this.failure = errMessage(e);
+      this.live = false;
+    };
+  }
+
+  /**
+   * Reconnect this same object — identity matters, because every tool handle
+   * in the catalog closes over it. Replacing the object would leave the
+   * catalog pointing at the corpse, which is a subtler version of the bug
+   * §11.6 exists to fix. Re-reads nothing itself: the caller hands in the
+   * server's own definition, freshly read from `mcp.yaml`.
+   */
+  async reconnect(cfg: McpServerConfig): Promise<void> {
+    try {
+      await this.client.close();
+    } catch {
+      /* already gone */
+    }
+    this.client = await connectClient(cfg);
+    this.failure = null;
+    this.live = true;
+    this.watch(this.client);
+    l.info({ server: cfg.name, transport: cfg.transport }, 'reconnected external mcp server');
+  }
 
   /** A bundled integration over the in-memory transport (§11.1). */
   static async inProcess(name: string, defs: ToolDefinition[]): Promise<McpConnection> {
@@ -80,28 +147,22 @@ export class McpConnection {
 
   /** An external MCP server from config/mcp.yaml (App. G.5). */
   static async external(cfg: McpServerConfig): Promise<McpConnection> {
-    const client = new Client({ name: 'turminder', version: '0.1.0' });
-    if (cfg.transport === 'stdio') {
-      const [command, ...args] = cfg.command ?? [];
-      if (!command) throw new Error(`mcp server ${cfg.name}: empty command`);
-      await client.connect(
-        new StdioClientTransport({
-          command,
-          args,
-          env: { ...(process.env as Record<string, string>), ...(cfg.env ?? {}) },
-        }),
-      );
-    } else {
-      if (!cfg.url) throw new Error(`mcp server ${cfg.name}: missing url`);
-      await client.connect(
-        new StreamableHTTPClientTransport(new URL(cfg.url), {
-          ...(cfg.headers ? { requestInit: { headers: cfg.headers } } : {}),
-        }),
-      );
-    }
+    const client = await connectClient(cfg);
     // External tools are side-effecting unless the operator says otherwise, or
     // the server declares readOnlyHint itself.
-    return new McpConnection(cfg.name, client, cfg.read_only_tools ?? [], 'se');
+    const conn = new McpConnection(
+      cfg.name,
+      client,
+      cfg.read_only_tools ?? [],
+      'se',
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      true,
+    );
+    conn.watch(client);
+    return conn;
   }
 
   async listTools(): Promise<ToolHandle[]> {
@@ -137,6 +198,19 @@ export class McpConnection {
     args: unknown,
     ctx: ToolContext,
   ): Promise<{ ok: boolean; output: unknown }> {
+    // A dead connection reconnects on demand (§11.6): "fix the VPN and ask
+    // again" is the path a user actually takes, and the *call* is what
+    // triggers it — which is also why the tools stay advertised while the
+    // server is down. A failure here is a value naming the server and the
+    // next retry, never a throw and never a bare `tool_failed`.
+    if (!this.alive) {
+      const revived = this.revive
+        ? await this.revive()
+        : { ok: false as const, message: `${this.name} is not connected` };
+      if (!revived.ok) {
+        return { ok: false, output: { error: 'server_unavailable', message: revived.message } };
+      }
+    }
     try {
       const result = await this.client.callTool(
         {
@@ -188,10 +262,37 @@ export class McpConnection {
   }
 
   async close(): Promise<void> {
+    // Deliberate, so `onclose` does not report a shutdown as a drop.
+    this.client.onclose = undefined;
+    this.client.onerror = undefined;
     try {
       await this.client.close();
     } catch {
       /* already gone */
     }
   }
+}
+
+/** One transport, one place (App. G.5) — connect and reconnect share it. */
+async function connectClient(cfg: McpServerConfig): Promise<Client> {
+  const client = new Client({ name: 'turminder', version: '0.1.0' });
+  if (cfg.transport === 'stdio') {
+    const [command, ...args] = cfg.command ?? [];
+    if (!command) throw new Error(`mcp server ${cfg.name}: empty command`);
+    await client.connect(
+      new StdioClientTransport({
+        command,
+        args,
+        env: { ...(process.env as Record<string, string>), ...(cfg.env ?? {}) },
+      }),
+    );
+  } else {
+    if (!cfg.url) throw new Error(`mcp server ${cfg.name}: missing url`);
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(cfg.url), {
+        ...(cfg.headers ? { requestInit: { headers: cfg.headers } } : {}),
+      }),
+    );
+  }
+  return client;
 }
