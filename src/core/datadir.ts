@@ -109,7 +109,6 @@ systools:                 # §23.1 — path overrides; default: probe $PATH
   chromium: null          # e.g. /usr/bin/chromium
   gpg: null               # §27.1 gpg secret backend
   git: null               # §12.2 data-repo versioning
-  pdftoppm: null          # §34.4 PDF → JPEG pages for printers with no PDF interpreter
 secrets:                  # §27.1
   backend: auto           # auto | os | gpg | plain — pinned at onboarding
   gpg_key: null           # recipient key id, gpg backend only
