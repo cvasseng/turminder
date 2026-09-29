@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryTraceSink, type LlmCallTrace } from '../src/model/types.js';
 import { BASE_PROMPTS } from '../src/prompts/base.js';
 import { GrantedDispatcher } from '../src/tools/dispatcher.js';
-import { PagedDispatcher, OPEN_TOOL } from '../src/tools/paged.js';
+import { PagedDispatcher, OPEN_TOOL, type UnavailableServer } from '../src/tools/paged.js';
 import type { ToolHandle } from '../src/tools/types.js';
 import { bootService, offeredTools, type ServiceHarness } from './service-harness.js';
 import { FakeLlama } from './fake-llama.js';
@@ -19,6 +19,27 @@ const drain = (harness: ServiceHarness) => harness.service.queue.drain();
 
 const CLOCK_FIXTURE = () => path.resolve('test/fixtures/mcp-clock-server.mjs');
 const HA_FIXTURE = () => path.resolve('test/fixtures/mcp-home-assistant-server.mjs');
+const FLAKY_FIXTURE = () => path.resolve('test/fixtures/mcp-flaky-server.mjs');
+
+/**
+ * A server configured in mcp.yaml whose very first connect fails — the X2
+ * case, not a mid-conversation drop: `connectExternal` never adds it to
+ * `connections`, so its tools are never listed and it is invisible to
+ * `closedNamespaces()`, the same way a server down since before this process
+ * started would be.
+ */
+async function installDownServer(harness: ServiceHarness, name: string): Promise<void> {
+  const marker = path.join(harness.dataDir, `${name}-down`);
+  write(marker, '');
+  write(
+    path.join(harness.dataDir, 'config', 'mcp.yaml'),
+    `servers:\n  - name: ${name}\n    transport: stdio\n` +
+      `    command: ["node", "${FLAKY_FIXTURE()}"]\n` +
+      `    env:\n      FLAKY_DOWN_FILE: ${JSON.stringify(marker)}\n`,
+  );
+  harness.app.config.reload();
+  await harness.service.tools.connectExternal(name);
+}
 
 /** Installs an external MCP server the way the form flow does, minus the form. */
 async function installMcp(
@@ -412,6 +433,61 @@ describe('tool paging (§21.2)', () => {
     expect(h.service.repos.conversations.openNamespaces(sent.conversationId)).toEqual([]);
   });
 
+  it('tells a guess about a dropped server instead of leaving it invisible (X2)', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    await installDownServer(h, 'inventory');
+    expect(h.service.tools.serverStatus().find((s) => s.name === 'inventory')?.connected).toBe(
+      false,
+    );
+    // Never listed — invisible to the catalog, exactly the X2 bug.
+    expect(h.service.tools.get('inventory.ping')).toBeNull();
+
+    let asked = false;
+    h.fake.always((req) => {
+      if (req.body.tools && !asked) {
+        asked = true;
+        return { toolCalls: [{ name: OPEN_TOOL, args: { namespace: 'parts' } }] };
+      }
+      return { text: 'No such thing.' };
+    });
+    const sent = h.service.chat.send({ text: 'look up part 42' });
+    await drain(h);
+    const call = h.service.repos.trace
+      .forEvent(sent.eventId)
+      .filter((t) => t.kind === 'tool_call')
+      .map((t) => t.data as any)
+      .find((d) => d.tool === OPEN_TOOL)!;
+    expect(call.ok).toBe(false);
+    expect(call.result_excerpt).toContain('unknown_namespace');
+    expect(call.result_excerpt).toContain('inventory');
+    expect(call.result_excerpt).toContain('dropped');
+  });
+
+  it('answers the down server’s own name with namespace_unavailable, not unknown_namespace', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    await installDownServer(h, 'inventory');
+
+    let asked = false;
+    h.fake.always((req) => {
+      if (req.body.tools && !asked) {
+        asked = true;
+        return { toolCalls: [{ name: OPEN_TOOL, args: { namespace: 'inventory' } }] };
+      }
+      return { text: 'ok' };
+    });
+    const sent = h.service.chat.send({ text: 'look up part 42' });
+    await drain(h);
+    const call = h.service.repos.trace
+      .forEvent(sent.eventId)
+      .filter((t) => t.kind === 'tool_call')
+      .map((t) => t.data as any)
+      .find((d) => d.tool === OPEN_TOOL)!;
+    expect(call.ok).toBe(false);
+    expect(call.result_excerpt).toContain('namespace_unavailable');
+    expect(call.result_excerpt).not.toContain('unknown_namespace');
+    expect(call.result_excerpt).toContain('dropped');
+  });
+
   /**
    * The three-way split, spelled out because collapsing any two of these is
    * exactly how a context optimization becomes a security or behavior change.
@@ -731,6 +807,7 @@ describe('paging determinism (§21.2.7)', () => {
       'config',
       'docs',
       'embeds',
+      'handler',
       'history',
       'project',
       'setup',
@@ -754,7 +831,7 @@ describe('PagedDispatcher (§21.2.6)', () => {
 
   const ctx = { runId: null, eventId: null };
 
-  function build(opts: { open?: string[] } = {}) {
+  function build(opts: { open?: string[]; unavailable?: UnavailableServer[] } = {}) {
     const available = [
       handle('memory.query', 'memory'),
       handle('lights.on', 'home-assistant'),
@@ -776,6 +853,7 @@ describe('PagedDispatcher (§21.2.6)', () => {
           opened.push(ns);
         },
       },
+      ...(opts.unavailable ? { unavailable: () => opts.unavailable! } : {}),
     });
     return { paged, opened };
   }
@@ -822,6 +900,71 @@ describe('PagedDispatcher (§21.2.6)', () => {
       available: ['home-assistant'],
     });
     expect(opened).toEqual([]);
+  });
+
+  it('lists a down external server under unavailable, on a guessed name (X2)', async () => {
+    const { paged, opened } = build({
+      unavailable: [{ name: 'inventory', status: 'dropped' }],
+    });
+    const result = await paged.dispatch({
+      toolCallId: '1',
+      name: OPEN_TOOL,
+      args: { namespace: 'parts' },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.output).toEqual({
+      error: 'unknown_namespace',
+      available: ['home-assistant'],
+      unavailable: [{ name: 'inventory', status: 'dropped' }],
+      message: expect.stringContaining('reconnects on its own'),
+    });
+    expect(opened).toEqual([]);
+  });
+
+  it('returns namespace_unavailable, not unknown_namespace, for a down server named exactly', async () => {
+    const { paged, opened } = build({
+      unavailable: [{ name: 'inventory', status: 'dropped' }],
+    });
+    const result = await paged.dispatch({
+      toolCallId: '1',
+      name: OPEN_TOOL,
+      args: { namespace: 'inventory' },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.output).toEqual({
+      error: 'namespace_unavailable',
+      name: 'inventory',
+      status: 'dropped',
+      message: expect.stringContaining('reconnects automatically'),
+    });
+    expect(opened).toEqual([]);
+  });
+
+  it('names setup.activate for a server waiting on a sign-in', async () => {
+    const { paged } = build({
+      unavailable: [{ name: 'gmail', status: 'needs_auth' }],
+    });
+    const result = await paged.dispatch({
+      toolCallId: '1',
+      name: OPEN_TOOL,
+      args: { namespace: 'gmail' },
+    });
+    expect(result.output).toEqual({
+      error: 'namespace_unavailable',
+      name: 'gmail',
+      status: 'needs_auth',
+      message: expect.stringContaining('setup.activate {integration: "gmail"}'),
+    });
+  });
+
+  it('keeps the plain unknown_namespace shape byte-identical when nothing is down', async () => {
+    const { paged } = build();
+    const result = await paged.dispatch({
+      toolCallId: '1',
+      name: OPEN_TOOL,
+      args: { namespace: 'vault' },
+    });
+    expect(Object.keys(result.output as object).sort()).toEqual(['available', 'error']);
   });
 
   it('rejects a missing or non-string namespace without throwing', async () => {
@@ -921,7 +1064,13 @@ describe('prompt and schema economics (§21.3, §21.4)', () => {
       // a consumer is a section in `authoring-handlers`, and the empty-list
       // `warning` does the telling in the result, where it costs nothing
       // until it is true.
-      'schedule.create': 1010,
+      // Raised 1010 → 1054 when `on_miss`'s own describe() grew nine words
+      // saying what `fire_late` means on a recurrence — "yesterday's one,
+      // late", not every occurrence missed (§6.1 S3, App. F.2). `when`,
+      // `consumers` and `catch_all` cost nothing here: they are result
+      // fields, not schema (§21.4), which is the split this ceiling exists
+      // to enforce.
+      'schedule.create': 1054,
       // Raised 800 → 915 when `spoken` landed (§33.3, F.3): a capped optional
       // string and eleven words saying what a speaker reads instead of the
       // title and body. Capability, not prose — a handler that cannot say
@@ -934,6 +1083,12 @@ describe('prompt and schema economics (§21.3, §21.4)', () => {
       // prose — the *why* is in the `authoring-handlers` skill, which is the
       // split this ceiling exists to enforce.
       'config.write': 692,
+      // New with App. F.20 (G1): the handler-authoring tools, which exist so
+      // the model sends structured arguments instead of YAML. Paged (§21.2),
+      // so a conversation pays for them only once it opens `handler`; the
+      // how-to lives in `authoring-handlers`, not in these schemas.
+      'handler.create': 1400,
+      'handler.update': 1050,
     };
     for (const [name, ceiling] of Object.entries(ceilings)) {
       expect(size(name), `${name} is ${size(name)} chars`).toBeLessThanOrEqual(ceiling);

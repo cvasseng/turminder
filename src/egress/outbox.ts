@@ -1,4 +1,5 @@
 import { log } from '../core/logger.js';
+import { msUntil } from '../core/time.js';
 import type { Config } from '../core/config.js';
 import type { Repos } from '../db/repos/index.js';
 import type { Delivery, DeliveryIntent } from '../db/repos/deliveries.js';
@@ -35,7 +36,7 @@ export class Outbox {
       input.ttlS ??
       (input.intent === 'confirm'
         ? this.config.settings.confirmTtlS
-        : this.config.settings.notifyTtlS);
+        : (this.untilNextOccurrence(input.eventId) ?? this.config.settings.notifyTtlS));
     const delivery = this.repos.deliveries.create({
       intent: input.intent,
       payload: input.payload,
@@ -53,6 +54,26 @@ export class Outbox {
       'delivery queued',
     );
     return delivery;
+  }
+
+  /**
+   * A scheduler-origin notify's default life (§7.1): until the schedule that
+   * fired it fires again, because the next digest is what supersedes this one.
+   * Null — the ordinary default — when the event is not the scheduler's, or
+   * the schedule has no next occurrence (a one-shot, finished or cancelled).
+   * The scheduler has already moved `fire_at` on by the time a run delivers,
+   * so the row itself says when that is.
+   */
+  private untilNextOccurrence(eventId: string | null | undefined): number | null {
+    if (!eventId) return null;
+    const event = this.repos.events.get(eventId);
+    if (event?.source !== 'scheduler') return null;
+    const scheduleId = (event.payload as { schedule_id?: unknown } | null)?.schedule_id;
+    if (typeof scheduleId !== 'string') return null;
+    const schedule = this.repos.schedules.get(scheduleId);
+    if (schedule?.status !== 'active') return null;
+    const seconds = Math.floor(msUntil(schedule.fire_at) / 1000);
+    return seconds > 0 ? seconds : null;
   }
 
   ack(deliveryId: string, device: string): Delivery | null {

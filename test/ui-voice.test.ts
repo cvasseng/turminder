@@ -67,3 +67,132 @@ describe('the voice conversation label (§33.1)', () => {
     expect(css).toContain('.conv-mic');
   });
 });
+
+/**
+ * The chat UI as a voice client (§33.6): a mic button in `#composer`. There
+ * is no browser here, so these guard the source rather than an actual
+ * recording — the two failures that would quietly break the feature are a
+ * control shown where it cannot work, and a recording sent in a format the
+ * server never accepts.
+ */
+const html = fs.readFileSync(path.join(root, 'ui', 'index.html'), 'utf8');
+
+describe('the mic button exists only where it can work (§24.4, §33.6)', () => {
+  it('is hidden in markup, not disabled', () => {
+    const button = /<button[^>]*id="mic"[^>]*>/.exec(html)?.[0] ?? '';
+    expect(button, 'index.html should carry #mic').not.toBe('');
+    expect(button).toContain('hidden');
+    expect(button).not.toContain('disabled');
+    expect(button).toContain('data-icon="mic"');
+  });
+
+  it('is revealed only in a secure context with a microphone to ask for', () => {
+    const guard = js.slice(js.indexOf('if (isSecureContext && navigator.mediaDevices'));
+    const line = guard.slice(0, guard.indexOf('\n'));
+    expect(line).toContain('isSecureContext');
+    expect(line).toContain('navigator.mediaDevices');
+    expect(line).toContain('window.MediaRecorder');
+    const body = guard.slice(0, guard.indexOf('\n}'));
+    expect(body).toContain("$('mic').hidden = false");
+  });
+
+  it('toggles recording on click rather than needing a press held down', () => {
+    const guard = js.slice(js.indexOf('if (isSecureContext && navigator.mediaDevices'));
+    const onclick = guard.slice(guard.indexOf('.onclick = () => {'));
+    expect(onclick).toContain('if (state.voice.recorder) stopRecording()');
+    expect(onclick).toContain('else void startRecording()');
+  });
+});
+
+describe('a recording is re-encoded before it is sent (§33.2, §33.6)', () => {
+  it("never sends what MediaRecorder actually produced — only 'audio/wav'", () => {
+    expect(js).toContain(
+      "headers: { authorization: `Bearer ${token()}`, 'content-type': 'audio/wav' }",
+    );
+    // `toVoiceWav` is what stands between the recording and the fetch: no
+    // path posts `rawBlob` (the MediaRecorder output) directly.
+    const send = functionSource('sendRecording');
+    expect(send).toContain('await toVoiceWav(rawBlob)');
+    expect(send).not.toMatch(/body:\s*rawBlob/);
+  });
+
+  it('decodes, downmixes and resamples to 16 kHz mono before writing a WAV header', () => {
+    const toWav = functionSource('toVoiceWav');
+    expect(toWav).toContain('decodeAudioData');
+    expect(toWav).toContain('downmixToMono(audioBuffer)');
+    expect(toWav).toContain('resampleLinear(mono, audioBuffer.sampleRate, 16000)');
+    expect(toWav).toContain('encodeWav(');
+  });
+
+  it('writes a real RIFF/WAVE header, not a bare PCM dump', () => {
+    const encode = functionSource('encodeWav');
+    for (const chunk of ["'RIFF'", "'WAVE'", "'fmt '", "'data'"]) {
+      expect(encode).toContain(chunk);
+    }
+    expect(encode).toContain("type: 'audio/wav'");
+  });
+
+  it('closes the audio context and stops the mic tracks rather than leaking them', () => {
+    expect(functionSource('toVoiceWav')).toMatch(/finally\s*\{\s*void ctx\.close\(\)/);
+    const start = functionSource('startRecording');
+    expect(start).toContain('for (const track of stream.getTracks()) track.stop()');
+  });
+});
+
+describe('every /api/voice status is a human sentence (App. E, §33.6)', () => {
+  const mapper = functionSource('voiceErrorMessage');
+
+  it('covers every error the route can answer', () => {
+    for (const code of [
+      'too_long',
+      'unsupported_media_type',
+      'nothing_heard',
+      'speech_failed',
+      'no_speech_endpoint',
+    ]) {
+      expect(mapper, code).toContain(`case '${code}':`);
+    }
+  });
+
+  it('falls back to the server message, then the status, rather than going silent', () => {
+    expect(mapper).toContain('body?.message || `voice request failed: HTTP ${status}`');
+  });
+
+  it('shows the mapped message as a transcript error, not a native alert', () => {
+    const send = functionSource('sendRecording');
+    expect(send).toContain("addMessage('error', voiceErrorMessage(res.status, body), 'error')");
+    expect(send).not.toContain('alert(');
+  });
+
+  it('reports a network failure and a microphone refusal the same honest way', () => {
+    const send = functionSource('sendRecording');
+    expect(send).toMatch(
+      /catch \(e\) \{\s*addMessage\('error', `voice request failed: \$\{e\.message\}`/,
+    );
+    const start = functionSource('startRecording');
+    expect(start).toContain(
+      "addMessage('error', `couldn't reach the microphone: ${e.message}`",
+    );
+  });
+});
+
+describe('a reply lands in its conversation, not just in the speaker (§33.1, §33.6)', () => {
+  it('reads both headers off the response before switching', () => {
+    const send = functionSource('sendRecording');
+    expect(send).toContain("res.headers.get('x-turminder-conversation')");
+    expect(send).toContain("decodeRfc8187(res.headers.get('x-turminder-transcript'))");
+  });
+
+  it('switches conversation the same way an out-of-band chat.accepted already does', () => {
+    const send = functionSource('sendRecording');
+    expect(send).toContain('selectConversation(conversationId)');
+    expect(send).toContain('refreshConversations()');
+  });
+
+  it('plays the reply like the voice-field preview already does (§33.5)', () => {
+    const send = functionSource('sendRecording');
+    expect(send).toContain('URL.createObjectURL(await res.blob())');
+    expect(send).toContain('new Audio(url)');
+    expect(send).toContain('URL.revokeObjectURL(url)');
+  });
+});

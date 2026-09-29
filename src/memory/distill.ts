@@ -153,6 +153,14 @@ export class DistillExecutor {
         jsonSchema: DISTILL_SCHEMA,
       });
 
+      // The model call itself failed — an endpoint down, a refused
+      // connection — never a JSON problem (X1c). Checked before parsing, so
+      // an outage is never reported as "Unexpected end of JSON input": the
+      // cause already rode the llm_call and agent-loop error trace rows
+      // (X1a), and this event retries on its normal backoff either way
+      // (ingress/queue.ts), same as any other thrown failure.
+      if (result.stopReason === 'error') throw new Error('endpoint_error');
+
       const parsed = DistillOutput.safeParse(JSON.parse(result.text.trim()));
       if (!parsed.success)
         throw new Error(`distillation output was not usable: ${result.text.slice(0, 200)}`);

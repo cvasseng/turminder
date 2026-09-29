@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { bootService, offeredTools, type ServiceHarness } from './service-harness.js';
 import { nextOccurrence } from '../src/scheduler/loop.js';
 import { isoPlusSeconds, nowIso } from '../src/core/time.js';
+import { renderWhen } from '../src/tools/integrations/schedule.js';
 import type { ScheduleRow } from '../src/db/repos/schedules.js';
 
 let h: ServiceHarness;
@@ -274,10 +275,71 @@ describe('scheduler loop (§6)', () => {
     const reports = events.filter((e) => e.type === 'system.schedule_missed');
     expect(reports).toHaveLength(1);
     expect((reports[0]?.payload as any).skipped).toBe(4);
+    // One outage, one notice (§6.1 S3): the occurrence also fired, so the
+    // report is informational — and it says so structurally, via `source`,
+    // not only in the payload a matcher cannot see (§5.2).
+    expect((reports[0]?.payload as any).also_fired).toBe(true);
+    expect(reports[0]?.source).toBe('scheduler');
     // And the series is standing on its next occurrence, in the future.
     const after = h.service.repos.schedules.get(created.id)!;
     expect(after.status).toBe('active');
     expect(Date.parse(after.fire_at)).toBeGreaterThan(Date.now());
+  });
+
+  it('offers a fire_late miss to timer.fired’s handler but never to failure-notice (§6.1 S3)', async () => {
+    // The evidence case: a three-day outage on a recurring fire_late daily
+    // must produce exactly one late fire and zero failure-notice deliveries
+    // — the fired event's own handler already says how late it is.
+    h = await bootService({ onboarded: true, runScheduler: false });
+    h.service.repos.schedules.create({
+      fireAt: isoPlusSeconds(-3 * 86_400),
+      note: 'daily digest',
+      rrule: 'FREQ=DAILY',
+      graceS: 3600,
+      onMiss: 'fire_late',
+    });
+
+    let notified = false;
+    h.fake.always((req) => {
+      if (req.body.response_format) {
+        const offered = String(req.body.messages?.[1]?.content ?? '');
+        // failure-notice must not even be on the roster: `system.*` no
+        // longer matches this event's `source` (§5.2, structural, not a
+        // model judgement call).
+        expect(offered).not.toContain('failure-notice');
+        return {
+          text: JSON.stringify({
+            summary: 'a reminder came due, late',
+            verdicts: offered.includes('scheduled-task')
+              ? [{ handler: 'scheduled-task', matched: true, reason: 'a late reminder' }]
+              : [],
+          }),
+        };
+      }
+      if (notified) return { text: 'Reminded.' };
+      notified = true;
+      return {
+        toolCalls: [
+          { name: 'deliver.notify', args: { title: 'Daily digest', body: 'This is late.' } },
+        ],
+      };
+    });
+
+    expect(h.service.scheduler.tick()).toBe(1);
+    await h.service.queue.drain();
+
+    const missed = h.service.repos.events
+      .recent({ limit: 20 })
+      .find((e) => e.type === 'system.schedule_missed')!;
+    expect(missed.source).toBe('scheduler');
+    // Never offered, so never run, so never a second delivery on top of the
+    // fired event's own.
+    expect(
+      h.service.repos.runs.forEvent(missed.id).some((r) => r.handler_name === 'failure-notice'),
+    ).toBe(false);
+    const deliveries = h.service.repos.deliveries.recent(20);
+    expect(deliveries).toHaveLength(1);
+    expect((deliveries[0]?.payload as any).title).toBe('Daily digest');
   });
 
   it('puts the grace boundary in one place, from both sides', async () => {
@@ -447,6 +509,93 @@ describe('schedule tools (App. F.2)', () => {
   });
 });
 
+describe('the server says when, so the model doesn’t have to (§6.2 S2)', () => {
+  const row = (over: Partial<ScheduleRow> = {}): ScheduleRow => ({
+    id: '01WHEN',
+    fire_at: '2026-09-30T05:00:00.000Z',
+    rrule: null,
+    grace_s: 3600,
+    note: 'test',
+    event_type: 'timer.fired',
+    event_payload: '{}',
+    created_by_run: null,
+    status: 'active',
+    last_fired_at: null,
+    on_miss: 'fire_late',
+    ...over,
+  });
+
+  it('renders a one-shot', () => {
+    // 2026-09-30T05:00:00Z is 07:00 Europe/Oslo (still on summer time).
+    expect(renderWhen(row(), 'Europe/Oslo', new Date('2026-09-01T00:00:00Z'))).toBe(
+      'once at 07:00 Europe/Oslo on 30 Sep; if missed: fires late (grace 1h)',
+    );
+  });
+
+  it('renders a DST-crossing daily the same way on both sides of the transition', () => {
+    // Same fixture as the §6.1 wall-clock tests: an 08:00 Oslo daily, once
+    // before the spring transition and once after `nextOccurrence` has
+    // corrected `fire_at` for it. The sentence has to read 08:00 both
+    // times — never 07:00 (the raw UTC hour) or 09:00 (the uncorrected
+    // drift) — because that is the whole point of §6.1's correction.
+    const before = row({
+      fire_at: '2026-03-28T07:00:00.000Z',
+      rrule: 'FREQ=DAILY;UNTIL=20260930T050000Z',
+      on_miss: 'skip',
+    });
+    expect(renderWhen(before, 'Europe/Oslo', new Date('2026-03-01T00:00:00Z'))).toBe(
+      'daily at 08:00 Europe/Oslo until 30 Sep; if missed: skipped (grace 1h)',
+    );
+    const after = row({
+      fire_at: '2026-03-29T06:00:00.000Z',
+      rrule: 'FREQ=DAILY;UNTIL=20260930T050000Z',
+      on_miss: 'skip',
+    });
+    expect(renderWhen(after, 'Europe/Oslo', new Date('2026-03-30T00:00:00Z'))).toBe(
+      'daily at 08:00 Europe/Oslo until 30 Sep; if missed: skipped (grace 1h)',
+    );
+  });
+
+  it('is wired through schedule.create, .list and .trigger, from the identity’s own zone', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    const { GrantedDispatcher } = await import('../src/tools/dispatcher.js');
+    const dispatch = async (name: string, args: unknown) => {
+      const d = new GrantedDispatcher(
+        h.service.tools.handles(),
+        { tools: ['schedule.*'] },
+        {
+          runId: null,
+          eventId: null,
+        },
+      );
+      return d.dispatch({ toolCallId: name, name, args });
+    };
+
+    const created = (
+      await dispatch('schedule.create', {
+        fire_at: '2026-09-30T05:00:00.000Z',
+        note: 'water the plants',
+        grace_s: 3600,
+      })
+    ).output as any;
+    // The test harness's identity is Europe/Oslo (service-harness.ts) — the
+    // same source `time.now` reads. Year is left optional: `dateHuman` only
+    // appends one when it differs from the clock's, and this suite does not
+    // control that clock.
+    expect(created.when).toMatch(
+      /^once at 07:00 Europe\/Oslo on 30 Sep(?: \d{4})?; if missed: fires late \(grace 1h\)$/,
+    );
+
+    const listed = (await dispatch('schedule.list', {})).output as any;
+    expect(listed.schedules[0].when).toBe(created.when);
+
+    const triggered = (await dispatch('schedule.trigger', { schedule_id: created.schedule_id }))
+      .output as any;
+    // Triggering fires now, but the booking's own `when` is unchanged.
+    expect(triggered.when).toBe(created.when);
+  });
+});
+
 describe('a schedule needs a consumer (§6.2, F.2)', () => {
   const dispatch = async (harness: ServiceHarness, name: string, args: unknown) => {
     const { GrantedDispatcher } = await import('../src/tools/dispatcher.js');
@@ -490,6 +639,32 @@ describe('a schedule needs a consumer (§6.2, F.2)', () => {
     expect(listed.schedules[0].event_type).toBe('timer.fired');
   });
 
+  it('names a handler with no match block in catch_all, not consumers (§6.2 S4)', async () => {
+    // The observed bug (2026-08-25): a handler with no `match:` block offers
+    // itself to everything (§5.2) and used to read as a consumer of every
+    // schedule in existence — which meant `consumers: []` never happened and
+    // the empty-list `warning` never fired. It still runs (unchanged); it is
+    // just named in `catch_all` instead.
+    h = await bootService({ onboarded: true, runScheduler: false });
+    await writeHandler(h, 'file-instructions', 'description: Anything at all.\n');
+
+    const created = await dispatch(h, 'schedule.create', {
+      fire_at: isoPlusSeconds(3600),
+      note: 'the morning digest',
+      event_type: 'digest.due',
+    });
+    const out = created.output as any;
+    expect(out.consumers).toEqual([]);
+    expect(out.catch_all).toContain('file-instructions');
+    // The whole point: an empty *consumers* list still warns, whatever
+    // catch_all holds.
+    expect(out.warning).toMatch(/nothing will run/i);
+
+    const listed = (await dispatch(h, 'schedule.list', {})).output as any;
+    expect(listed.schedules[0].consumers).toEqual([]);
+    expect(listed.schedules[0].catch_all).toContain('file-instructions');
+  });
+
   it('warns, in the same call, when nothing will run it', async () => {
     h = await bootService({ onboarded: true, runScheduler: false });
     // Nothing in a fresh data dir matches a type nobody has claimed.
@@ -501,6 +676,7 @@ describe('a schedule needs a consumer (§6.2, F.2)', () => {
     const out = created.output as any;
     expect(out.event_type).toBe('digest.due');
     expect(out.consumers).toEqual([]);
+    expect(out.catch_all).toEqual([]);
     expect(out.warning).toMatch(/nothing will run/i);
     // The row still exists: the warning is information, not a refusal.
     expect(h.service.repos.schedules.list()).toHaveLength(1);
@@ -531,6 +707,63 @@ describe('a schedule needs a consumer (§6.2, F.2)', () => {
       })
     ).output as any;
     expect(plain.consumers).not.toContain('morning-digest');
+  });
+
+  it('counts a handler the same run just changed, with nobody reloading by hand', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    const { GrantedDispatcher } = await import('../src/tools/dispatcher.js');
+    const d = new GrantedDispatcher(
+      h.service.tools.handles(),
+      { tools: ['schedule.*', 'config.*'] },
+      { runId: null, eventId: null },
+    );
+    // The digest handler exists and owns its type. Creating one is
+    // `handler.create`'s now (F.20) and its own test covers the same reload
+    // from that side; this one keeps the `config.write` half honest.
+    await writeHandler(
+      h,
+      'morning-digest',
+      'description: Use when the daily digest is due.\nmatch:\n  types: ["digest.due"]\ntools: [deliver.notify]\n',
+    );
+    // The order is the bug, and this first booking is what gives the test
+    // teeth: computing its `consumers` loads the handlers and caches them.
+    // The observed run warmed the same cache the same way, by asking what was
+    // already booked (2026-09-11).
+    const before = await d.dispatch({
+      toolCallId: '0',
+      name: 'schedule.create',
+      args: { fire_at: isoPlusSeconds(7200), note: 'digest', event_type: 'digest.due' },
+    });
+    expect((before.output as any).consumers).toEqual(['morning-digest']);
+
+    // Then retired through the tool, exactly as a chat run does it — and
+    // nothing else happens: no reload(), no restart, no next event. The other
+    // tests in this block call `handlers.reload()` themselves, which is what
+    // hid this: `consumers` is defined as a fact about the files on disk *now*
+    // (§6.2), but the loader caches, so a run that changed a handler and asked
+    // who owned its event was answered from the set that existed beforehand.
+    // The observed model read another handler's name as its own and reported
+    // the fix as verified.
+    const written = await d.dispatch({
+      toolCallId: '1',
+      name: 'config.write',
+      args: {
+        path: 'handlers/morning-digest.md',
+        content:
+          '---\nname: morning-digest\ndescription: Use when the daily digest is due.\nmatch:\n  types: ["digest.due"]\ntools: [deliver.notify]\nenabled: false\n---\n\nBuild the digest.\n',
+        message: 'handlers: retire morning-digest',
+      },
+    });
+    expect((written.output as any).committed).toBe(true);
+
+    const created = await d.dispatch({
+      toolCallId: '2',
+      name: 'schedule.create',
+      args: { fire_at: isoPlusSeconds(3600), note: 'digest', event_type: 'digest.due' },
+    });
+    const out = created.output as any;
+    expect(out.consumers).toEqual([]);
+    expect(out.warning).toBeTruthy();
   });
 
   it('refuses a reserved namespace, and writes nothing', async () => {
@@ -628,6 +861,171 @@ describe('a schedule needs a consumer (§6.2, F.2)', () => {
     expect(delivered.map((d) => (d.payload as any).title)).toContain('Take the bins out');
     // The before-shot for this test had zero runs and zero deliveries.
     expect(delivered.length).toBeGreaterThan(0);
+  });
+
+  it('runs a schedule by hand, all the way to the notification, without consuming it', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    // Booked for tomorrow and never due during this test: everything that
+    // happens below happens because the tool asked for it.
+    const created = (
+      await dispatch(h, 'schedule.create', {
+        fire_at: isoPlusSeconds(86_400),
+        note: 'take the bins out',
+      })
+    ).output as any;
+    expect(created.consumers).toContain('scheduled-task');
+
+    let notified = false;
+    h.fake.always((req) => {
+      if (req.body.response_format) {
+        return {
+          text: JSON.stringify({
+            summary: 'a reminder was run by hand: take the bins out',
+            verdicts: [
+              { handler: 'scheduled-task', matched: true, reason: 'a plain reminder' },
+            ],
+          }),
+        };
+      }
+      if (notified) return { text: 'Reminded.' };
+      notified = true;
+      return {
+        toolCalls: [
+          {
+            name: 'deliver.notify',
+            args: { title: 'Take the bins out', body: 'You asked to be reminded.' },
+          },
+        ],
+      };
+    });
+
+    const fired = (await dispatch(h, 'schedule.trigger', { schedule_id: created.schedule_id }))
+      .output as any;
+    expect(fired.event_type).toBe('timer.fired');
+    expect(fired.consumers).toContain('scheduled-task');
+    expect(fired.warning).toBeUndefined();
+    await h.service.queue.drain();
+
+    // The same rope as a timed fire: ingress, the owning handler, a delivery.
+    const event = h.service.repos.events
+      .recent({ limit: 10 })
+      .find((e) => e.id === fired.event_id)!;
+    expect(event.type).toBe('timer.fired');
+    expect(event.source).toBe('scheduler');
+    expect(event.status).toBe('done');
+    const run = h.service.repos.runs.forEvent(event.id).find((r) => r.kind === 'handler');
+    expect(run?.handler_name).toBe('scheduled-task');
+    expect(h.service.repos.deliveries.pending().map((d) => (d.payload as any).title)).toContain(
+      'Take the bins out',
+    );
+
+    // The one admitted difference, and the two numbers that must not lie: a
+    // hand-fired schedule is now, not an occurrence found late (§6.2).
+    expect((event.payload as any).manual).toBe(true);
+    expect((event.payload as any).late_by_s).toBe(0);
+    expect((event.payload as any).note).toBe('take the bins out');
+    expect(Date.parse((event.payload as any).fire_at)).toBeGreaterThan(Date.now() - 60_000);
+
+    // And the booking is exactly where it was: triggering is not consuming.
+    const row = h.service.repos.schedules.get(created.schedule_id)!;
+    expect(row.status).toBe('active');
+    expect(row.fire_at).toBe(created.fire_at);
+    expect(row.last_fired_at).toBeNull();
+    expect(fired.next_fire_at).toBe(created.fire_at);
+  });
+
+  it('a hand-fired event never collides with the real occurrence', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    const created = (
+      await dispatch(h, 'schedule.create', {
+        fire_at: isoPlusSeconds(-1),
+        note: 'the digest',
+        event_type: 'digest.due',
+      })
+    ).output as any;
+
+    const byHand = (await dispatch(h, 'schedule.trigger', { schedule_id: created.schedule_id }))
+      .output as any;
+    // Now let the clock fire the occurrence that was already due. Sharing an
+    // idempotency key here would make one of these two swallow the other.
+    expect(h.service.scheduler.tick()).toBe(1);
+    const fires = h.service.repos.events
+      .recent({ limit: 20 })
+      .filter((e) => e.type === 'digest.due');
+    expect(fires).toHaveLength(2);
+    expect(fires.some((e) => e.id === byHand.event_id)).toBe(true);
+    // One is "now, on purpose", the other is the booking coming due.
+    expect(fires.filter((e) => (e.payload as any).manual === true)).toHaveLength(1);
+  });
+
+  it('is caught by the depth guard when a chain triggers its way back round', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    const created = (
+      await dispatch(h, 'schedule.create', { fire_at: isoPlusSeconds(3600), note: 'loop' })
+    ).output as any;
+
+    // A provenance chain already at MAX_DEPTH — what a handler firing a
+    // schedule that runs that handler builds, a few hops in (§5.5).
+    let causedBy: string | null = null;
+    for (let depth = 0; depth <= 5; depth += 1) {
+      const submitted: any = h.service.intake.submit({
+        type: `chain.step${depth}`,
+        source: 'test',
+        payload: {},
+        ...(causedBy ? { caused_by: causedBy } : {}),
+      });
+      causedBy = submitted.event.id;
+    }
+
+    const { GrantedDispatcher } = await import('../src/tools/dispatcher.js');
+    const deep = new GrantedDispatcher(
+      h.service.tools.handles(),
+      { tools: ['schedule.*'] },
+      { runId: null, eventId: causedBy },
+    );
+    const refused = (
+      await deep.dispatch({
+        toolCallId: '1',
+        name: 'schedule.trigger',
+        args: { schedule_id: created.schedule_id },
+      })
+    ).output as any;
+    // The guard says no, the tool says so as a value, and nothing spins.
+    expect(refused.error).toBe('loop_rejected');
+    expect(refused.reason).toBe('depth_exceeded');
+    // The row is written and left alone — a rejected event is kept for the
+    // audit trail and never processed (App. C.2), so what proves the loop was
+    // stopped is its status, not its absence.
+    const fires = h.service.repos.events
+      .recent({ limit: 30 })
+      .filter((e) => e.type === 'timer.fired');
+    expect(fires).toHaveLength(1);
+    expect(fires[0]?.status).toBe('rejected');
+    expect(h.service.repos.runs.forEvent(fires[0]!.id)).toHaveLength(0);
+  });
+
+  it('refuses to fire a cancelled schedule, and one that does not exist', async () => {
+    h = await bootService({ onboarded: true, runScheduler: false });
+    const created = (
+      await dispatch(h, 'schedule.create', {
+        fire_at: isoPlusSeconds(3600),
+        note: 'spent',
+      })
+    ).output as any;
+    await dispatch(h, 'schedule.cancel', { schedule_id: created.schedule_id });
+
+    const refused = (
+      await dispatch(h, 'schedule.trigger', { schedule_id: created.schedule_id })
+    ).output as any;
+    expect(refused.error).toBe('not_active');
+    expect(refused.status).toBe('cancelled');
+    const missing = (await dispatch(h, 'schedule.trigger', { schedule_id: 'nope' }))
+      .output as any;
+    expect(missing.error).toBe('not_found');
+    // Neither refusal put anything on the rail.
+    expect(
+      h.service.repos.events.recent({ limit: 20 }).filter((e) => e.type === 'timer.fired'),
+    ).toHaveLength(0);
   });
 
   it('offers a custom type to its own handler only', async () => {

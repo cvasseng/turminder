@@ -227,6 +227,12 @@ export interface LlmCallTrace {
    * `timings` object, which is every non-llama.cpp endpoint.
    */
   prompt_evaluated?: number;
+  /**
+   * On `stop_reason: "error"` (X1a, C.1): the unwrapped, scrubbed transport
+   * cause — `getaddrinfo ENOTFOUND host`, `ECONNREFUSED`, an HTTP status —
+   * never the AI SDK's own wrapper text, and never a header, key or secret.
+   */
+  error?: { class: string; message: string };
 }
 
 export interface ToolCallTrace {
@@ -238,6 +244,10 @@ export interface ToolCallTrace {
   denied?: 'not_granted' | 'confirm_denied' | 'confirm_timeout';
   /** Set when a granted-but-closed call paged its namespace in (§21.2.4). */
   implicit_open?: string;
+  /** The result's full length, when the §20.3 cap truncated it (C.1). */
+  truncated_from?: number;
+  /** Set on results the §20.9 backstop wrapped (C.1) — tuning data for §17.11. */
+  futile_streak?: number;
 }
 
 /**

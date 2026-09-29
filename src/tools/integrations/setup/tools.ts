@@ -6,10 +6,12 @@ import { log } from '../../../core/logger.js';
 import { errMessage } from '../../../core/errors.js';
 import { validateWrite } from '../../validate-write.js';
 import {
+  FormRejected,
   secretKeySlug,
   type FieldSpec,
   type FormBroker,
   type FormOutcome,
+  type FormValues,
 } from '../../../chat/forms.js';
 import type { RevealBroker } from '../../../chat/reveals.js';
 import { DEVICE_NAME, DEVICE_NAME_MAX, type DeviceTokens } from '../../../core/tokens.js';
@@ -17,6 +19,7 @@ import type { PairingBroker } from '../../../core/pairing.js';
 import type { ModelRouter } from '../../../model/router.js';
 import { listVoices } from '../../../model/probe.js';
 import type { ToolContext, ToolDefinition } from '../../types.js';
+import { parseRedirect } from '../../mcp/oauth.js';
 import type { Grants } from '../../dispatcher.js';
 import type { GrantStore } from '../../grants.js';
 import { MANIFESTS, manifestFor } from '../registry.js';
@@ -164,8 +167,8 @@ type FieldOverride = z.infer<typeof FieldSpecSchema>;
 /**
  * Merge the agent's field entries onto a template's fields by name (App. F.9:
  * "templates supply their own fields, `fields` entries then override prefills
- * by name"). Names the template does not know are appended, which is what makes
- * the generic no-template form the same code path.
+ * by name"). Names the template does not know are appended — the shape a
+ * generic, no-template form needs, since there `fields` *is* the form.
  */
 export function mergeFields(base: FieldSpec[], overrides: FieldOverride[]): FieldSpec[] {
   const merged: FieldSpec[] = base.map((field) => {
@@ -186,6 +189,45 @@ export function mergeFields(base: FieldSpec[], overrides: FieldOverride[]): Fiel
 }
 
 /**
+ * The template/manifest version of the merge above (K5): a fixed field set is
+ * not the model's to extend. Appending an unknown override there is how "url"
+ * and "base_url" both ended up meaning the same thing to two different calls
+ * — so an override naming a field the template does not have is refused,
+ * rather than silently becoming a new one.
+ */
+export function applyTemplateOverrides(
+  base: FieldSpec[],
+  overrides: FieldOverride[],
+): FieldSpec[] | { error: 'unknown_field'; fields: string[]; message: string } {
+  const names = base.map((f) => f.name);
+  const unknown = [
+    ...new Set(overrides.filter((o) => !names.includes(o.name)).map((o) => o.name)),
+  ];
+  if (unknown.length) {
+    return {
+      error: 'unknown_field',
+      fields: names,
+      message: `this form has no field named ${unknown.join(', ')} — its fields are: ${names.join(', ')}`,
+    };
+  }
+  return mergeFields(base, overrides);
+}
+
+/**
+ * Re-present with what was already typed (K3): fixing one field should not
+ * mean retyping the rest. Never a secret — the UI does not prefill those to
+ * begin with (§19.2), and reflecting one back here would show the human their
+ * own credential's `${secret:}` reference as if it were the value.
+ */
+function withValues(fields: FieldSpec[], values: FormValues): FieldSpec[] {
+  return fields.map((f) => {
+    if (f.type === 'secret') return f;
+    const v = values[f.name];
+    return v === undefined ? f : { ...f, value: v };
+  });
+}
+
+/**
  * Every secret field needs somewhere to land. The agent can name the key; when
  * it does not, derive one — prefixed by the form's own `name` field, so the
  * second connector someone adds cannot overwrite the first one's credential.
@@ -201,15 +243,149 @@ export function fillSecretKeys(fields: FieldSpec[]): FieldSpec[] {
   });
 }
 
-/** The shape App. F.9 promises the run, whichever way the form ended. */
-function outcomeResult(outcome: FormOutcome, effect?: unknown): Record<string, unknown> {
+/**
+ * The shape App. F.9 promises the run, whichever way the form ended.
+ * `attempts` rides along only once a retry actually happened (K3) — the
+ * model sees the final outcome plus how many tries it took, never the
+ * intermediate re-presentations themselves.
+ */
+function outcomeResult(
+  outcome: FormOutcome,
+  effect?: unknown,
+  attempts?: number,
+): Record<string, unknown> {
+  if (!outcome.submitted && outcome.reason === 'form_pending') {
+    return { error: 'form_pending', form_id: outcome.form_id, message: outcome.message };
+  }
   if (!outcome.submitted) return { submitted: false, reason: outcome.reason };
   return {
     submitted: true,
     values: outcome.values,
     secrets: outcome.secrets,
     ...(effect === undefined ? {} : { effect }),
+    ...(attempts && attempts > 1 ? { attempts } : {}),
   };
+}
+
+/**
+ * `setup.activate` on an external MCP server that signs in with a browser
+ * (§19.6 `activation: oauth`, extended to mcp.yaml). The first ask hands back a
+ * link, the way Google's activation does, and does not wait on the browser.
+ * An ask while that link is still out is the phone case: a loopback redirect
+ * on a phone lands on the phone's own localhost, so the person gets a form to
+ * paste the dead page's address into. The server takes `code` and `state` out
+ * of it; the address itself is never in a result, so it never reaches the
+ * model (D.5). The form closes itself if the callback lands first.
+ */
+async function signInMcpServer(
+  server: string,
+  deps: SetupDeps,
+  ctx: ToolContext,
+): Promise<Record<string, unknown>> {
+  const hub = deps.tools();
+  if (!hub) return { error: 'not_ready', message: 'the tool layer is not running yet' };
+  const cfg = deps.config.mcp().servers.find((s) => s.name === server);
+  if (cfg?.auth?.type !== 'oauth') {
+    return {
+      error: 'not_oauth',
+      integration: server,
+      message: `${server} does not sign in with a browser — a credential it takes is set by installing it again with setup.form`,
+    };
+  }
+  const connected = (tools: string[]) => ({
+    activated: true,
+    integration: server,
+    tools,
+    // Connecting is not being allowed to use it (App. F.7) — same as install.
+    granted: false,
+    next_step: tools.length
+      ? `You cannot call these yet. Ask the user with setup.request_access {tools: ["${server}.*"]}.`
+      : 'The server connected but served no tools.',
+  });
+  const status = hub.serverStatus().find((s) => s.name === server);
+  if (status?.connected) {
+    return {
+      error: 'already_active',
+      integration: server,
+      message: 'It is connected and signed in.',
+    };
+  }
+
+  const linkWasOut = hub.hasPendingAuthorization(server);
+  const begun = await hub.beginAuthorization(server);
+  if ('error' in begun) return { integration: server, ...begun };
+  if ('authorized' in begun) return connected(begun.tools);
+  if (!linkWasOut || !ctx.conversationId || !ctx.runId) {
+    return {
+      pending: true,
+      integration: server,
+      auth_url: begun.auth_url,
+      redirect_uri: begun.redirect_uri,
+      message:
+        'Give the user this link to sign in. Connecting finishes on its own when they approve — a notification follows; you will not be told here. ' +
+        'If they say the page after approving would not load (on a phone, typically), call setup.activate for this server again: it shows them a form to paste that address into.',
+    };
+  }
+
+  let finished: string[] | null = null;
+  const done = new AbortController();
+  const off = hub.onAuthorized((name, tools) => {
+    if (name !== server) return false;
+    finished = tools;
+    done.abort();
+    return true;
+  });
+  try {
+    const outcome = await deps.forms.request({
+      runId: ctx.runId,
+      conversationId: ctx.conversationId,
+      title: `Finish signing in to ${server}`,
+      template: 'oauth_paste',
+      description:
+        'If the page you landed on after approving would not load, copy its whole address from the ' +
+        "address bar and paste it here. This closes by itself if the sign-in finishes some other way. Haven't approved yet? " +
+        `The sign-in link is: ${begun.auth_url}`,
+      fields: [
+        {
+          name: 'redirected_to',
+          label: 'The address of the page that would not load',
+          type: 'url',
+        },
+      ],
+      // Checked inside submit (K3): an address with no code in it keeps the
+      // same form open, saying why, instead of ending the call.
+      validate: (values) => {
+        const parsed = parseRedirect(String(values.redirected_to ?? ''));
+        if ('error' in parsed) throw new FormRejected(parsed.message);
+      },
+      signal: ctx.signal ? AbortSignal.any([ctx.signal, done.signal]) : done.signal,
+    });
+    if (finished) return connected(finished);
+    if (!outcome.submitted) {
+      return {
+        ...outcomeResult(outcome),
+        integration: server,
+        auth_url: begun.auth_url,
+        message: 'The sign-in link still works; connecting finishes on its own if they use it.',
+      };
+    }
+    if (ctx.signal?.aborted) return { submitted: false, reason: 'abandoned' };
+    const parsed = parseRedirect(String(outcome.values.redirected_to ?? ''));
+    if ('error' in parsed) return { integration: server, ...parsed };
+    // Heard here, as this call's own result — not as a second notification.
+    const result = await hub.completeAuthorization(parsed, { announce: false });
+    if (!result.ok) {
+      return {
+        activated: false,
+        integration: server,
+        error: result.error,
+        message: result.message,
+      };
+    }
+    return connected(result.tools);
+  } finally {
+    off();
+  }
 }
 
 /**
@@ -225,6 +401,9 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
       description:
         'Ask the user for structured input with an inline form, and wait. The only way to take a credential — never as chat text. Templates install connectors on submit. choice = button row; embed_id previews an embed.',
       tier: 'se',
+      // The human gets the whole form timeout, not the transport's two minutes
+      // (App. A) — fetching a token from another tab is the ordinary case.
+      awaitsHuman: () => deps.config.settings.formTimeoutS,
       args: z.object({
         title: z.string().min(1),
         template: z
@@ -263,48 +442,104 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
           return { error: 'unknown_template', available: TEMPLATE_NAMES };
         }
 
-        const fields = fillSecretKeys(
-          mergeFields(template ? templateFields(template, deps) : [], args.fields ?? []),
-        );
-        if (!fields.length) {
+        const baseFields = template ? templateFields(template, deps) : [];
+        // A template's fields are a fixed set the model does not get to
+        // extend (K5) — a generic form has no fixed set to violate, so
+        // `fields` there simply *is* the form, appended as always.
+        const applied = template
+          ? applyTemplateOverrides(baseFields, args.fields ?? [])
+          : mergeFields(baseFields, args.fields ?? []);
+        if (!Array.isArray(applied)) return applied;
+        let liveFields = fillSecretKeys(applied);
+        if (!liveFields.length) {
           return {
             error: 'invalid_arguments',
             detail: 'a form with no template needs at least one field',
           };
         }
 
-        const outcome = await deps.forms.request({
-          runId: ctx.runId,
-          conversationId: ctx.conversationId,
-          title: args.title,
-          ...(template ? { template: template.name } : {}),
-          // Pass-through: an id the UI cannot resolve degrades to no preview,
-          // which is the right failure for a cosmetic attachment.
-          ...(args.embed_id ? { embedId: args.embed_id } : {}),
-          fields,
-        });
+        // Fixable effect failures get re-presented, all inside this one tool
+        // call, bounded at 3 human answers total — the model sees only the
+        // last of them plus `attempts` (K3, §19.3's widened exception).
+        const MAX_FORM_ATTEMPTS = 3;
+        let description: string | undefined;
+        // A secret left blank on a re-presentation means "keep what I
+        // already gave you", not "clear it" — the UI never prefills a secret
+        // field (§19.2), so asking again would otherwise force retyping a
+        // credential that was fine.
+        let carriedSecrets: Record<string, string> = {};
 
-        if (!outcome.submitted || !template) return outcomeResult(outcome);
+        for (let attempts = 1; ; attempts++) {
+          const outcome = await deps.forms.request({
+            runId: ctx.runId,
+            conversationId: ctx.conversationId,
+            title: args.title,
+            ...(description ? { description } : {}),
+            ...(template ? { template: template.name } : {}),
+            // Pass-through: an id the UI cannot resolve degrades to no
+            // preview, which is the right failure for a cosmetic attachment.
+            ...(args.embed_id ? { embedId: args.embed_id } : {}),
+            fields: liveFields,
+            ...(template
+              ? { validate: (values: FormValues) => template?.validate?.(values) }
+              : {}),
+            ...(ctx.signal ? { signal: ctx.signal } : {}),
+          });
 
-        // Server-side effect: deterministic code, never the model (§19.3).
-        let effect: unknown;
-        try {
-          effect = await template.effect(
-            {
-              values: outcome.values,
-              secrets: outcome.secrets,
-              // Which run to come back to, for the one template that has a
-              // second question (§10.2, §19.3) — the model select, which needs
-              // the URL this form just collected before it can be offered.
-              form: { runId: ctx.runId, conversationId: ctx.conversationId },
-            },
-            deps,
+          if (!outcome.submitted) return outcomeResult(outcome);
+          if (!template) {
+            // Not a template: nothing here owns writing these values (K5) —
+            // say so, so the result is never mistaken for a way to persist
+            // anything.
+            return {
+              ...outcomeResult(outcome),
+              note:
+                'a generic form has no template effect — these values were not written ' +
+                'anywhere; use the tool that owns this setting if it needs to be saved',
+            };
+          }
+          // Answered in the instant the call was given up on: the broker took
+          // the submit, but nobody is left to hear what the effect did, so it
+          // does not run (§19.1).
+          if (ctx.signal?.aborted) return { submitted: false, reason: 'abandoned' };
+
+          const secrets = { ...carriedSecrets, ...outcome.secrets };
+          carriedSecrets = secrets;
+
+          // Server-side effect: deterministic code, never the model (§19.3).
+          let effect: unknown;
+          try {
+            effect = await template.effect(
+              {
+                values: outcome.values,
+                secrets,
+                // Which run to come back to, for a template that has one
+                // more question (§10.2, §19.3) — the model select, or (K3)
+                // the same form re-presented after a fixable failure.
+                form: {
+                  runId: ctx.runId,
+                  conversationId: ctx.conversationId,
+                  ...(ctx.signal ? { signal: ctx.signal } : {}),
+                },
+              },
+              deps,
+            );
+          } catch (e) {
+            effect = effectFailure(e);
+            l.warn({ template: template.name, err: effect }, 'template effect failed');
+          }
+
+          const teaching = template.retryable?.(effect, { values: outcome.values, secrets });
+          if (!teaching || attempts >= MAX_FORM_ATTEMPTS) {
+            return outcomeResult(outcome, effect, attempts);
+          }
+          l.info(
+            { template: template.name, attempt: attempts },
+            're-presenting a form after a fixable failure',
           );
-        } catch (e) {
-          effect = effectFailure(e);
-          l.warn({ template: template.name, err: effect }, 'template effect failed');
+          description = teaching;
+          liveFields = withValues(liveFields, outcome.values);
         }
-        return outcomeResult(outcome, effect);
       },
     },
     {
@@ -312,6 +547,7 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
       description:
         'Ask the user to grant you tools that exist but you cannot call. Reach for it the moment something is missing — before saying you cannot help. Connected is not granted.',
       tier: 'se',
+      awaitsHuman: () => deps.config.settings.formTimeoutS,
       args: z.object({
         tools: z.array(z.string().min(1)).min(1).describe('names or globs, e.g. ["github.*"]'),
         reason: z.string().min(1).describe('shown to the user verbatim'),
@@ -364,8 +600,14 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
           description: form.description,
           template: 'grant_access',
           fields: form.fields,
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
         });
         if (!outcome.submitted) return accessResult(outcome, matched, null);
+        // Answered in the instant the call was given up on: nobody is left to
+        // hear what got granted, so nothing is (§19.1).
+        if (ctx.signal?.aborted) {
+          return accessResult({ submitted: false, reason: 'abandoned' }, matched, null);
+        }
 
         const level = LEVEL_CHOICES[String(outcome.values.decision ?? '')];
         if (!level) return accessResult(outcome, matched, null);
@@ -437,6 +679,9 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
               // say when it will be tried again, or "connected: false" reads
               // as "gone" when it means "reach for it and it will retry".
               ...(s.next_retry_at ? { next_retry_at: s.next_retry_at } : {}),
+              // Down for want of a sign-in, not a network (§11.6): the answer
+              // is setup.activate, and no amount of retrying will do.
+              ...(s.needs_auth ? { needs_auth: true } : {}),
             })) ?? [],
           /** Everything in the process you cannot call yet, whatever serves it. */
           ungranted_tools: (hub?.handles() ?? [])
@@ -455,8 +700,9 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
     {
       name: 'setup.activate',
       description:
-        'Turn on a bundled integration that needs a credential — it shows the user its activation form, validates what they enter, and starts using it. Ask setup.list_integrations first if you are not sure of the name. Prefill what the conversation already established.',
+        'Turn on a bundled integration that needs a credential — it shows the user its activation form, validates what they enter, and starts using it. Also signs in to an MCP server that reports needs_auth. Ask setup.list_integrations first if you are not sure of the name. Prefill what the conversation already established.',
       tier: 'se',
+      awaitsHuman: () => deps.config.settings.formTimeoutS,
       args: z.object({
         integration: z.string().min(1).describe('the integration name, e.g. asana'),
         prefill: z
@@ -469,6 +715,11 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
         ctx: ToolContext,
       ) {
         const manifest = manifestFor(args.integration);
+        // An external server in mcp.yaml that signs in with a browser (§19.6)
+        // activates here too — "sign in to X again" has one door, not two.
+        if (!manifest && deps.config.mcp().servers.some((s) => s.name === args.integration)) {
+          return signInMcpServer(args.integration, deps, ctx);
+        }
         if (!manifest) {
           return {
             error: 'unknown_integration',
@@ -495,20 +746,26 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
           };
         }
 
-        const fields = fillSecretKeys(
-          mergeFields(
-            manifest.fields ?? [],
-            Object.entries(args.prefill ?? {}).map(([name, value]) => ({ name, value })),
-          ),
+        // The manifest's fields are a fixed set (K5) — a prefill naming one
+        // it does not have is refused, not silently appended as a new field.
+        const applied = applyTemplateOverrides(
+          manifest.fields ?? [],
+          Object.entries(args.prefill ?? {}).map(([name, value]) => ({ name, value })),
         );
+        if (!Array.isArray(applied)) return applied;
+        const fields = fillSecretKeys(applied);
         const outcome = await deps.forms.request({
           runId: ctx.runId,
           conversationId: ctx.conversationId,
           title: `Set up ${manifest.name}`,
           template: `activate:${manifest.name}`,
           fields,
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
         });
         if (!outcome.submitted) return outcomeResult(outcome);
+        // Answered in the instant the call was given up on: nobody is left to
+        // hear what activation did, so it does not run (§19.1).
+        if (ctx.signal?.aborted) return { submitted: false, reason: 'abandoned' };
 
         try {
           return {
@@ -646,6 +903,7 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
         'search results look stale. The user confirms via a form before anything is ' +
         'discarded; searches degrade to lexical while the rebuild runs.',
       tier: 'se',
+      awaitsHuman: () => deps.config.settings.formTimeoutS,
       args: z.strictObject({}),
       async execute(_args: Record<string, never>, ctx: ToolContext) {
         if (!ctx.conversationId) {
@@ -670,9 +928,13 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
               options: ['Rebuild', 'Cancel'],
             },
           ],
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
         });
 
         if (!outcome.submitted) return { submitted: false, reason: outcome.reason };
+        // Answered in the instant the call was given up on: nobody is left to
+        // see the rebuild finish, so it does not start (§19.1).
+        if (ctx.signal?.aborted) return { submitted: false, reason: 'abandoned' };
         if (outcome.values.confirm !== 'Rebuild') {
           return { submitted: true, rebuilt: false, reason: 'declined' };
         }
@@ -690,6 +952,7 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
         'user types the figures, not you. Use when asked what something costs, or told a ' +
         'price. Prices apply to calls made from now on; past runs keep what they ran at.',
       tier: 'se',
+      awaitsHuman: () => deps.config.settings.formTimeoutS,
       args: z.strictObject({
         endpoint: z
           .string()
@@ -778,9 +1041,13 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
               value: current?.currency ?? 'USD',
             },
           ],
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
         });
 
         if (!outcome.submitted) return { submitted: false, reason: outcome.reason };
+        // Answered in the instant the call was given up on: nobody is left to
+        // hear what got priced, so nothing is written (§19.1).
+        if (ctx.signal?.aborted) return { submitted: false, reason: 'abandoned' };
         const name = chosen ?? String(outcome.values.endpoint ?? '');
         const target = endpoints.find((e) => e.name === name);
         if (!target) {
@@ -863,6 +1130,7 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
         'one form: the user picks, and can hear each candidate voice before choosing. Use ' +
         'when asked to speak a different language or sound different.',
       tier: 'se',
+      awaitsHuman: () => deps.config.settings.formTimeoutS,
       args: z.strictObject({}),
       async execute(_args: Record<string, never>, ctx: ToolContext) {
         if (!ctx.conversationId) {
@@ -948,8 +1216,12 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
               value: currentVoice,
             },
           ],
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
         });
         if (!outcome.submitted) return { submitted: false, reason: outcome.reason };
+        // Answered in the instant the call was given up on: nobody is left to
+        // hear the result, so nothing is written (§19.1).
+        if (ctx.signal?.aborted) return { submitted: false, reason: 'abandoned' };
 
         const language = languageCode(String(outcome.values.language ?? ''));
         const voice = String(outcome.values.voice ?? '').trim() || currentVoice;
@@ -985,6 +1257,7 @@ export function setupTools(deps: SetupDeps): ToolDefinition[] {
       description:
         'Add, change, switch off or remove a printer or scanner. It looks for machines on the network and shows the user a form to pick from — so "set up my printer", "the printer moved", and "forget the old one" all come here. It never writes anything the user did not confirm on the form.',
       tier: 'se',
+      awaitsHuman: () => deps.config.settings.formTimeoutS,
       args: z.object({}),
       async execute(_args: Record<string, never>, ctx: ToolContext) {
         try {

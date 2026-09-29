@@ -25,6 +25,17 @@ const browserGlobals = {
   Audio: 'readonly',
   console: 'readonly',
   marked: 'readonly',
+  // `self`, `caches` and `Response` are real globals in an ordinary page too
+  // (§9, U5) — `sw.js` is the one file that actually uses them, but they are
+  // not worker-specific enough to warrant their own block.
+  self: 'readonly',
+  caches: 'readonly',
+  Response: 'readonly',
+  isSecureContext: 'readonly',
+  // The chat UI's mic button records and re-encodes a WAV client-side
+  // (§33.6) — no dependency, just the platform's own media and blob APIs.
+  Blob: 'readonly',
+  MediaRecorder: 'readonly',
 };
 
 const wsBan = [

@@ -148,6 +148,64 @@ describe('database bootstrap', () => {
     db.close();
   });
 
+  it('applies migration 014 on an empty database and on one with existing deliveries (§7.1)', () => {
+    const db = openDb(dbFile());
+    const insert = (id: string, status: string) =>
+      db
+        .prepare(
+          `INSERT INTO deliveries (id, intent, payload, created_at, expires_at, status)
+           VALUES (?, 'notify', '{}', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z', ?)`,
+        )
+        .run(id, status);
+    // Empty-database case: the fresh schema already takes the new status.
+    insert('01FRESH', 'missed');
+    db.exec(`DELETE FROM deliveries`);
+
+    // The v13 shape by hand: the CHECK before `missed` existed, with real rows,
+    // and a high-water mark above the surviving rows (the newest was removed).
+    db.exec(`DROP TABLE deliveries`);
+    db.exec(`CREATE TABLE deliveries (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+      intent TEXT NOT NULL CHECK (intent IN ('notify','confirm')),
+      payload TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+      created_by_run TEXT REFERENCES runs(id),
+      status TEXT NOT NULL DEFAULT 'queued'
+             CHECK (status IN ('queued','delivered','acked','expired')),
+      delivered_at TEXT, acked_at TEXT, acked_by TEXT)`);
+    db.exec(`CREATE INDEX ix_deliveries_status ON deliveries(status, expires_at)`);
+    insert('01ACKED', 'acked');
+    insert('01EXPIRED', 'expired');
+    insert('01GONE', 'queued');
+    expect(() => insert('01EARLY', 'missed')).toThrow(/CHECK/);
+    db.exec(`DELETE FROM deliveries WHERE id = '01GONE'`);
+    setMeta(db, 'db_version', '13');
+
+    expect(migrate(db)).toBe(DB_VERSION);
+    const rows = db.prepare(`SELECT seq, id, status FROM deliveries ORDER BY seq`).all() as {
+      seq: number;
+      id: string;
+      status: string;
+    }[];
+    // Copied verbatim — an `expired` row stays expired; reclassifying history
+    // is not a migration default.
+    expect(rows.map((r) => [r.id, r.status])).toEqual([
+      ['01ACKED', 'acked'],
+      ['01EXPIRED', 'expired'],
+    ]);
+    // `seq` is every device's cursor: the next row must not reuse the one the
+    // removed delivery had, or a fresh delivery hides behind an old ack.
+    insert('01NEXT', 'missed');
+    const next = db.prepare(`SELECT seq FROM deliveries WHERE id = '01NEXT'`).get() as {
+      seq: number;
+    };
+    expect(next.seq).toBe(4);
+    expect(() => insert('01BOGUS', 'bogus')).toThrow(/CHECK/);
+    expect(
+      (db.pragma('index_list(deliveries)') as { name: string }[]).map((r) => r.name),
+    ).toContain('ix_deliveries_status');
+    db.close();
+  });
+
   it('refuses a database from the future', () => {
     const db = openDb(dbFile());
     setMeta(db, 'db_version', String(DB_VERSION + 5));

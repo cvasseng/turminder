@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { FileStoreError, type FileStore } from '../../files/store.js';
 import type { FilesIndex } from '../../rag/files-index.js';
 import type { ProjectScope } from '../../projects/scope.js';
-import { PathRejected } from '../paths.js';
+import { didYouMean, PathRejected } from '../paths.js';
 import type { ToolContext, ToolDefinition } from '../types.js';
 
 export interface FilesDeps {
@@ -12,9 +12,30 @@ export interface FilesDeps {
   scope: ProjectScope;
 }
 
-/** Store errors are outcomes the model should reason about, not exceptions. */
-function asError(e: unknown): { error: string; message: string } {
-  if (e instanceof FileStoreError) return { error: e.code, message: e.message };
+/**
+ * Store errors are outcomes the model should reason about, not exceptions.
+ * `suggest` names the path that was actually asked for, so a `not_found`
+ * carries up to 3 guesses at what was meant (App. F.8, X3) — computed from
+ * the store's own listing, never a model call.
+ */
+function asError(
+  e: unknown,
+  suggest?: { store: FileStore; attempted: string },
+): { error: string; message: string; did_you_mean?: string[] } {
+  if (e instanceof FileStoreError) {
+    if (e.code === 'not_found' && suggest) {
+      const guesses = didYouMean(
+        suggest.store.list().map((f) => f.path),
+        suggest.attempted,
+      );
+      return {
+        error: e.code,
+        message: e.message,
+        ...(guesses.length ? { did_you_mean: guesses } : {}),
+      };
+    }
+    return { error: e.code, message: e.message };
+  }
   if (e instanceof PathRejected) return { error: 'path_rejected', message: e.reason };
   throw e;
 }
@@ -74,7 +95,7 @@ export function filesTools(deps: FilesDeps): ToolDefinition[] {
             ...(args.limit_lines !== undefined ? { limitLines: args.limit_lines } : {}),
           });
         } catch (e) {
-          return asError(e);
+          return asError(e, { store, attempted: args.path });
         }
       },
     },
@@ -105,7 +126,7 @@ export function filesTools(deps: FilesDeps): ToolDefinition[] {
         try {
           return store.append(args.path, args.content, args.message);
         } catch (e) {
-          return asError(e);
+          return asError(e, { store, attempted: args.path });
         }
       },
     },
@@ -124,7 +145,7 @@ export function filesTools(deps: FilesDeps): ToolDefinition[] {
         try {
           return store.edit(args.path, args.find, args.replace, args.message);
         } catch (e) {
-          return asError(e);
+          return asError(e, { store, attempted: args.path });
         }
       },
     },

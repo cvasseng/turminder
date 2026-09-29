@@ -20,11 +20,25 @@
  * tell was not their fault. Only a 401 to a request that actually carried the
  * token is evidence against the token; everything else means keep trying.
  */
-async function tokenVerdict(value) {
+async function tokenVerdict(value, confirmDelayMs = 1500) {
   const t = (value || '').trim();
   // Nothing to test is not the same as tested and refused, but both send the
   // caller to the gate, and the gate is what asks for a token.
   if (!t) return 'rejected';
+  const first = await askWhoami(t);
+  if (first !== 'rejected') return first;
+  // One 401 is not enough to destroy a credential. The server can briefly
+  // refuse a good token: a check that reads the device file mid-write, or
+  // lands on a service still booting from a restart. Neither survives a
+  // second look a moment later, and a revoked token fails both. So ask twice,
+  // and only two refusals in a row condemn it (§24.4).
+  await new Promise((resolve) => setTimeout(resolve, confirmDelayMs));
+  const second = await askWhoami(t);
+  return second === 'rejected' ? 'rejected' : second;
+}
+
+/** One question to the probe: `ok`, `rejected` (a 401), or `unknown`. */
+async function askWhoami(t) {
   let res;
   try {
     res = await fetch('/api/whoami', {

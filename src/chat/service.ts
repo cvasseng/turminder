@@ -225,10 +225,16 @@ export class ChatService {
   }
 
   /**
-   * Archive a conversation. Only the user closes one — going idle never does
-   * (§9) — and closing emits the hook the distillation pass hangs off.
+   * Archive a conversation — the user's button, or the §9 sweep below saying
+   * the same thing about a conversation that has been quiet for a week.
+   * Closing emits the hook the distillation pass hangs off, and one path does
+   * both so an archived conversation is in the same state however it got
+   * there: same event, same mark, same frame to every connected client.
    */
-  close(conversationId: string): { closed: boolean; turnCount: number } {
+  close(
+    conversationId: string,
+    opts: { auto?: boolean } = {},
+  ): { closed: boolean; turnCount: number } {
     const conversation = this.repos.conversations.get(conversationId);
     if (!conversation) return { closed: false, turnCount: 0 };
     const turnCount = this.repos.conversations.turnCount(conversationId);
@@ -244,23 +250,58 @@ export class ChatService {
           conversation_id: conversationId,
           turn_count: turnCount,
           since: conversation.distilled_at,
+          // Who closed it (App. B). The distillation pass does not care, but
+          // an event log that cannot tell the user's decision from the
+          // system's housekeeping is a log that answers "why did this
+          // archive itself" with a shrug.
+          ...(opts.auto ? { auto: true } : {}),
         },
       });
       this.repos.conversations.markDistilled(conversationId);
       // Tell whoever is connected: another client may have this conversation
       // open, and archiving it here should not leave that one out of date.
       this.stream.closed({ conversationId });
-      l.info({ conversation: conversationId, turnCount }, 'conversation closed');
+      l.info(
+        { conversation: conversationId, turnCount, auto: opts.auto === true },
+        'conversation closed',
+      );
     }
     return { closed, turnCount };
   }
 
   /**
+   * Auto-archive (App. A: 7 days, `0` = never). Called on the same timer as
+   * `distillIdle`, and deliberately after it: by the time a conversation is a
+   * week quiet the 30-minute pass has long since claimed whatever it owed, so
+   * the close event's delta is empty and the distillation short-circuits
+   * without a model call.
+   *
+   * This reverses the original §9 rule that only a user archives. What made
+   * that rule right was the fear of losing a conversation, so the two things
+   * that answer the fear are load-bearing: the sidebar can show archived
+   * conversations, and writing to one reopens it. Neither is a detail to
+   * optimise away later — without them this is a feature that hides your
+   * work. Nothing is deleted here, and the `0` escape hatch turns the whole
+   * sweep off for an install that wants the old behaviour back.
+   */
+  archiveIdle(): number {
+    const days = this.config.settings.conversationArchiveDays;
+    if (days <= 0) return 0;
+    const cutoff = isoPlusSeconds(-days * 24 * 3600);
+    let archived = 0;
+    for (const c of this.repos.conversations.needingArchive(cutoff)) {
+      if (this.close(c.id, { auto: true }).closed) archived += 1;
+    }
+    if (archived) l.info({ archived, days }, 'archived conversations quiet past the window');
+    return archived;
+  }
+
+  /**
    * Idle timeout (App. A: 30 min). Called on a timer by the service. A quiet
    * conversation is one the user is probably done with for now, which is when
-   * distillation is worth running — but it is *not* the user saying they are
-   * done with it, so the conversation stays open and stays in the list.
-   * Archiving is theirs to do (§9).
+   * distillation is worth running — but half an hour is not a decision about
+   * the conversation, so this leaves it open and in the list. Archiving is on
+   * a far longer clock and is `archiveIdle`'s job (§9).
    */
   distillIdle(): number {
     const cutoff = isoPlusSeconds(-this.config.settings.conversationIdleMin * 60);

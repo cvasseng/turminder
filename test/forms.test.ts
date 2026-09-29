@@ -1,20 +1,32 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import matter from 'gray-matter';
 import YAML from 'yaml';
 import { Config } from '../src/core/config.js';
 import { openDataHome, type DataHome } from '../src/core/datadir.js';
 import { FormBroker, type FieldSpec, type FormSink } from '../src/chat/forms.js';
 import { resolveWritablePath, PathRejected } from '../src/tools/paths.js';
+import { McpConnection } from '../src/tools/mcp/connect.js';
+import type { ToolContext, ToolDefinition } from '../src/tools/types.js';
 import { redactTraceArgs } from '../src/tools/redact.js';
 import { splitCommand } from '../src/tools/integrations/setup/templates.js';
 import { reprobeEndpoint } from '../src/tools/integrations/setup/reprobe.js';
-import { fillSecretKeys, mergeFields } from '../src/tools/integrations/setup/tools.js';
+import {
+  applyTemplateOverrides,
+  fillSecretKeys,
+  mergeFields,
+} from '../src/tools/integrations/setup/tools.js';
+import {
+  runPrinterWizard,
+  type PrinterSetupDeps,
+} from '../src/tools/integrations/setup/printers.js';
 import { bootService, TestClient, type ServiceHarness } from './service-harness.js';
 import { FakeLlama } from './fake-llama.js';
 import { FakeSpeech } from './fake-speech.js';
-import { clearVoiceCache } from '../src/model/probe.js';
+import { clearVoiceCache, normaliseEndpointUrl } from '../src/model/probe.js';
 import { OPENAI_VOICES, STT_LANGUAGES } from '../src/tools/integrations/setup/tools.js';
 import { tmpDir, write } from './helpers.js';
 
@@ -244,6 +256,329 @@ describe('form primitive (§19.1, App. D.5)', () => {
   });
 });
 
+describe('one form per run (§19.3, K2)', () => {
+  it('refuses a second form while the first is pending, and sends one frame', async () => {
+    const env = brokerEnv();
+    const sink = recorder();
+    env.broker.attach(sink);
+    const first = requestOn(env);
+    const firstId = sink.sent[0]!.payload.form_id;
+
+    expect(await requestOn(env)).toEqual({
+      submitted: false,
+      reason: 'form_pending',
+      form_id: firstId,
+      message: "the user hasn't answered the form already on screen — wait, or end your turn",
+    });
+    expect(sink.sent.map((f) => f.type)).toEqual(['form.request']);
+    expect(env.broker.waiting).toBe(1);
+
+    // A different run is somebody else's turn, and is not refused.
+    const other = env.broker.request({
+      runId: 'run-2',
+      conversationId: 'conv-1',
+      title: 'Another',
+      fields: FIELDS,
+    });
+    expect(sink.sent).toHaveLength(2);
+    env.broker.cancel(sink.sent[1]!.payload.form_id);
+    await other;
+
+    // Once the first settles, the same run may ask again — the sequential
+    // "one more form" of §19.3 is untouched.
+    env.broker.cancel(firstId);
+    await first;
+    const again = requestOn(env);
+    expect(sink.sent.filter((f) => f.type === 'form.request')).toHaveLength(3);
+    env.broker.interruptAll();
+    await again;
+    env.cleanup();
+  });
+
+  it('never refuses a form that belongs to no run (pairing, D.5)', async () => {
+    const env = brokerEnv();
+    const sink = recorder();
+    env.broker.attach(sink);
+    const ask = () =>
+      env.broker.request({ runId: '', conversationId: '', title: 'Pair?', fields: FIELDS });
+    void ask();
+    void ask();
+    expect(sink.sent).toHaveLength(2);
+    env.broker.interruptAll();
+    env.cleanup();
+  });
+});
+
+describe('a form outlives its tool call, or dies with it (§19.1, K1)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('closes an abandoned form everywhere, and refuses the late submit without writing', async () => {
+    const env = brokerEnv();
+    const sink = recorder();
+    env.broker.attach(sink);
+    const call = new AbortController();
+    const pending = env.broker.request({
+      runId: 'run-1',
+      conversationId: 'conv-1',
+      title: 'Connect something',
+      fields: FIELDS,
+      signal: call.signal,
+    });
+    const formId = sink.sent[0]!.payload.form_id;
+
+    call.abort();
+    expect(await pending).toEqual({ submitted: false, reason: 'abandoned' });
+    expect(sink.sent.at(-1)).toEqual({
+      type: 'form.closed',
+      payload: { form_id: formId, reason: 'abandoned' },
+    });
+    expect(env.broker.submit(formId, { name: 'late', token: 'sentinel-late-7' })).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+    expect(secretsOf(env.home)).toEqual({});
+    env.cleanup();
+  });
+
+  it('does not raise a form for a call that is already abandoned', async () => {
+    const env = brokerEnv();
+    const sink = recorder();
+    env.broker.attach(sink);
+    const call = new AbortController();
+    call.abort();
+    expect(
+      await env.broker.request({
+        runId: 'run-1',
+        conversationId: 'conv-1',
+        title: 'Too late',
+        fields: FIELDS,
+        signal: call.signal,
+      }),
+    ).toEqual({ submitted: false, reason: 'abandoned' });
+    expect(sink.sent).toEqual([]);
+    env.cleanup();
+  });
+
+  /** A tool served over the real in-memory MCP transport that raises a form. */
+  function formTool(env: BrokerEnv, awaitsHuman?: () => number): ToolDefinition {
+    return {
+      name: 'ask.form',
+      description: 'ask the user',
+      tier: 'se',
+      args: z.object({}),
+      ...(awaitsHuman ? { awaitsHuman } : {}),
+      async execute(_args: unknown, ctx: ToolContext) {
+        return env.broker.request({
+          runId: ctx.runId ?? '',
+          conversationId: 'conv-1',
+          title: 'Ask',
+          fields: [{ name: 'name', label: 'Name', type: 'text' }],
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+        });
+      },
+    };
+  }
+
+  const settleMicrotasks = () => vi.advanceTimersByTimeAsync(0);
+
+  it('lets a slow human answer past the 120s tool-call timeout (App. A)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const env = brokerEnv();
+    const sink = recorder();
+    env.broker.attach(sink);
+    const conn = await McpConnection.inProcess('ask', [formTool(env, () => 3600)]);
+    const [handle] = await conn.listTools();
+
+    const call = handle!.call({}, { runId: 'run-1', eventId: null });
+    await settleMicrotasks();
+    expect(sink.sent).toHaveLength(1);
+
+    // Five minutes at the other tab fetching a token.
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(env.broker.waiting).toBe(1);
+    expect(env.broker.submit(sink.sent[0]!.payload.form_id, { name: 'slow' })).toEqual({
+      ok: true,
+    });
+    const outcome = await call;
+    expect(outcome.ok).toBe(true);
+    expect(outcome.output).toMatchObject({ submitted: true, values: { name: 'slow' } });
+    await conn.close();
+    env.cleanup();
+  });
+
+  it('closes the form when the transport gives up on a call that did not declare it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const env = brokerEnv();
+    const sink = recorder();
+    env.broker.attach(sink);
+    const conn = await McpConnection.inProcess('ask', [formTool(env)]);
+    const [handle] = await conn.listTools();
+
+    const call = handle!.call({}, { runId: 'run-1', eventId: null });
+    await settleMicrotasks();
+    const formId = sink.sent[0]!.payload.form_id;
+
+    await vi.advanceTimersByTimeAsync(121_000);
+    const outcome = await call;
+    expect(outcome.ok).toBe(false);
+    expect(outcome.output).toMatchObject({ error: 'tool_failed' });
+    // The serving side heard the cancellation: the card is retracted and the
+    // answer that arrives now goes nowhere.
+    expect(sink.sent.at(-1)).toEqual({
+      type: 'form.closed',
+      payload: { form_id: formId, reason: 'abandoned' },
+    });
+    expect(env.broker.submit(formId, { name: 'late' })).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+    expect(env.broker.waiting).toBe(0);
+    await conn.close();
+    env.cleanup();
+  });
+
+  it("closes the form when the caller's own signal fires (run stopped)", async () => {
+    const env = brokerEnv();
+    const sink = recorder();
+    env.broker.attach(sink);
+    const conn = await McpConnection.inProcess('ask', [formTool(env, () => 3600)]);
+    const [handle] = await conn.listTools();
+    const run = new AbortController();
+
+    const call = handle!.call({}, { runId: 'run-1', eventId: null, signal: run.signal });
+    await new Promise((r) => setImmediate(r));
+    const formId = sink.sent[0]!.payload.form_id;
+    run.abort(new Error('stopped_by_user'));
+
+    expect((await call).ok).toBe(false);
+    await new Promise((r) => setImmediate(r));
+    expect(sink.sent.map((f) => f.type)).toEqual(['form.request', 'form.closed']);
+    expect(env.broker.submit(formId, { name: 'late' })).toMatchObject({ error: 'not_found' });
+    await conn.close();
+    env.cleanup();
+  });
+});
+
+/**
+ * Task 0: the same `awaitsHuman` + abandon-skips-the-effect treatment K1 gave
+ * `setup.form`, applied to every other tool that raises a form. One test per
+ * family, via the existing "abandon, then submit the stale card" pattern.
+ */
+describe('the same abandonment treatment on every other form-raising setup.* tool (task 0)', () => {
+  const fixture = () => path.resolve('test/fixtures/mcp-clock-server.mjs');
+
+  /** Installed the way the form flow would, without the form (grants.test.ts's recipe). */
+  async function installClock(harness: ServiceHarness): Promise<void> {
+    write(
+      path.join(harness.dataDir, 'config', 'mcp.yaml'),
+      `servers:\n  - name: clock\n    transport: stdio\n    command: ["node", "${fixture()}"]\n`,
+    );
+    harness.app.config.reload();
+    await harness.service.tools.connectExternal('clock');
+  }
+
+  /** Abandon the run the instant its form appears, then submit the stale
+   *  card anyway — the shape every one of these tests exercises. */
+  async function abandonOpenForm(client: TestClient): Promise<{ conversation_id: string }> {
+    const form = (await client.next('form.request', 15000)).payload;
+    client.send('chat.stop', { conversation_id: form.conversation_id });
+    expect((await client.next('form.closed', 15000)).payload).toEqual({
+      form_id: form.form_id,
+      reason: 'abandoned',
+    });
+    await drain(h);
+    client.send('form.submit', { form_id: form.form_id, values: {} });
+    expect((await client.next('error')).payload.code).toBe('not_found');
+    await drain(h);
+    return form;
+  }
+
+  it('setup.request_access grants nothing', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    await installClock(h);
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    h.fake.always((req: any) =>
+      req.body.tools
+        ? {
+            toolCalls: [
+              {
+                name: 'setup.request_access',
+                args: { tools: ['clock.*'], reason: 'the time' },
+              },
+            ],
+          }
+        : { text: 'never reached' },
+    );
+
+    h.service.chat.send({ text: 'let yourself use the clock' });
+    await abandonOpenForm(client);
+
+    expect(fs.existsSync(path.join(h.dataDir, 'config', 'grants.yaml'))).toBe(false);
+    expect(h.service.grants.covers(h.service.chatGrants(), 'clock.now')).toBeNull();
+  });
+
+  it('setup.activate activates nothing', async () => {
+    h = await bootService({ onboarded: true });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    h.fake.always((req: any) =>
+      req.body.tools
+        ? { toolCalls: [{ name: 'setup.activate', args: { integration: 'asana' } }] }
+        : { text: 'never reached' },
+    );
+
+    h.service.chat.send({ text: 'connect asana' });
+    await abandonOpenForm(client);
+
+    expect(h.app.config.integrations().integrations.asana).toBeUndefined();
+  });
+
+  it('setup.printers writes no device', async () => {
+    const t = tmpDir('turminder-printers-abandon-');
+    const { home } = openDataHome(path.join(t.dir, 'home'));
+    const config = new Config(home);
+    const broker = new FormBroker(home, config);
+    const call = new AbortController();
+    // The card goes up and is abandoned in the same tick, then answered late —
+    // there is no run here, so this drives the wizard directly rather than
+    // through chat (print.test.ts's own pattern for this tool).
+    broker.attach({
+      send: (type, payload) => {
+        if (type !== 'form.request') return;
+        call.abort();
+        setTimeout(
+          () =>
+            broker.submit(String(payload.form_id), { address: '192.168.0.90', name: 'office' }),
+          0,
+        );
+      },
+    });
+    const deps: PrinterSetupDeps = {
+      home,
+      config,
+      intake: { submit: () => undefined } as any,
+      reloadIntegrations: async () => [],
+      forms: broker,
+      fetch: (async () => new Response('', { status: 404 })) as typeof globalThis.fetch,
+      discover: async () => ({ found: [], method: 'mdns' as const }),
+    };
+
+    const out = (await runPrinterWizard(deps, {
+      runId: 'run1',
+      eventId: null,
+      conversationId: 'conv1',
+      signal: call.signal,
+    })) as any;
+    expect(out).toEqual({ submitted: false, reason: 'abandoned' });
+    config.reload();
+    expect(config.integrations().integrations['print-scan']).toBeUndefined();
+    t.cleanup();
+  });
+});
+
 describe('secret routing (§19.2)', () => {
   it('writes secret fields to secrets.yaml and hands the run only a reference', async () => {
     const env = brokerEnv();
@@ -373,17 +708,22 @@ describe('config.write carve-out (§14.4.1)', () => {
     const sent = h.service.chat.send({ text: 'install an mcp server yourself' });
     await drain(h);
 
+    // The security property: nothing was ever written.
     expect(fs.existsSync(path.join(h.dataDir, 'config', 'mcp.yaml'))).toBe(false);
     const call = h.service.repos.trace
       .forEvent(sent.eventId)
       .find((t) => t.kind === 'tool_call')!.data as any;
-    expect(call.ok).toBe(false);
+    // X4: the refusal is a value now (`{error: "path_rejected", message}`),
+    // not a thrown `tool_failed` — so the call itself "succeeds" in
+    // producing that value, and the teaching message still names the door.
+    expect(call.ok).toBe(true);
+    expect(call.result_excerpt).toContain('path_rejected');
     expect(call.result_excerpt).toContain('setup form flow');
   });
 });
 
 describe('field merging (App. F.9)', () => {
-  it('overrides a template field by name and appends unknown ones', () => {
+  it('mergeFields overrides a field by name and appends unknown ones — the generic-form shape', () => {
     const base: FieldSpec[] = [
       { name: 'name', label: 'Name', type: 'text' },
       { name: 'command', label: 'Command', type: 'text' },
@@ -397,6 +737,27 @@ describe('field merging (App. F.9)', () => {
       { name: 'command', label: 'Command', type: 'text', value: 'npx -y thing' },
       { name: 'extra', label: 'Extra', type: 'number' },
     ]);
+  });
+
+  it('applyTemplateOverrides overrides the same way, but refuses an unknown name instead of appending it (K5)', () => {
+    const base: FieldSpec[] = [
+      { name: 'name', label: 'Name', type: 'text' },
+      { name: 'command', label: 'Command', type: 'text' },
+    ];
+    expect(applyTemplateOverrides(base, [{ name: 'command', value: 'npx -y thing' }])).toEqual([
+      { name: 'name', label: 'Name', type: 'text' },
+      { name: 'command', label: 'Command', type: 'text', value: 'npx -y thing' },
+    ]);
+
+    // A model-invented field name — "base_url" beside a template's own "url" —
+    // is exactly how a connector ended up with both meaning the same thing.
+    expect(
+      applyTemplateOverrides(base, [{ name: 'base_url', value: 'https://example.test' }]),
+    ).toEqual({
+      error: 'unknown_field',
+      fields: ['name', 'command'],
+      message: expect.stringContaining('base_url'),
+    });
   });
 
   it('derives a per-connector secret key when the agent did not name one', () => {
@@ -475,6 +836,10 @@ describe('setup.form end to end, through the chat UI', () => {
     expect(call.result_excerpt).toContain('${secret:FASTMAIL_KEY}');
     expect(call.result_excerpt).toContain('me@example.test');
     expect(h.service.forms.waiting).toBe(0);
+    // No template, so nothing owns writing this (K5) — the result says so,
+    // rather than leaving the model to assume the values landed somewhere.
+    expect(call.result_excerpt).toContain('written');
+    expect(call.result_excerpt).not.toContain('"attempts"');
 
     // The sentinel test (§19.2): the value is in secrets.yaml and nowhere else.
     const secretsFile = path.join(h.dataDir, 'secrets', 'secrets.yaml');
@@ -520,6 +885,97 @@ describe('setup.form end to end, through the chat UI', () => {
     expect(call.result_excerpt).toContain('cancelled');
     const turns = h.service.repos.conversations.history(sent.conversationId);
     expect(turns.at(-1)?.text).toContain('dropped it');
+  });
+
+  it('refuses a template override naming a field the template does not have, and installs nothing (K5)', async () => {
+    h = await bootService({ onboarded: true });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    h.fake.always((req: any) =>
+      req.body.tools
+        ? {
+            toolCalls: [
+              {
+                name: 'setup.form',
+                args: {
+                  title: 'Connect the clock MCP',
+                  template: 'mcp_stdio',
+                  // "base_url" is not one of mcp_stdio's fields — exactly how a
+                  // model invents a second name for something the template
+                  // already calls "url" (root cause 3).
+                  fields: [{ name: 'base_url', value: 'https://example.test' }],
+                },
+              },
+            ],
+          }
+        : { text: 'unused' },
+    );
+
+    const sent = h.service.chat.send({ text: 'connect the clock mcp' });
+    await drain(h);
+
+    const call = h.service.repos.trace
+      .forEvent(sent.eventId)
+      .find((t) => t.kind === 'tool_call')!.data as any;
+    expect(call.result_excerpt).toContain('unknown_field');
+    expect(call.result_excerpt).toContain('base_url');
+    expect(client.frames.some((f) => f.type === 'form.request')).toBe(false);
+    expect(fs.existsSync(path.join(h.dataDir, 'config', 'mcp.yaml'))).toBe(false);
+  });
+
+  it('an abandoned template form writes nothing when submitted late (K1)', async () => {
+    h = await bootService({ onboarded: true });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    const fixture = path.resolve('test/fixtures/mcp-clock-server.mjs');
+
+    h.fake.always((req) =>
+      req.body.tools
+        ? {
+            toolCalls: [
+              {
+                name: 'setup.form',
+                args: {
+                  title: 'Connect the clock MCP',
+                  template: 'mcp_stdio',
+                  fields: [
+                    { name: 'name', value: 'clock' },
+                    { name: 'command', value: `node "${fixture}"` },
+                  ],
+                },
+              },
+            ],
+          }
+        : { text: 'unused' },
+    );
+
+    const sent = h.service.chat.send({ text: 'connect the clock mcp' });
+    const form = await client.next('form.request', 15000);
+    const commits = () =>
+      spawnSync('git', ['rev-list', '--count', 'HEAD'], {
+        cwd: h.dataDir,
+        encoding: 'utf8',
+      }).stdout.trim();
+    const before = commits();
+
+    // The run is walked away from while the form is on screen.
+    client.send('chat.stop', { conversation_id: sent.conversationId });
+    const closed = await client.next('form.closed', 15000);
+    expect(closed.payload).toEqual({ form_id: form.payload.form_id, reason: 'abandoned' });
+    await drain(h);
+    expect(h.service.forms.waiting).toBe(0);
+
+    // Somebody answers the card anyway.
+    client.send('form.submit', {
+      form_id: form.payload.form_id,
+      values: { name: 'clock', command: `node "${fixture}"` },
+    });
+    expect((await client.next('error')).payload.code).toBe('not_found');
+    await drain(h);
+
+    expect(fs.existsSync(path.join(h.dataDir, 'config', 'mcp.yaml'))).toBe(false);
+    expect(h.service.tools.get('clock.now')).toBeNull();
+    expect(commits()).toBe(before);
   });
 
   it('answers a submit for a form nobody is waiting on', async () => {
@@ -907,6 +1363,93 @@ describe('the model_endpoint template asks which model (§10.2, F.9)', () => {
     expect(modelsCalled()).toEqual(['unlisted/model']);
     expect(client.frames.some((f) => f.type === 'form.request')).toBe(false);
   });
+
+  it('writes nothing when every probe fails, even after the retries run out (§19.3 K4)', async () => {
+    h = await bootService({ onboarded: true });
+    provider = new FakeLlama();
+    provider.modelId = 'installed/model';
+    // Reachable (`/models`, `/props` both answer) but every completion comes
+    // back empty — reachability alone must not gate the write, and (K3)
+    // `probe_failed` re-presents the same form up to twice more.
+    provider.always({ text: '' });
+    const url = await provider.startV1();
+
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    let asked = false;
+    h.fake.always((req: any) => {
+      if (req.body.tools && !asked) {
+        asked = true;
+        return {
+          toolCalls: [
+            {
+              name: 'setup.form',
+              args: { title: 'Add an endpoint', template: 'model_endpoint' },
+            },
+          ],
+        };
+      }
+      return { text: 'ready' };
+    });
+
+    const sent = h.service.chat.send({ text: 'add the provider' });
+    let form = (await client.next('form.request', 15000)).payload;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      client.send('form.submit', {
+        form_id: form.form_id,
+        values: { name: 'flaky', url, classes: 'fast' },
+      });
+      expect((await client.next('form.accepted')).payload.form_id).toBe(form.form_id);
+      if (attempt < 3) form = (await client.next('form.request', 15000)).payload;
+    }
+    await drain(h);
+
+    expect(endpointsOf().find((e: any) => e.name === 'flaky')).toBeUndefined();
+    const call = h.service.repos.trace
+      .forEvent(sent.eventId)
+      .find((t) => t.kind === 'tool_call')!.data as any;
+    expect(call.result_excerpt).toContain('probe_failed');
+    expect(call.result_excerpt).toContain('"attempts":3');
+  });
+
+  it('re-adding an endpoint keeps its pricing and efforts, and reports replaced: true (§19.3 K4)', async () => {
+    h = await bootService({ onboarded: true });
+    const url = await startProvider(['solo/model']);
+
+    await addEndpoint({ name: 'stable', url, classes: 'fast' });
+    await drain(h);
+    expect(endpointsOf().find((e: any) => e.name === 'stable')).toBeTruthy();
+
+    // A price (setup.pricing) and a hand-declared effort — neither one this
+    // template owns or asks about.
+    const file = path.join(h.dataDir, 'config', 'models.yaml');
+    const doc = YAML.parse(fs.readFileSync(file, 'utf8'));
+    doc.endpoints = doc.endpoints.map((e: any) =>
+      e.name === 'stable'
+        ? {
+            ...e,
+            cost: { in_per_mtok: 3, out_per_mtok: 15, currency: 'USD' },
+            efforts: ['none'],
+          }
+        : e,
+    );
+    fs.writeFileSync(file, YAML.stringify(doc), 'utf8');
+    h.app.config.reload();
+    h.service.loadModels();
+
+    // The wizard runs again over the same name — the point that used to
+    // silently erase what it never asked about.
+    const { eventId } = await addEndpoint({ name: 'stable', url, classes: 'best' });
+    await drain(h);
+
+    const stable = endpointsOf().find((e: any) => e.name === 'stable');
+    expect(stable.cost).toEqual({ in_per_mtok: 3, out_per_mtok: 15, currency: 'USD' });
+    expect(stable.efforts).toEqual(['none']);
+    expect(stable.classes).toEqual(['best']);
+    const call = h.service.repos.trace.forEvent(eventId).find((t) => t.kind === 'tool_call')!
+      .data as any;
+    expect(call.result_excerpt).toContain('"replaced":true');
+  });
 });
 
 describe('setup.reprobe re-measures and decides nothing (§10.2, F.9)', () => {
@@ -1119,21 +1662,57 @@ describe('the speech_endpoint template (§10.9, F.9)', () => {
     expect(models.routes.tts).toEqual({ endpoint: 'piper' });
   });
 
-  it('writes nothing when the probe fails', async () => {
+  it('writes nothing when the probe fails, even after the retries run out (§19.3 K3)', async () => {
     h = await bootService({ onboarded: true });
     speech = new FakeSpeech();
     const url = await speech.start();
-    speech.script('Thank you for watching.'); // the silence hallucination
+    // The silence hallucination, on every attempt: `probe_failed` is one of
+    // K3's fixable failures, so a single bad submission now re-presents the
+    // same form up to twice more before the tool call settles.
+    speech.script(
+      'Thank you for watching.',
+      'Thank you for watching.',
+      'Thank you for watching.',
+    );
 
-    const added = await addSpeechEndpoint({ kind: 'stt', name: 'deaf', url });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    let asked = false;
+    h.fake.always((req: any) => {
+      if (req.body.tools && !asked) {
+        asked = true;
+        return {
+          toolCalls: [
+            {
+              name: 'setup.form',
+              args: { title: 'Connect speech', template: 'speech_endpoint' },
+            },
+          ],
+        };
+      }
+      return { text: 'unused' };
+    });
+
+    const sent = h.service.chat.send({ text: 'connect my transcriber' });
+    let form = (await client.next('form.request', 15000)).payload;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      client.send('form.submit', {
+        form_id: form.form_id,
+        values: { kind: 'stt', name: 'deaf', url },
+      });
+      expect((await client.next('form.accepted')).payload.form_id).toBe(form.form_id);
+      if (attempt < 3) form = (await client.next('form.request', 15000)).payload;
+    }
+    await drain(h);
 
     const models = modelsYaml();
     expect(models.endpoints.find((e: any) => e.name === 'deaf')).toBeUndefined();
     expect(models.routes?.stt).toBeUndefined();
     const call = h.service.repos.trace
-      .forEvent(added.eventId)
+      .forEvent(sent.eventId)
       .find((t) => t.kind === 'tool_call')!.data as any;
     expect(call.result_excerpt).toContain('probe_failed');
+    expect(call.result_excerpt).toContain('"attempts":3');
   });
 
   it('offers the kind as a two-button choice and asks for nothing it cannot use', async () => {
@@ -1159,6 +1738,170 @@ describe('the speech_endpoint template (§10.9, F.9)', () => {
       'voice',
       'language',
     ]);
+  });
+
+  it('re-adding a speech endpoint keeps its pricing and other fields, and reports replaced: true (§19.3 K4)', async () => {
+    h = await bootService({ onboarded: true });
+    speech = new FakeSpeech();
+    const url = await speech.start();
+    speech.script('Turminder is ready to help you today.');
+
+    await addSpeechEndpoint({
+      kind: 'stt',
+      name: 'whisper',
+      url,
+      language: 'nb',
+    });
+    expect(modelsYaml().endpoints.find((e: any) => e.name === 'whisper')).toBeTruthy();
+
+    // A price (setup.pricing) — not this template's field.
+    const file = path.join(h.dataDir, 'config', 'models.yaml');
+    const doc = YAML.parse(fs.readFileSync(file, 'utf8'));
+    doc.endpoints = doc.endpoints.map((e: any) =>
+      e.name === 'whisper' ? { ...e, cost: { in_per_mtok: 10, currency: 'USD' } } : e,
+    );
+    fs.writeFileSync(file, YAML.stringify(doc), 'utf8');
+    // NOTE: Deliberately NOT calling config.reload() or loadModels() here.
+    // The effect still reads the file fresh from disk, and the test verifies
+    // the merge happens at the write layer.
+
+    speech.script('Turminder is ready to help you today.');
+
+    // The wizard runs again over the same name — the point that used to
+    // silently erase what it never asked about.
+    const secondAdd = await addSpeechEndpoint({
+      kind: 'stt',
+      name: 'whisper',
+      url,
+      language: 'en',
+    });
+    await drain(h);
+
+    const whisper = modelsYaml().endpoints.find((e: any) => e.name === 'whisper');
+    expect(whisper.cost).toEqual({ in_per_mtok: 10, currency: 'USD' });
+    expect(whisper.language).toBe('en');
+    const call = h.service.repos.trace
+      .forEvent(secondAdd.eventId)
+      .find((t) => t.kind === 'tool_call')!.data as any;
+    expect(call.result_excerpt).toContain('"replaced":true');
+  });
+});
+
+describe('form retries a fixable effect failure, inside one tool call (§19.3 K3)', () => {
+  it('normaliseEndpointUrl strips a pasted-in route: /audio/*, /chat/completions, /models', () => {
+    expect(normaliseEndpointUrl('http://host:8000/v1/audio/speech')).toEqual({
+      api: 'http://host:8000/v1',
+      root: 'http://host:8000',
+    });
+    expect(normaliseEndpointUrl('http://host:8000/v1/audio/transcriptions')).toEqual({
+      api: 'http://host:8000/v1',
+      root: 'http://host:8000',
+    });
+    expect(normaliseEndpointUrl('http://host:8080/v1/chat/completions')).toEqual({
+      api: 'http://host:8080/v1',
+      root: 'http://host:8080',
+    });
+    expect(normaliseEndpointUrl('http://host:8080/v1/models')).toEqual({
+      api: 'http://host:8080/v1',
+      root: 'http://host:8080',
+    });
+    // An ordinary base URL is left exactly alone.
+    expect(normaliseEndpointUrl('http://host:8080/v1')).toEqual({
+      api: 'http://host:8080/v1',
+      root: 'http://host:8080',
+    });
+  });
+
+  it('replays three bad inputs in one tool call: a bad name, a mistyped route, and a still-unreachable endpoint, then success', async () => {
+    h = await bootService({ onboarded: true });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    const speech = new FakeSpeech();
+    const url = await speech.start(); // http://127.0.0.1:PORT/v1
+    speech.script('Turminder is ready to help you today.');
+
+    let asked = false;
+    h.fake.always((req: any) => {
+      if (req.body.tools && !asked) {
+        asked = true;
+        return {
+          toolCalls: [
+            {
+              name: 'setup.form',
+              args: { title: 'Connect speech', template: 'speech_endpoint' },
+            },
+          ],
+        };
+      }
+      return { text: 'connected' };
+    });
+
+    const sent = h.service.chat.send({ text: 'connect my transcriber' });
+
+    // Bad input #1: a name that is not a slug. Caught by `validate` inside
+    // `submit` (K3) — the *same* form stays open, and this costs no attempt.
+    const form1 = await client.next('form.request', 15000);
+    client.send('form.submit', {
+      form_id: form1.payload.form_id,
+      values: { kind: 'stt', name: 'not a slug!!', url: `${url}/audio/transcriptions` },
+    });
+    const rejected = await client.next('error');
+    expect(rejected.payload.code).toBe('bad_frame');
+    expect(rejected.payload.message).toContain('not a usable server name');
+
+    // Bad input #2 (attempt 1 of the retry budget): the URL names the exact
+    // audio route (normaliseEndpointUrl strips it back to the base, proven
+    // above), but the endpoint is down right now.
+    speech.errorStatus = 503;
+    client.send('form.submit', {
+      form_id: form1.payload.form_id,
+      values: { kind: 'stt', name: 'whisper', url: `${url}/audio/transcriptions` },
+    });
+    expect((await client.next('form.accepted')).payload.form_id).toBe(form1.payload.form_id);
+    const form2 = await client.next('form.request', 15000);
+    expect(form2.payload.form_id).not.toBe(form1.payload.form_id);
+    expect(form2.payload.description).toMatch(/could not reach/);
+    expect(form2.payload.fields.find((f: any) => f.name === 'name').value).toBe('whisper');
+    expect(form2.payload.fields.find((f: any) => f.name === 'url').value).toContain(
+      '/audio/transcriptions',
+    );
+
+    // Bad input #3 (attempt 2): the URL is fixed, but the endpoint is still down.
+    client.send('form.submit', {
+      form_id: form2.payload.form_id,
+      values: { kind: 'stt', name: 'whisper', url },
+    });
+    expect((await client.next('form.accepted')).payload.form_id).toBe(form2.payload.form_id);
+    const form3 = await client.next('form.request', 15000);
+    expect(form3.payload.form_id).not.toBe(form2.payload.form_id);
+    expect(form3.payload.description).toMatch(/could not reach/);
+
+    // The human's fourth try is the endpoint's, not the form's: it comes back.
+    speech.errorStatus = null;
+    client.send('form.submit', {
+      form_id: form3.payload.form_id,
+      values: { kind: 'stt', name: 'whisper', url },
+    });
+    expect((await client.next('form.accepted')).payload.form_id).toBe(form3.payload.form_id);
+    await drain(h);
+
+    const models = YAML.parse(
+      fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8'),
+    );
+    const added = models.endpoints.find((e: any) => e.name === 'whisper');
+    expect(added).toBeTruthy();
+    expect(added.url).toBe(url); // the audio suffix never reached the file
+
+    // One tool call throughout, despite three re-presentations.
+    const calls = h.service.repos.trace
+      .forEvent(sent.eventId)
+      .filter((t) => t.kind === 'tool_call');
+    expect(calls).toHaveLength(1);
+    const data = calls[0]!.data as any;
+    expect(data.ok).toBe(true);
+    expect(data.result_excerpt).toContain('"attempts":3');
+
+    await speech.stop();
   });
 });
 
@@ -1358,6 +2101,33 @@ describe('setup.voice (§33.5)', () => {
     expect(result).toContain('"kind":"tts"');
     expect(result).toContain('speech_endpoint');
   });
+
+  it('abandoning the run writes neither language nor voice (task 0)', async () => {
+    await bootWithSpeech({ stt: {}, tts: {} });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    h.fake.always((req: any) =>
+      req.body.tools ? { toolCalls: [{ name: 'setup.voice', args: {} }] } : { text: 'unused' },
+    );
+    const before = fs.readFileSync(modelsFile(), 'utf8');
+
+    h.service.chat.send({ text: 'speak Norwegian' });
+    const form = (await client.next('form.request', 15000)).payload;
+    client.send('chat.stop', { conversation_id: form.conversation_id });
+    expect((await client.next('form.closed', 15000)).payload).toEqual({
+      form_id: form.form_id,
+      reason: 'abandoned',
+    });
+    await drain(h);
+
+    client.send('form.submit', {
+      form_id: form.form_id,
+      values: { language: 'nb — Norwegian Bokmål', voice: 'alloy' },
+    });
+    expect((await client.next('error')).payload.code).toBe('not_found');
+    await drain(h);
+    expect(fs.readFileSync(modelsFile(), 'utf8')).toBe(before);
+  });
 });
 
 describe('setup.rebuild_index (§8.3, F.9)', () => {
@@ -1422,6 +2192,31 @@ describe('setup.rebuild_index (§8.3, F.9)', () => {
     expect(call.ok).toBe(true);
     expect(call.result_excerpt).toContain('"rebuilt":false');
     expect(call.result_excerpt).not.toContain('"indexes"');
+  });
+
+  it('abandoning the run while the confirmation is open never rebuilds anything (task 0)', async () => {
+    h = await bootService({ onboarded: true });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    askForRebuild();
+    const rebuild = vi.spyOn(h.service.rag, 'rebuild');
+
+    h.service.chat.send({ text: 'rebuild the search index' });
+    const form = await client.next('form.request', 15000);
+    client.send('chat.stop', { conversation_id: form.payload.conversation_id });
+    expect((await client.next('form.closed', 15000)).payload).toEqual({
+      form_id: form.payload.form_id,
+      reason: 'abandoned',
+    });
+    await drain(h);
+
+    client.send('form.submit', {
+      form_id: form.payload.form_id,
+      values: { confirm: 'Rebuild' },
+    });
+    expect((await client.next('error')).payload.code).toBe('not_found');
+    await drain(h);
+    expect(rebuild).not.toHaveBeenCalled();
   });
 });
 
@@ -1549,6 +2344,36 @@ describe('setup.pricing (§10.5, F.9)', () => {
     expect(call.result_excerpt).toContain('bad_price');
     expect(fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8')).toBe(before);
   });
+
+  it('abandoning the run while the price form is open writes nothing (task 0)', async () => {
+    h = await bootService({ onboarded: true });
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    askToPrice({ endpoint: 'main' });
+    const before = fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8');
+
+    h.service.chat.send({ text: 'the main endpoint is $3 in and $15 out' });
+    const form = await client.next('form.request', 15000);
+    client.send('chat.stop', { conversation_id: form.payload.conversation_id });
+    expect((await client.next('form.closed', 15000)).payload).toEqual({
+      form_id: form.payload.form_id,
+      reason: 'abandoned',
+    });
+    await drain(h);
+
+    client.send('form.submit', {
+      form_id: form.payload.form_id,
+      values: {
+        priced: 'yes, it charges',
+        in_per_mtok: '3',
+        out_per_mtok: '15',
+        currency: 'usd',
+      },
+    });
+    expect((await client.next('error')).payload.code).toBe('not_found');
+    await drain(h);
+    expect(fs.readFileSync(path.join(h.dataDir, 'config', 'models.yaml'), 'utf8')).toBe(before);
+  });
 });
 
 /**
@@ -1605,14 +2430,24 @@ describe('handler routing form (F.6)', () => {
   const NEW_HANDLER =
     '---\nname: nudge\ndescription: d\nmodel_class: best\ntools: []\n---\n\nDo it.\n';
   const NEW_HANDLER_NO_ROUTING = '---\nname: nudge\ndescription: d\ntools: []\n---\n\nDo it.\n';
+  /**
+   * `config.write` creates no handlers any more (F.6, F.20) — that is
+   * `handler.create`'s, with its grant form. The routing rules are unchanged
+   * for an existing file that carries no routing keys yet, which is where
+   * these cases now start from.
+   */
+  const EXISTING_NO_ROUTING = '---\nname: nudge\ndescription: d\ntools: []\n---\n\nOld body.\n';
+  const seedHandler = (harness: ServiceHarness) =>
+    write(handlerPath(harness.dataDir, 'nudge'), EXISTING_NO_ROUTING);
 
   const tracedCall = (harness: ServiceHarness, eventId: string) =>
     harness.service.repos.trace.forEvent(eventId).find((t) => t.kind === 'tool_call')!
       .data as any;
 
-  it('(a) routes a new handler through a form with two endpoints, and strips what the model wrote', async () => {
+  it('(a) routes a handler with no routing keys through a form with two endpoints, and strips what the model wrote', async () => {
     h = await bootService({ onboarded: true });
     addChatEndpoint(h, 'plain');
+    seedHandler(h);
     const client = await TestClient.connect(h.baseUrl, h.token);
     await client.hello(['chat', 'forms']);
     askToWriteHandler({
@@ -1648,6 +2483,7 @@ describe('handler routing form (F.6)', () => {
 
   it('(b) writes with no form and no routing keys when there is no real choice', async () => {
     h = await bootService({ onboarded: true });
+    seedHandler(h);
     const client = await TestClient.connect(h.baseUrl, h.token);
     await client.hello(['chat', 'forms']);
     askToWriteHandler({
@@ -1728,9 +2564,10 @@ describe('handler routing form (F.6)', () => {
     expect(parsed.data.endpoint).toBeUndefined();
   });
 
-  it('(e) cancelling the form writes nothing — new file stays absent', async () => {
+  it('(e) cancelling the form writes nothing — the file stays byte-identical', async () => {
     h = await bootService({ onboarded: true });
     addChatEndpoint(h, 'plain');
+    seedHandler(h);
     const client = await TestClient.connect(h.baseUrl, h.token);
     await client.hello(['chat', 'forms']);
     askToWriteHandler({
@@ -1745,7 +2582,7 @@ describe('handler routing form (F.6)', () => {
     await client.next('form.accepted');
     await drain(h);
 
-    expect(fs.existsSync(handlerPath(h.dataDir, 'nudge'))).toBe(false);
+    expect(fs.readFileSync(handlerPath(h.dataDir, 'nudge'), 'utf8')).toBe(EXISTING_NO_ROUTING);
     const call = tracedCall(h, sent.eventId);
     expect(call.result_excerpt).toContain('"submitted":false');
     expect(call.result_excerpt).toContain('"reason":"cancelled"');
@@ -1754,6 +2591,7 @@ describe('handler routing form (F.6)', () => {
   it('(f) refuses a write needing a choice when there is no conversation to ask in', async () => {
     h = await bootService({ onboarded: true, watchFiles: false });
     addChatEndpoint(h, 'plain');
+    seedHandler(h);
     const tool = h.service.tools.handles().find((t) => t.name === 'config.write')!;
     const result = (
       await tool.call(
@@ -1762,13 +2600,14 @@ describe('handler routing form (F.6)', () => {
       )
     ).output as any;
     expect(result).toMatchObject({ error: 'no_conversation' });
-    expect(fs.existsSync(handlerPath(h.dataDir, 'nudge'))).toBe(false);
+    expect(fs.readFileSync(handlerPath(h.dataDir, 'nudge'), 'utf8')).toBe(EXISTING_NO_ROUTING);
   });
 
   it('(g) drops a chosen effort the target endpoint does not declare, with a note', async () => {
     h = await bootService({ onboarded: true });
     declareMainEfforts(h, ['low', 'high']);
     addChatEndpoint(h, 'plain');
+    seedHandler(h);
     const client = await TestClient.connect(h.baseUrl, h.token);
     await client.hello(['chat', 'forms']);
     askToWriteHandler({
@@ -1798,6 +2637,38 @@ describe('handler routing form (F.6)', () => {
 
     const call = tracedCall(h, sent.eventId);
     expect(call.result_excerpt).toContain('not declared by the endpoint');
+  });
+
+  it('(h) abandoning the run while the routing form is open writes neither routing nor body (task 0)', async () => {
+    h = await bootService({ onboarded: true });
+    addChatEndpoint(h, 'plain');
+    seedHandler(h);
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
+    askToWriteHandler({
+      path: 'handlers/nudge.md',
+      content: NEW_HANDLER,
+      message: 'add the nudge handler',
+    });
+
+    h.service.chat.send({ text: 'add a nudge handler' });
+    const form = await client.next('form.request', 15000);
+    client.send('chat.stop', { conversation_id: form.payload.conversation_id });
+    expect((await client.next('form.closed', 15000)).payload).toEqual({
+      form_id: form.payload.form_id,
+      reason: 'abandoned',
+    });
+    await drain(h);
+
+    const options = form.payload.fields[0].options as string[];
+    client.send('form.submit', {
+      form_id: form.payload.form_id,
+      values: { model: options.find((o) => o.startsWith('plain')) },
+    });
+    expect((await client.next('error')).payload.code).toBe('not_found');
+    await drain(h);
+
+    expect(fs.readFileSync(handlerPath(h.dataDir, 'nudge'), 'utf8')).toBe(EXISTING_NO_ROUTING);
   });
 });
 

@@ -15,3 +15,14 @@
  * error says something true about what was being done.
  */
 export const TOOL_CALL_TIMEOUT_MS = 120_000;
+
+/**
+ * The transport's wait for a tool that suspends on a human (App. A): the
+ * human's own budget (`form_timeout_s`), then the ordinary tool budget for
+ * whatever the answer sets off — probing an endpoint, connecting a server. At
+ * 120s flat the transport abandoned the call while the form stayed on screen,
+ * the model summoned another, and the first one still wrote when answered.
+ */
+export function humanCallTimeoutMs(humanWaitS: number): number {
+  return humanWaitS * 1000 + TOOL_CALL_TIMEOUT_MS;
+}

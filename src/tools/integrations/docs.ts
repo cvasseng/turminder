@@ -11,7 +11,7 @@ import { docxOutline, docxRange } from '../../docs/docx.js';
 import type { ChromiumPrinter, TransientDocs } from '../../docs/print.js';
 import { renderHtmlDocument, renderMarkdownDocument } from '../../docs/render.js';
 import { FileStoreError, type FileStore } from '../../files/store.js';
-import { PathRejected } from '../paths.js';
+import { didYouMean, PathRejected } from '../paths.js';
 import type { ToolDefinition } from '../types.js';
 
 const l = log('tool:docs');
@@ -236,7 +236,16 @@ export function docsTools(deps: DocsDeps): ToolDefinition[] {
       return asError(e);
     }
     if (text === null) {
-      return { error: 'not_found', message: `no readable text file at ${source}` };
+      // X3: computed from the store's own listing, never a model call.
+      const guesses = didYouMean(
+        files.list().map((f) => f.path),
+        source,
+      );
+      return {
+        error: 'not_found',
+        message: `no readable text file at ${source}`,
+        ...(guesses.length ? { did_you_mean: guesses } : {}),
+      };
     }
     const html = /\.md$/i.test(source)
       ? renderMarkdownDocument(text)

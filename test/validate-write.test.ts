@@ -170,7 +170,21 @@ describe('config.write refuses what the loader would reject', () => {
     expect(loader.errors()).toHaveLength(0);
   });
 
+  /**
+   * `config.write` edits handlers but no longer creates them (F.6, F.20), so
+   * the parse-and-refuse cases below start from one already on disk — the
+   * refusal must leave it exactly as it was.
+   */
+  const EXISTING =
+    '---\nname: HANDLER\ndescription: Existing.\ntools: [time.now]\n---\n\nOld.\n';
+  const seed = (name: string) => {
+    const content = EXISTING.replace('HANDLER', name);
+    fs.writeFileSync(path.join(home.handlersDir, `${name}.md`), content);
+    return content;
+  };
+
   it('reports a bad handler without leaving it on disk', async () => {
+    const before = seed('watcher');
     const result = (await writeTool().execute(
       {
         path: 'handlers/watcher.md',
@@ -181,6 +195,47 @@ describe('config.write refuses what the loader would reject', () => {
     )) as any;
     expect(result.error).toBe('invalid_content');
     expect(result.detail).toMatch(/name: invoice-arrival|frontmatter/);
+    expect(fs.readFileSync(path.join(home.handlersDir, 'watcher.md'), 'utf8')).toBe(before);
+  });
+
+  it('says the same true thing about malformed YAML however often it is asked', async () => {
+    // The bug this pins (2026-09-11, F.6): gray-matter caches by input string
+    // and writes the entry *before* parsing, so a throw leaves a hollow one
+    // behind — and the second reader of the same document is told it has no
+    // frontmatter at all. `config.write` parses twice by design (routing,
+    // then validation), so the very first write hit it: the model was told to
+    // add a `---` block to a file that opened with one, and spent two retries
+    // guessing at what was really an unquoted colon in `description`.
+    const before = seed('digest');
+    const content =
+      '---\nname: digest\ndescription: Runs the digest (event digest.due): weather and calendar.\ntools: [time.now]\n---\n\nBuild the digest.\n';
+    for (const attempt of [1, 2, 3]) {
+      const result = (await writeTool().execute(
+        { path: 'handlers/digest.md', content, message: 'handlers: digest' },
+        ctx,
+      )) as any;
+      expect(result.error, `attempt ${attempt}`).toBe('invalid_content');
+      expect(result.message, `attempt ${attempt}`).toMatch(/frontmatter is malformed/);
+      // The YAML parser's own complaint, naming where to look.
+      expect(result.detail, `attempt ${attempt}`).toMatch(/line 3/);
+      // And never the lie that replaced it.
+      expect(result.message, `attempt ${attempt}`).not.toMatch(/no YAML frontmatter/);
+    }
+    expect(fs.readFileSync(path.join(home.handlersDir, 'digest.md'), 'utf8')).toBe(before);
+  });
+
+  it('quoting the colon is all it takes — the advice was actionable', async () => {
+    seed('digest');
+    const result = (await writeTool().execute(
+      {
+        path: 'handlers/digest.md',
+        content:
+          '---\nname: digest\ndescription: "Runs the digest (event digest.due): weather and calendar."\ntools: [time.now]\n---\n\nBuild the digest.\n',
+        message: 'handlers: digest',
+      },
+      ctx,
+    )) as any;
+    expect(result.committed).toBe(true);
   });
 });
 

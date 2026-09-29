@@ -152,12 +152,18 @@ export class GrantedDispatcher implements ToolDispatcher {
       // succeeded: a refused or failed write stored nothing, and a stub saying
       // "written and is stored" over content that was not is exactly the lie
       // that sent a model re-sending its writes (2026-08-30).
-      const outcome = await handle.call(call.args, this.ctx);
+      const outcome = await handle.call(
+        call.args,
+        call.signal ? { ...this.ctx, signal: call.signal } : this.ctx,
+      );
       const stored = outcome.ok && !isErrorReturn(outcome.output);
       return {
         ...outcome,
         ...traceArgs,
         ...(handle.bulkArgs?.length && stored ? { bulkArgs: handle.bulkArgs } : {}),
+        // A static property of the tool, reported per call for the same reason
+        // `bulkArgs` is: the loop holds the transcript, and the handle is here.
+        ...(handle.neverElide ? { neverElide: true } : {}),
         // Structural emptiness, decided here because this is where the handle
         // is (§20.9). The loop counts; it does not judge.
         empty: isEmptyResult(handle, outcome.output),
@@ -168,7 +174,9 @@ export class GrantedDispatcher implements ToolDispatcher {
         ok: false,
         output: { error: 'tool_failed', message: errMessage(e) },
         ...traceArgs,
-        empty: true,
+        // A write that blew up is a broken write, not a search that found
+        // nothing — the same distinction `isEmptyResult` draws below.
+        empty: handle.tier === 'ro',
       };
     }
   }
@@ -177,9 +185,17 @@ export class GrantedDispatcher implements ToolDispatcher {
 /**
  * Did the tool return nothing (§20.9)? A declared predicate answers for the
  * tools that can; everything else — including every external MCP tool — gets
- * the fail-open fallback: an `{error: …}` return counts as empty, and nothing
- * else does. "Returned nothing" is structural; "was useless" is the model's
- * call, and this must never quietly become that.
+ * the fail-open fallback: an `{error: …}` return from a **read** counts as
+ * empty, and nothing else does. "Returned nothing" is structural; "was
+ * useless" is the model's call, and this must never quietly become that.
+ *
+ * The tier is the line, and it was drawn from a run that crossed it: a
+ * `config.read` on a directory plus two writes the loader refused made three
+ * `config.*` errors, and the streak note told a model that had found the
+ * *exact* problem to change its whole approach because "the approach is likely
+ * wrong, not the parameters" (2026-09-11). A refused write is the parameters,
+ * always — the tool is telling the caller precisely what to fix, which is the
+ * opposite of a search that keeps coming back empty. Only a read can be futile.
  */
 function isEmptyResult(handle: ToolHandle, output: unknown): boolean {
   if (handle.isEmpty) {
@@ -190,7 +206,7 @@ function isEmptyResult(handle: ToolHandle, output: unknown): boolean {
       return false;
     }
   }
-  return isErrorReturn(output);
+  return handle.tier === 'ro' && isErrorReturn(output);
 }
 
 /** The expected-failure shape every tool speaks (`{error, message}`). */

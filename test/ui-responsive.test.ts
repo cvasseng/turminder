@@ -470,3 +470,132 @@ describe('the visible viewport is what the layout owns (§9.1)', () => {
     expect(js).toContain('Math.round(visibleHeight() * 0.4)');
   });
 });
+
+/**
+ * The account overflow at phone width (§9.1). Sign-out and devices fold
+ * behind one summary button below `ui_compact_max` rather than moving to the
+ * sidebar, which `ui-responsive.test.ts` has forbidden since the drawer
+ * landed — a closed sidebar takes them off the page on exactly the screen
+ * that most needs them reachable.
+ */
+describe('the account overflow at phone width (§9.1)', () => {
+  const strip = (): string =>
+    html.slice(html.indexOf('<div id="status">'), html.indexOf('<div id="shell">'));
+
+  it('keeps sign-out and devices in the strip, behind one disclosure', () => {
+    const s = strip();
+    const start = s.indexOf('<details id="account-overflow"');
+    expect(start, 'the strip should carry #account-overflow').toBeGreaterThan(-1);
+    const wrapper = s.slice(start, s.indexOf('</details>', start));
+    expect(wrapper).toContain('<summary');
+    expect(wrapper).toContain('id="forget-token"');
+    expect(wrapper).toContain('id="devices-toggle"');
+    // Unwrapped above the phone breakpoint: `display: contents` erases the
+    // details/summary from layout entirely, so a column-width reader sees
+    // exactly the two buttons that were here before there was anything to
+    // fold them behind.
+    expect(css).toMatch(/\.strip-overflow\s*\{[^}]*display:\s*contents/s);
+    expect(css).toMatch(/\.strip-overflow-menu\s*\{[^}]*display:\s*contents/s);
+  });
+
+  it('hides the status text and grows the glyphs at the same breakpoint', () => {
+    const compact = css.slice(css.indexOf('@media (max-width: 639.98px)'));
+    const body = compact.slice(0, compact.indexOf('\n}\n'));
+    expect(body).toMatch(/#status-text\s*\{[^}]*display:\s*none/);
+    // 18–20px: thin at 16px under a thumb, even though a mouse reads it fine.
+    expect(body).toMatch(/button\.icon svg\s*\{[^}]*width:\s*(1[89]|20)px/);
+    expect(body).toContain('.strip-overflow[open]');
+  });
+});
+
+/**
+ * Focus mode (§9.1) hides the strip that would otherwise let the reader leave
+ * it, so the exit has to live somewhere the strip's own disappearance cannot
+ * take with it, and Esc has to work no matter what has focus.
+ */
+describe('focus mode has a way out that survives the strip it hides (§9.1)', () => {
+  it('keeps the exit control outside #status', () => {
+    const statusBlock = html.slice(
+      html.indexOf('<div id="status">'),
+      html.indexOf('<div id="shell">'),
+    );
+    expect(statusBlock).not.toContain('id="focus-exit"');
+    expect(html).toContain('id="focus-exit"');
+  });
+
+  it('persists like the sidebar collapse, defensively', () => {
+    expect(js).toContain("const FOCUS_KEY = 'turminder.focus'");
+    const read = js.slice(
+      js.indexOf('function readFocusMode'),
+      js.indexOf('function persistFocusMode'),
+    );
+    expect(read).toMatch(/try\s*\{[\s\S]*?\}\s*catch/);
+    const persist = js.slice(
+      js.indexOf('function persistFocusMode'),
+      js.indexOf('function setFocus'),
+    );
+    expect(persist).toMatch(/try\s*\{[\s\S]*?\}\s*catch/);
+  });
+
+  it('leaves on Esc from the same handler that dismisses sheets', () => {
+    const handler = js.slice(js.indexOf("document.addEventListener('keydown'"));
+    const body = handler.slice(0, handler.indexOf('\n});'));
+    expect(body).toMatch(/classList\.contains\('focus'\)/);
+    expect(body).toContain('setFocus(false)');
+  });
+
+  it('forces the sidebar shut for as long as it is on, without losing the preference', () => {
+    const fn = js.slice(
+      js.indexOf('function setFocus'),
+      js.indexOf("$('focus-toggle').onclick"),
+    );
+    expect(fn).toContain(
+      "setCollapsed(on || localStorage.getItem(COLLAPSED_KEY) === '1', false)",
+    );
+    // A resize back into column mode must not undo it either.
+    const restore = js.slice(
+      js.indexOf('function restorePanes'),
+      js.indexOf('function applyLayout'),
+    );
+    expect(restore).toContain("classList.contains('focus')");
+  });
+
+  it('gives the centred transcript an App. A token in ch', () => {
+    expect(css).toMatch(
+      /body\.focus #messages,\s*\nbody\.focus #composer\s*\{[^}]*max-width:\s*var\(--focus-max-w\)/,
+    );
+    const row = spec
+      .split('\n')
+      .find((line) => line.startsWith('|') && line.includes('`ui_focus_max`'));
+    expect(row, 'App. A should carry a row for ui_focus_max').toBeTruthy();
+    expect(row).toMatch(/\d+ch/);
+  });
+});
+
+/**
+ * A form the server gave up waiting on (`form.closed`, App. D.2, src/chat/
+ * forms.ts) is retracted on every attached device — the card stays in the
+ * transcript, marked closed, rather than left answerable against a call that
+ * has already moved on.
+ */
+describe('a form the server closed is marked, not left answerable (App. D.2)', () => {
+  it('settles the card instead of leaving its inputs live', () => {
+    const handler = js.slice(
+      js.indexOf("case 'form.closed'"),
+      js.indexOf("case 'conversation.mode'"),
+    );
+    // Unknown ids — a reconnect on another device, or one already settled
+    // here — are ignored rather than conjuring a card for them.
+    expect(handler).toContain('state.forms.get(p.form_id)');
+    expect(handler).toMatch(/if \(entry\) \{/);
+    expect(handler).toContain('entry.settle(');
+    expect(handler).toContain("p.reason === 'timeout'");
+  });
+
+  it('never re-sends a closed form', () => {
+    // `settle` is also what `form.accepted` does: it deletes the entry from
+    // `state.forms`, so there is nothing left for a stray submit to find.
+    const settle = js.slice(js.indexOf('settle(text)'), js.indexOf('reject(message)'));
+    expect(settle).toContain('state.forms.delete(frame.form_id)');
+  });
+});

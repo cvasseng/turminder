@@ -18,6 +18,7 @@ pub const TRAY_ID: &str = "turminder";
 
 /// Menu ids. Device submenus carry the device name after a prefix, because a
 /// menu id is the only thing a click hands back.
+pub const ID_QUICKNOTE: &str = "quick-note";
 pub const ID_VOICE: &str = "voice";
 pub const ID_TALK: &str = "talk";
 pub const ID_WAKE: &str = "wake";
@@ -41,7 +42,13 @@ pub fn build(
     app: &tauri::AppHandle,
     settings: &VoiceSettings,
     state: State,
+    connected: bool,
 ) -> tauri::Result<Menu<tauri::Wry>> {
+    // Heads the menu, above *Talk to it* (§28.7): a box that accepts text it
+    // cannot send would lose that text, so it is greyed rather than opened
+    // whenever this shell has nothing to send it to — the tray tooltip says
+    // why.
+    let quick_note = MenuItem::with_id(app, ID_QUICKNOTE, "Quick note…", connected, None::<&str>)?;
     let voice =
         CheckMenuItem::with_id(app, ID_VOICE, "Voice", true, settings.enabled, None::<&str>)?;
     // Straight into a turn, no key and no name (§28.6) — and the way out of
@@ -141,7 +148,17 @@ pub fn build(
     Menu::with_items(
         app,
         &[
-            &voice, &talk, &wake, &quiet, &inputs, &outputs, &connect, &reset, &show, &quit,
+            &quick_note,
+            &voice,
+            &talk,
+            &wake,
+            &quiet,
+            &inputs,
+            &outputs,
+            &connect,
+            &reset,
+            &show,
+            &quit,
         ],
     )
 }
@@ -206,20 +223,26 @@ pub fn device_choice(id: &str, prefix: &str) -> Option<Option<String>> {
 
 /// Re-render the tray: the menu, the icon, and the tooltip that says what the
 /// shell is doing and which microphone it would use.
-pub fn refresh(app: &tauri::AppHandle, state: State, settings: &VoiceSettings, note: Option<&str>) {
+pub fn refresh(
+    app: &tauri::AppHandle,
+    state: State,
+    settings: &VoiceSettings,
+    connected: bool,
+    note: Option<&str>,
+) {
     let Some(tray) = app.tray_by_id(&TrayIconId::new(TRAY_ID)) else {
         return;
     };
-    if let Ok(menu) = build(app, settings, state) {
+    if let Ok(menu) = build(app, settings, state, connected) {
         let _ = tray.set_menu(Some(menu));
     }
     if let Some(icon) = state_icon(app, state, settings.quiet) {
         let _ = tray.set_icon(Some(icon));
     }
-    let _ = tray.set_tooltip(Some(tooltip(state, settings, note)));
+    let _ = tray.set_tooltip(Some(tooltip(state, settings, connected, note)));
 }
 
-fn tooltip(state: State, settings: &VoiceSettings, note: Option<&str>) -> String {
+fn tooltip(state: State, settings: &VoiceSettings, connected: bool, note: Option<&str>) -> String {
     let idle = match (settings.wake_word, settings.wake_phrase.as_deref()) {
         // The trained phrase, so "why is it not hearing me" has an answer the
         // tray can give (§28.6, V7.4).
@@ -235,6 +258,14 @@ fn tooltip(state: State, settings: &VoiceSettings, note: Option<&str>) -> String
         (true, false, State::Uploading) => "Turminder — thinking".to_string(),
         (true, false, State::Speaking) => "Turminder — speaking".to_string(),
     };
+    if !connected {
+        // The only way *Quick note…* explains its own greyed state (§28.7):
+        // muda's `MenuItem` carries no per-item tooltip, so the reason rides
+        // the tray icon's one tooltip, same as the input-device fallback note
+        // below does.
+        line.push('\n');
+        line.push_str("Quick note needs a working connection");
+    }
     if let Some(note) = note {
         line.push('\n');
         line.push_str(note);
@@ -336,20 +367,20 @@ mod tests {
     #[test]
     fn the_tooltip_says_what_the_shell_is_doing() {
         let off = VoiceSettings::default();
-        assert!(tooltip(State::Idle, &off, None).contains("voice off"));
+        assert!(tooltip(State::Idle, &off, true, None).contains("voice off"));
         let on = VoiceSettings {
             enabled: true,
             ..Default::default()
         };
-        assert!(tooltip(State::Listening, &on, None).contains("listening"));
-        assert!(tooltip(State::Speaking, &on, None).contains("speaking"));
+        assert!(tooltip(State::Listening, &on, true, None).contains("listening"));
+        assert!(tooltip(State::Speaking, &on, true, None).contains("speaking"));
         let quiet = VoiceSettings {
             enabled: true,
             quiet: true,
             ..Default::default()
         };
         // Quiet wins over the state, the way the icon does.
-        assert!(tooltip(State::Speaking, &quiet, None).contains("quiet"));
+        assert!(tooltip(State::Speaking, &quiet, true, None).contains("quiet"));
 
         // Enrolled: the tooltip says the phrase, so "why is it not hearing me"
         // has an answer the tray can give (§28.6, V7.4).
@@ -359,13 +390,25 @@ mod tests {
             wake_phrase: Some("Sleeper Service".into()),
             ..Default::default()
         };
-        let idle = tooltip(State::Idle, &enrolled, None);
+        let idle = tooltip(State::Idle, &enrolled, true, None);
         assert!(idle.contains("Sleeper Service"), "{idle}");
         // A note — "input device X not found, using default" (§28.6) — rides
         // on a second line rather than replacing the state.
-        let noted = tooltip(State::Idle, &on, Some("input device Yeti not found"));
+        let noted = tooltip(State::Idle, &on, true, Some("input device Yeti not found"));
         assert!(noted.contains("listening for the hotkey"), "{noted}");
         assert!(noted.contains("Yeti"), "{noted}");
+    }
+
+    #[test]
+    fn the_tooltip_explains_a_missing_connection() {
+        // §28.7: *Quick note…* is greyed with no working connection, and
+        // muda's `MenuItem` has no per-item tooltip — so the reason has to
+        // ride the one the tray icon already has.
+        let settings = VoiceSettings::default();
+        let disconnected = tooltip(State::Idle, &settings, false, None);
+        assert!(disconnected.contains("Quick note"), "{disconnected}");
+        let connected = tooltip(State::Idle, &settings, true, None);
+        assert!(!connected.contains("Quick note"), "{connected}");
     }
 
     #[test]

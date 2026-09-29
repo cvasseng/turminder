@@ -28,6 +28,17 @@ export interface PagingStore {
   open(namespace: string): void;
 }
 
+/**
+ * A configured external MCP server that is not currently connected (§11.6):
+ * `dropped` (unreachable, on the reconnect backoff) or `needs_auth` (waiting
+ * on a person to sign in, off the backoff loop). Never a bundled integration
+ * — those cannot go away (§11.6 opening line).
+ */
+export interface UnavailableServer {
+  name: string;
+  status: 'dropped' | 'needs_auth';
+}
+
 export interface PagedDispatcherOptions {
   /** Always open, from `chat.core_namespaces` (§21.2.1). */
   core: readonly string[];
@@ -46,6 +57,26 @@ export interface PagedDispatcherOptions {
    * Once per conversation by construction, since opens are sticky.
    */
   skillFor?: (namespace: string) => { name: string; content: string } | null;
+  /**
+   * Configured external servers not currently connected (§11.6), from
+   * `ToolHub.serverStatus()` — passed as a callback, the same way `describe`
+   * and `skillFor` are, so this module never reaches for hub state on its
+   * own. A dropped or `needs_auth` server can be invisible to
+   * `closedNamespaces()` (its tools were never listed, or listed once and
+   * then lost with the connection), and a namespace nobody can see is
+   * indistinguishable from one that doesn't exist — which is exactly what
+   * sent a model guessing three names and then calling `setup.deactivate`
+   * on the one it invented (painpoints X2).
+   */
+  unavailable?: () => UnavailableServer[];
+}
+
+/** The one wording for "this namespace exists but isn't reachable right now". */
+function unavailableMessage(server: UnavailableServer): string {
+  return server.status === 'needs_auth'
+    ? `the ${server.name} server needs the user to sign in again; call ` +
+        `setup.activate {integration: "${server.name}"} to get them a sign-in link.`
+    : `the ${server.name} server is down; it reconnects automatically, so try again shortly.`;
 }
 
 /**
@@ -168,6 +199,23 @@ export class PagedDispatcher implements ToolDispatcher {
     const namespace = typeof requested === 'string' ? requested.trim() : '';
     const tools = groups.get(namespace);
     if (!namespace || !tools?.length) {
+      const down = this.opts.unavailable?.() ?? [];
+      // The model asked for exactly the name of a server that is configured
+      // but not reachable right now — that is a more specific answer than
+      // "unknown", and the one that stops a guessed `setup.deactivate` on an
+      // invented name (X2): it names the real server and what to do next.
+      const match = namespace ? down.find((d) => d.name === namespace) : undefined;
+      if (match) {
+        return {
+          ok: false,
+          output: {
+            error: 'namespace_unavailable',
+            name: match.name,
+            status: match.status,
+            message: unavailableMessage(match),
+          },
+        };
+      }
       return {
         ok: false,
         output: {
@@ -175,6 +223,17 @@ export class PagedDispatcher implements ToolDispatcher {
           // What it could have asked for, not every namespace that exists: an
           // already-open one is not an answer to "that name was wrong".
           available: this.closedNamespaces(),
+          // Only when there is something to say (§21.2, App. F.12): a plain
+          // install with nothing down keeps the old shape byte for byte.
+          ...(down.length
+            ? {
+                unavailable: down,
+                message:
+                  'those exist but are not reachable right now — a dropped one ' +
+                  'reconnects on its own (try again shortly); one needing a sign-in ' +
+                  'needs setup.activate {integration: <name>} first.',
+              }
+            : {}),
         },
       };
     }

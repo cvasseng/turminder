@@ -600,6 +600,19 @@ describe('docs.to_pdf (§23.4, App. F.14)', () => {
     ).toMatchObject({ error: 'unknown_source' });
   });
 
+  it('names an existing store path when docs.to_pdf is given a misspelled source (X3)', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    if (!hasChromium) return;
+    h.service.files.ensure();
+    h.service.files.write('notes/todo.md', '# Todo\n', 'seed');
+    const toPdf = h.service.tools.handles().find((t) => t.name === 'docs.to_pdf')!;
+    const ctx = { runId: null, eventId: null };
+    const result = (await toPdf.call({ source: 'notes/tod.md', out_path: 'out.pdf' }, ctx))
+      .output as { error: string; message: string; did_you_mean?: string[] };
+    expect(result.error).toBe('not_found');
+    expect(result.did_you_mean).toEqual(['notes/todo.md']);
+  });
+
   /**
    * The other half of the anti-telephone test: the sentinel that never rode the
    * token stream has to survive into the exported bytes. Needs a real browser,

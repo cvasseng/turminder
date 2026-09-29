@@ -1,7 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { bootService, offeredTools, type ServiceHarness } from './service-harness.js';
+import {
+  bootService,
+  offeredTools,
+  TestClient,
+  type ServiceHarness,
+} from './service-harness.js';
 import { HandlerLoader, matches } from '../src/exec/handlers.js';
 import { HandlerFrontmatterSchema } from '../src/core/config-schemas.js';
 import { openDataHome } from '../src/core/datadir.js';
@@ -523,20 +528,22 @@ describe('ingress + handler execution (§5.3, §5.4)', () => {
 
   it('lets chat author a handler that then fires on the next event', async () => {
     h = await bootService({ onboarded: true });
-    const handlerMarkdown = handlerFile(
-      'parcel-watch',
-      'description: Use for parcel and delivery notifications.\ntools: [memory.save]\n',
-      'Note the tracking number in memory.',
-    );
+    // Authored the one way chat can (F.20): structured arguments, and the
+    // user approves the tools on a form before anything is written.
+    const client = await TestClient.connect(h.baseUrl, h.token);
+    await client.hello(['chat', 'forms']);
     h.fake.script(
       {
         toolCalls: [
           {
-            name: 'config.write',
+            name: 'handler.create',
             args: {
-              path: 'handlers/parcel-watch.md',
-              content: handlerMarkdown,
-              message: 'handler: watch for parcel notifications',
+              name: 'parcel-watch',
+              description: 'Use for parcel and delivery notifications.',
+              event_types: ['email.*'],
+              requested_tools: ['memory.save'],
+              reason: 'to note tracking numbers from parcel mail',
+              body: 'Note the tracking number in memory.',
             },
           },
         ],
@@ -546,7 +553,13 @@ describe('ingress + handler execution (§5.3, §5.4)', () => {
     h.service.chat.send({
       text: 'watch for parcel notifications and note the tracking number',
     });
+    const form = await client.next('form.request', 15000);
+    client.send('form.submit', {
+      form_id: form.payload.form_id,
+      values: { 'memory.save': 'On its own' },
+    });
     await drain(h);
+    client.close();
 
     expect(fs.existsSync(path.join(h.dataDir, 'handlers', 'parcel-watch.md'))).toBe(true);
 

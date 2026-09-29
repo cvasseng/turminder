@@ -372,7 +372,11 @@ describe('the reaper (§22.1)', () => {
   function reaperEnv() {
     const e = env();
     e.home.git.init();
-    let now = new Date('2026-08-21T12:00:00.000Z');
+    // Starts at the wall clock, not a fixed date: the repo stamps `updated_at`
+    // from the real clock, so a fixed start that the calendar overtakes puts
+    // the reap cutoff before the embed was ever written, and the sweep finds
+    // nothing (this failed from 2026-09-20 on, 60 days past the old start).
+    let now = new Date();
     const reaper = new EmbedReaper({ store: e.store, ttlDays: () => 30, now: () => now });
     return {
       ...e,

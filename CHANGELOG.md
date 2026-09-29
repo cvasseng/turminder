@@ -1,5 +1,131 @@
  # Next
 
+ * Fixed: a notification nobody was around to see was thrown away. A morning
+   digest waited a day for a device to connect and then expired unread, so on
+   a quiet week every digest was written and none was ever seen. A
+   notification that expires without reaching anyone is now kept as missed,
+   and the next time you open the chat it appears once, quietly, under "While
+   you were away" in the activity drawer rather than as a burst of pop-ups.
+   Opening one clears it. Questions that needed an answer by a deadline still
+   expire as before, because silence there means no. A notification from a
+   scheduled job now stays current until that job's next run instead of for a
+   fixed day. This does not wake a locked phone; that needs push, which is
+   still to come.
+
+ * Fixed: setup forms looped and left configuration half-written. A form now
+   lives exactly as long as the request that raised it. If the assistant gives
+   up or you press Stop, the form closes on screen, and filling it in later
+   changes nothing. Only one form is on screen at a time. When something you
+   typed doesn't work (a server name with spaces, an address ending in
+   `/v1/audio/speech`, a model the server doesn't have), the same form comes
+   back with what was wrong, up to three times, instead of the assistant
+   guessing at your values and asking again. An endpoint is saved only when
+   it actually answered. Re-adding one keeps the prices and settings other
+   forms gave it. Configuration is written in one piece, never partially.
+
+ * Handlers get their permissions from you, once. When the assistant writes a
+   behaviour that runs on its own (a morning digest, a reaction to new
+   email), it now asks in a form which tools that behaviour may use: each one
+   described, each one either "on its own" or "ask me each time". It can
+   rewrite the behaviour's instructions freely afterwards, but changing what
+   it may use or when it runs brings the form back. Previously it could give
+   a handler any tool, including ones it had to ask you about itself, and
+   that handler would then use them unattended. Handlers you already have
+   keep working exactly as they are.
+
+ * Fixed: when the model endpoint was down, chat said "No output generated.
+   Check the stream for errors." It now names the endpoint and what happened
+   (the address didn't resolve, the connection was refused, the server
+   answered with an error) and says what to check. Memory upkeep reports the
+   same outage as an outage rather than as a JSON error, and tries again later.
+
+ * Quick note from the desktop app's tray: pick *Quick note…*, type a line
+   ("add to todo: renew the passport") and press Enter. It isn't a chat. The
+   box disappears, the assistant files the note, and one notification says
+   where it went. If Turminder can't be reached, the box keeps what you typed
+   and says why.
+
+ * The chat can be installed as an app on a phone or desktop, from the
+   browser's install option. It opens straight to the chat, and when the
+   service is unreachable it opens to the reconnecting screen rather than a
+   browser error. Installing needs https or localhost; a plain `http://`
+   address on the local network can't be installed.
+
+ * A microphone button in the chat: press it, speak, press again. You see what
+   it heard, hear the answer spoken, and the conversation carries on in text
+   as normal. Like installing, it needs https or localhost.
+
+ * Focus mode: one button hides the top bar and the sidebar, and sets the chat
+   in a narrower column with larger text. Esc, or the button in the corner,
+   brings everything back. On phones the toolbar is less cramped: sign-out and
+   devices sit behind a menu button, and the icons are bigger. The views panel
+   shows how many views each group holds and when kept views last changed,
+   with proper buttons for opening and unkeeping them.
+
+ * MCP servers that need a browser sign-in (OAuth) can be connected. The
+   assistant gives you a link, you approve access in your browser, and the
+   server's tools appear. Sign-ins are kept in the secret store and renewed on
+   their own. If a sign-in lapses, you get one notice, and asking the
+   assistant to reconnect gives you a fresh link. When the approval page lands
+   on a device that can't reach Turminder, paste the address it ended on into
+   the form the assistant offers and it finishes from there.
+
+ * The assistant recovers better from its own guesses. A file path it gets
+   slightly wrong comes back with the file it probably meant. Asking for a
+   folder of its own configuration lists what's in it. A site that asks it to
+   slow down says for how long. A connected server that is down is reported
+   as down rather than missing, so it stops trying names that don't exist.
+
+ * You can now say "run the digest now" and have the real thing happen. A
+   scheduled job can be fired on the spot, and what runs is exactly what would
+   have run at its booked time: the same event, the same handler, the same
+   tools it is allowed to use unattended. The booking is not used up, so a
+   reminder you trigger today still arrives on Friday, and a daily still runs
+   tomorrow. Mostly this matters when the assistant has just written a
+   scheduled behaviour for you: instead of telling you it looks right and
+   finding out at seven the next morning, it can run it once, watch it work,
+   and show you the result. The handler can tell it was asked for rather than
+   woken by the clock, so a morning briefing fired at four in the afternoon
+   does not greet you with "good morning".
+
+ * Conversations now archive themselves after seven days of silence, so the
+   sidebar is the chats you are actually in rather than everything you have
+   ever said. Nothing is deleted and nothing is lost: archived conversations
+   are one toggle away in the sidebar, and writing to one brings it straight
+   back with its history. Set `conversation_archive_days` in
+   `config/turminder.yaml` to change the window, or to `0` to keep the old
+   behaviour where only you ever archive anything. One thing worth knowing
+   before the first sweep: the rich views the assistant builds inside a chat
+   are cleaned up thirty days after that chat is archived, so on an install
+   with a long backlog, views nobody has opened in a month will start ageing
+   out where previously they never did.
+
+ * Fixed: the assistant's own skills reached it cut in half. A skill is the
+   written guidance it fetches before doing something it has a documented way
+   of doing — printing, connecting a service, writing one of its own handlers.
+   Every tool result is capped so no single answer can swallow the
+   conversation, and skills were being measured against that same cap: the
+   three longest arrived truncated mid-sentence, advising it to ask for a
+   smaller slice, which is not something fetching a skill can do. It takes a
+   name and returns a document. What went missing was the end of each one,
+   including the worked example that closes the guide to writing handlers —
+   and a handler written from it came out missing the line that says which
+   events it answers to. Skills now arrive whole, and stay in front of the
+   assistant while it works rather than being cleared away mid-task and
+   fetched all over again a minute later.
+
+ * Fixed: a handler or skill the assistant wrote with a small mistake in it was
+   refused for the wrong reason. Anything it writes into its own configuration
+   is checked before it lands, which is right — but when the mistake was
+   malformed YAML at the top of the file, the refusal said the file had no
+   configuration block at all, about a file that plainly opened with one. It
+   then guessed at the problem twice, rewriting the whole file each time, when
+   the real fault was a single unquoted colon. Refusals now name the actual
+   error and the line it sits on. Repeated refusals of a *write* also no longer
+   count towards the nudge that tells the assistant its whole approach is
+   wrong: a rejected write is the system telling it precisely what to fix,
+   which is the opposite of a search that keeps coming back empty.
+
  * Fixed: adding a hosted endpoint tagged the wrong model. Providers that serve
    hundreds of models list them in no order anyone chose, and the form that
    added one never asked which — it tested whichever happened to be first and
@@ -36,7 +162,12 @@
    in the same breath when none will. Plain reminders need no setup at all any
    more: they arrive as a notification, and say so when they are late. And a
    scheduled job can claim its own kind of event, so one purpose-built handler
-   owns it outright instead of competing with every other timer.
+   owns it outright instead of competing with every other timer. A handler that
+   answers to every event is listed separately rather than counted as the
+   owner, so the warning still fires when nothing is really listening. And the
+   reply says when it will run in words the server writes, such as "daily at
+   07:00 Europe/Oslo; if missed: skipped", so the assistant repeats the booking
+   rather than re-describing it wrong.
 
  * It can read a document that lives at a web address. Give it a link to a PDF
    and it saves the file into your workspace and reads it from there — so the
@@ -89,7 +220,9 @@
    Send (Esc does the same); pressing it ends the answer mid-word. What it had
    already said stays in the conversation — you watched it stream, it is yours
    — and a stopped question is settled, not retried behind your back. Stopping
-   something that already finished quietly succeeds.
+   something that already finished quietly succeeds. Stopping an answer that
+   was waiting on a form also closes the form, so an answer given to it later
+   can no longer change anything.
 
  * The assistant can be talked to. Hold a key in the desktop app, say something,
    let go, and it answers out loud — or turn on the wake word and just say its
@@ -188,7 +321,9 @@
    that does fire late says how late it is, so the assistant can open with
    "this is yesterday's" instead of pretending. Being away for a week produces
    one catch-up and one note saying how many occurrences went by — not seven
-   runs, and not silence.
+   runs, and not silence. A catch-up that does run is its own announcement:
+   it no longer arrives with a separate "you missed this" notice for the same
+   occurrence.
 
  * Fixed: whether a late schedule fired at all depended on how the service came
    to notice it. Restarting the machine marked yesterday's briefing missed;
@@ -409,8 +544,15 @@
    failed, so it blamed the token and deleted it. It now asks the service
    whether the token is actually the problem, and only a straight refusal
    clears it; anything else is treated as what it usually was, a connection
-   that will come back on its own. Devices you had to re-pair for this reason
-   are still listed, and can be cleaned up with `turminder token revoke`.
+   that will come back on its own. Even a refusal is checked twice, a moment
+   apart, before the token goes: a service still booting, or one reading its
+   device list mid-update, could briefly refuse a good token, and neither does
+   so twice. The device list is also written so that it is never briefly
+   empty, and the page asks the browser to keep its storage rather than evict
+   it. Devices you had to re-pair for this reason are still listed, and can be
+   cleaned up with `turminder token revoke`. A token still belongs to the
+   address it was stored at, so set `gateway.public_url` to the address you
+   actually use, and pairing links will open the same one.
 
  # 1.0.0
 

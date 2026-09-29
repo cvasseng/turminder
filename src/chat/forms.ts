@@ -46,6 +46,16 @@ export interface FormRequest {
    */
   embedId?: string;
   fields: FieldSpec[];
+  /**
+   * A template's own business-rule check on the submitted (type-coerced)
+   * values, run inside `submit` (K3, §19.3) — before the form settles, so a
+   * mistake like "not a usable server name" gets the same "same form stays
+   * open, say what's wrong" treatment as a field's own shape check (a URL
+   * that does not parse, a number that is not one). Throw `FormRejected`;
+   * anything else propagates as a bug. Not part of the wire frame — `frameOf`
+   * never reads it.
+   */
+  validate?(values: FormValues): void;
 }
 
 export type FormValues = Record<string, string | number>;
@@ -58,8 +68,34 @@ export type FormOutcome =
   | { submitted: true; values: FormValues; secrets: Record<string, string> }
   | {
       submitted: false;
-      reason: 'cancelled' | 'timeout' | 'no_channel' | 'confirm_interrupted';
+      /**
+       * `abandoned`: the call that raised the form gave up on it — the
+       * transport timed out, the run was stopped or failed (§19.1). Nobody is
+       * left to read the answer, so nobody gets to give one.
+       */
+      reason: 'cancelled' | 'timeout' | 'no_channel' | 'confirm_interrupted' | 'abandoned';
+    }
+  | {
+      /**
+       * This run already has a form on screen (§19.3). Refused before any
+       * frame goes out: a second card beside an unanswered first is how one
+       * run came to show six of the same form in eighty seconds.
+       */
+      submitted: false;
+      reason: 'form_pending';
+      form_id: string;
+      message: string;
     };
+
+/** What `request` takes besides the form itself. */
+export interface FormRequestInput extends Omit<FormRequest, 'formId'> {
+  /**
+   * The raising call's abandonment signal (`ToolContext.signal`). When it
+   * fires the form is closed on every screen and a late submit is refused —
+   * an abandoned form can never write (§19.1).
+   */
+  signal?: AbortSignal;
+}
 
 /** Whatever can render a form: a chat channel, in practice (App. D.5). */
 export interface FormSink {
@@ -69,6 +105,8 @@ export interface FormSink {
 interface Pending extends FormRequest {
   resolve(outcome: FormOutcome): void;
   timer: NodeJS.Timeout;
+  /** Detach from the raising call's signal; a settled form listens to nothing. */
+  release(): void;
 }
 
 /** `KEY_SHAPED` — what a key in secrets.yaml is allowed to look like (G.6). */
@@ -141,6 +179,15 @@ export class FormBroker {
   }
 
   /**
+   * The human's own budget, read live (App. A) — how a tool that raises a
+   * form through this broker declares `awaitsHuman` without needing its own
+   * copy of `Config`.
+   */
+  get formTimeoutS(): number {
+    return this.config.settings.formTimeoutS;
+  }
+
+  /**
    * Register a `forms`-capable channel. Anything already pending is re-sent to
    * it immediately — that is the "pending forms survive a reconnect" rule
    * (App. D.5), and the same code path serves a second device joining late.
@@ -151,24 +198,51 @@ export class FormBroker {
     return () => this.sinks.delete(sink);
   }
 
-  /** Summon a form and suspend until it is answered. */
-  request(input: Omit<FormRequest, 'formId'>): Promise<FormOutcome> {
+  /**
+   * Summon a form and suspend until it is answered.
+   *
+   * One form per run at a time (§19.3). The check is by run, not by arguments:
+   * the repeat guard already catches byte-identical calls, and the loop it
+   * missed was a model re-asking with slightly different prefills. A form with
+   * no run (pairing, D.5) belongs to nobody's turn and is never refused.
+   */
+  request(input: FormRequestInput): Promise<FormOutcome> {
+    const { signal, ...rest } = input;
+    if (signal?.aborted) return Promise.resolve({ submitted: false, reason: 'abandoned' });
+    if (rest.runId) {
+      for (const other of this.pending.values()) {
+        if (other.runId !== rest.runId) continue;
+        l.warn({ run: rest.runId, form: other.formId }, 'refused a second form for one run');
+        return Promise.resolve({
+          submitted: false,
+          reason: 'form_pending',
+          form_id: other.formId,
+          message:
+            "the user hasn't answered the form already on screen — wait, or end your turn",
+        });
+      }
+    }
     if (!this.sinks.size) {
-      l.warn({ run: input.runId }, 'no forms-capable channel connected');
+      l.warn({ run: rest.runId }, 'no forms-capable channel connected');
       return Promise.resolve({ submitted: false, reason: 'no_channel' });
     }
     const formId = newId();
-    const form: FormRequest = { ...input, formId };
+    const form: FormRequest = { ...rest, formId };
     const frame = frameOf(form);
 
     return new Promise<FormOutcome>((resolve) => {
       const timer = setTimeout(() => {
-        this.pending.delete(formId);
         l.warn({ form: formId, run: form.runId }, 'form timed out; treating as cancelled');
-        resolve({ submitted: false, reason: 'timeout' });
+        this.close(formId, 'timeout');
       }, this.config.settings.formTimeoutS * 1000);
       timer.unref?.();
-      this.pending.set(formId, { ...form, resolve, timer });
+      const onAbort = () => {
+        l.info({ form: formId, run: form.runId }, 'form abandoned by its call');
+        this.close(formId, 'abandoned');
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      const release = () => signal?.removeEventListener('abort', onAbort);
+      this.pending.set(formId, { ...form, resolve, timer, release });
       for (const sink of this.sinks) sink.send('form.request', frame);
       l.info(
         { form: formId, run: form.runId, template: form.template ?? null },
@@ -191,6 +265,9 @@ export class FormBroker {
     let split: { values: FormValues; secrets: Record<string, string> };
     try {
       split = this.split(form.fields, raw);
+      // A template's own check, on the same values a field-shape failure
+      // would have rejected (K3) — same path, same "form stays open" outcome.
+      form.validate?.(split.values);
     } catch (e) {
       // Validation failures leave the form pending so the user can fix it.
       if (e instanceof FormRejected) return { ok: false, error: e.detail };
@@ -215,6 +292,7 @@ export class FormBroker {
     const count = this.pending.size;
     for (const form of this.pending.values()) {
       clearTimeout(form.timer);
+      form.release();
       form.resolve({ submitted: false, reason: 'confirm_interrupted' });
     }
     this.pending.clear();
@@ -222,11 +300,23 @@ export class FormBroker {
     return count;
   }
 
+  /**
+   * Close a form nobody answered and take it off every screen (`form.closed`,
+   * App. D.2). Settling first is the point: from here on a submit finds
+   * nothing, so a card a device failed to retract still cannot write.
+   */
+  private close(formId: string, reason: 'timeout' | 'abandoned'): void {
+    if (!this.pending.has(formId)) return;
+    this.settle(formId, { submitted: false, reason });
+    for (const sink of this.sinks) sink.send('form.closed', { form_id: formId, reason });
+  }
+
   private settle(formId: string, outcome: FormOutcome): void {
     const form = this.pending.get(formId);
     if (!form) return;
     this.pending.delete(formId);
     clearTimeout(form.timer);
+    form.release();
     form.resolve(outcome);
   }
 

@@ -6,14 +6,15 @@ import { errMessage } from '../core/errors.js';
 import { dbVersion } from '../db/index.js';
 import { LAYOUT_VERSION } from '../core/datadir.js';
 import type { Service } from '../service.js';
-import { readUiFile } from './static.js';
+import { readUiFile, shellVersion } from './static.js';
 import { handleCommit, handleProbe, setupErrorBody, setupStatus } from './setup-api.js';
 import { EmbedRoutes } from './embed-api.js';
 import { VoiceRoutes } from './voice-api.js';
 import { mimeForPath } from '../files/store.js';
-import { PageCapturedPayload } from '../core/config-schemas.js';
+import { NoteCapturedPayload, PageCapturedPayload } from '../core/config-schemas.js';
 import { PathRejected } from '../tools/paths.js';
 import { WsGateway } from './ws.js';
+import { handleOAuthCallback } from './oauth-callback.js';
 
 const l = log('http');
 
@@ -70,13 +71,25 @@ async function readBody(req: http.IncomingMessage): Promise<unknown> {
 
 /**
  * Validate a payload against its declared shape where one exists (App. B).
- * Only `page.captured` declares caps today (§29.3); everything else passes
- * through untouched, because the generic ingress is deliberately generic.
+ * `page.captured` and `note.captured` declare caps today (§29.3, §28.7);
+ * everything else passes through untouched, because the generic ingress is
+ * deliberately generic.
  */
 function checkPayload(
   type: string,
   payload: unknown,
 ): { payload: unknown } | { error: 'too_large'; message: string } {
+  if (type === 'note.captured') {
+    const parsed = NoteCapturedPayload.safeParse(payload);
+    if (parsed.success) return { payload: parsed.data };
+    const tooBig = parsed.error.issues.find((i) => i.code === 'too_big');
+    return {
+      error: 'too_large',
+      message: tooBig
+        ? `${tooBig.path.join('.') || 'payload'} is over the quick-note limit`
+        : parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+    };
+  }
   if (type !== 'page.captured') return { payload };
   const parsed = PageCapturedPayload.safeParse(payload);
   if (parsed.success) return { payload: parsed.data };
@@ -227,9 +240,19 @@ export class HttpServer {
           const page = this.service.configured ? 'index.html' : 'setup.html';
           const file = readUiFile(page);
           if (!file) return this.json(res, 500, { error: `missing ui asset: ${page}` });
-          res.writeHead(200, { 'content-type': file.contentType });
+          res.writeHead(200, {
+            'content-type': file.contentType,
+            // The PWA shell version (§9, U5): app.js reads this to register
+            // its service worker at a URL that changes when the shell does.
+            'x-turminder-ui-version': shellVersion(),
+          });
           return void res.end(file.body);
         }
+
+        // An MCP server's sign-in coming back (§19.6, App. E). No bearer
+        // token — the approving browser holds none; `state` is the gate.
+        case 'GET /oauth/callback':
+          return await handleOAuthCallback(this.service, url, res);
 
         case 'GET /api/setup/status':
           return this.json(res, 200, setupStatus(this.service));
@@ -439,7 +462,10 @@ export class HttpServer {
           if (req.method === 'GET') {
             const file = readUiFile(url.pathname);
             if (file) {
-              res.writeHead(200, { 'content-type': file.contentType });
+              res.writeHead(200, {
+                'content-type': file.contentType,
+                'x-turminder-ui-version': shellVersion(),
+              });
               return void res.end(file.body);
             }
           }

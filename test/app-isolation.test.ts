@@ -77,12 +77,16 @@ describe('the app is a packaging tier (§28.3)', () => {
       // The bundle targets name every platform the shell is meant to reach;
       // Tauri builds only the ones the host can make, so a Linux run still
       // produces just the `deb` (driven 2026-08-24). AppImage stays off the
-      // list on purpose — its bundler chokes on nix store paths (LIMITS.md).
+      // list on purpose: this config also serves a developer's plain
+      // `cargo tauri build`, and everything that wants an AppImage asks for
+      // it by name instead — the release on the runner (§32.3), and
+      // `appimage.mjs` for the nix pre-flight that never ships (§28.4).
       const conf = JSON.parse(read('app/src-tauri/tauri.conf.json')) as {
         bundle: { targets: string[] };
       };
       expect(conf.bundle.targets).toContain('deb');
       expect(conf.bundle.targets).not.toContain('appimage');
+      expect(fs.existsSync(path.join(root, 'app', 'appimage.mjs'))).toBe(true);
       // And the pinned runtime table has to carry a row for anything the
       // targets promise, or the staging script cannot assemble that bundle.
       const runtimes = JSON.parse(read('app/node-runtime.json')) as {

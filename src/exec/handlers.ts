@@ -142,6 +142,15 @@ export function impliedEmbedMatch(embedId: string): { types: string[]; sources: 
   return { types: ['embed.action'], sources: [`embed.${embedId}`] };
 }
 
+/** A handler's own `match`, or the implied one for an embed binding, or none at all. */
+function effectiveMatch(
+  frontmatter: HandlerFrontmatter,
+): { types?: string[]; sources?: string[] } | undefined {
+  return (
+    frontmatter.match ?? (frontmatter.embed ? impliedEmbedMatch(frontmatter.embed) : undefined)
+  );
+}
+
 /**
  * The §5.2 envelope matcher. Deliberately takes only the envelope, not a whole
  * `EventRecord`: `schedule.create` asks "who would run this" about an event
@@ -155,10 +164,23 @@ export function matches(
   // A bound handler with no matcher of its own is scoped to its own embed, not
   // offered everything: a mini-app's handler firing on the morning email would
   // be a surprising way to learn what `embed:` means (§22.5).
-  const match =
-    frontmatter.match ?? (frontmatter.embed ? impliedEmbedMatch(frontmatter.embed) : undefined);
+  const match = effectiveMatch(frontmatter);
   if (!match) return true;
   if (match.types?.length && !globMatchAny(match.types, event.type)) return false;
   if (match.sources?.length && !globMatchAny(match.sources, event.source)) return false;
   return true;
+}
+
+/**
+ * Whether a handler explicitly wrote itself for this type, via a `match.types`
+ * glob that actually names it (§6.2, §21.4 S4). `matches()` treats an absent
+ * `match` block as "offer me everything" (§5.2), which is right for routing —
+ * but wrong for `schedule.create`'s `consumers` field: a handler with no
+ * `match` used to appear in every schedule's `consumers`, defeating the
+ * empty-list `warning` this field exists to give. `catch_all` is where that
+ * kind belongs instead.
+ */
+export function namesType(frontmatter: HandlerFrontmatter, eventType: string): boolean {
+  const types = effectiveMatch(frontmatter)?.types;
+  return !!types?.length && globMatchAny(types, eventType);
 }

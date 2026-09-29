@@ -25,6 +25,7 @@ pub mod device;
 pub mod http;
 pub mod mode;
 pub mod platform;
+pub mod quicknote;
 pub mod sidecar;
 pub mod store;
 pub mod supervisor;
@@ -35,7 +36,10 @@ pub mod wake;
 
 use std::sync::Mutex;
 
-use tauri::{tray::TrayIconBuilder, Emitter, Manager, WindowEvent};
+use tauri::{
+    tray::{TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, WindowEvent,
+};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
 
@@ -85,6 +89,13 @@ struct Devices(Mutex<Option<device::DeviceClient>>);
 /// The supervised service, in bundled mode.
 #[derive(Default)]
 struct Sidecars(Mutex<Option<Sidecar>>);
+
+/// The tray icon's own rectangle, last reported on a click (§28.7). macOS and
+/// Windows hand this over with every `TrayIconEvent::Click`; a Linux
+/// StatusNotifierItem never emits the event at all, so this stays `None`
+/// there forever and the quick-note box falls back to the cursor.
+#[derive(Default)]
+struct LastTrayRect(Mutex<Option<quicknote::Rect>>);
 
 /// Where the boot got to, for a window that loaded after it started.
 #[tauri::command]
@@ -210,6 +221,9 @@ async fn connect_to(app: tauri::AppHandle, url: String) -> Result<Connected, Str
     mode::save(&app, Mode::Connect)?;
     set_device(&app, Some(&connection));
     open_service_window(&app, &connection)?;
+    // *Quick note…* is greyed on whether this shell has somewhere to send it
+    // (§28.7), and this just gave it somewhere.
+    announce_voice(&app, None);
     Ok(Connected {
         device,
         persisted: saved.persisted,
@@ -225,6 +239,9 @@ fn forget(app: tauri::AppHandle) -> Result<(), String> {
     set_device(&app, None);
     stop_sidecar(&app);
     go_home(&app, None);
+    // This shell has nowhere to send a quick note until something is chosen
+    // again (§28.7).
+    announce_voice(&app, None);
     Ok(())
 }
 
@@ -304,8 +321,14 @@ fn current_connection(app: &tauri::AppHandle) -> Option<Connection> {
 }
 
 /// Redraw the tray and tell the window what the shell is doing.
+///
+/// Also the one place that decides whether *Quick note…* is clickable
+/// (§28.7): every voice switch already funnels through here to redraw the
+/// tray, so this is where a connection change joins it rather than a second
+/// redraw path with its own chance to drift from the first.
 fn announce_voice(app: &tauri::AppHandle, note: Option<&str>) {
     let settings = voice_settings::load(app);
+    let connected = current_connection(app).is_some();
     let state = app
         .state::<Voice>()
         .machine
@@ -314,7 +337,7 @@ fn announce_voice(app: &tauri::AppHandle, note: Option<&str>) {
         .as_ref()
         .map(|m| m.state())
         .unwrap_or(voice::State::Idle);
-    tray::refresh(app, state, &settings, note);
+    tray::refresh(app, state, &settings, connected, note);
     let _ = app.emit(
         voice::STATE_EVENT,
         serde_json::json!({ "state": format!("{state:?}").to_lowercase(), "quiet": settings.quiet }),
@@ -706,6 +729,103 @@ fn ensure_overlay(app: &tauri::AppHandle) {
     .build();
 }
 
+/// Create the quick-note box if it is not there yet (§28.7), built exactly
+/// like `ensure_overlay`: undecorated, always on top, absent from the
+/// taskbar, and hidden until the tray item actually needs it. Nothing is
+/// fetched from the service, so it opens instantly in either mode.
+fn ensure_quicknote(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    if let Some(window) = app.get_webview_window("quicknote") {
+        return Some(window);
+    }
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "quicknote",
+        tauri::WebviewUrl::App("quicknote.html".into()),
+    )
+    .title("Quick note")
+    .inner_size(360.0, 150.0)
+    .resizable(false)
+    .decorations(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .visible(false)
+    .build()
+    .ok()
+}
+
+/// Open the quick-note box where the tray says to (§28.7): the last rect a
+/// platform handed over on a tray click, or the cursor when the platform
+/// never gives one at all.
+fn open_quicknote(app: &tauri::AppHandle) {
+    let Some(window) = ensure_quicknote(app) else {
+        return;
+    };
+    let size = window
+        .inner_size()
+        .map(|s| (s.width as f64, s.height as f64))
+        .unwrap_or((360.0, 150.0));
+    let cursor = app
+        .cursor_position()
+        .map(|p| quicknote::Point { x: p.x, y: p.y })
+        .unwrap_or(quicknote::Point { x: 0.0, y: 0.0 });
+    let work_area = app
+        .monitor_from_point(cursor.x, cursor.y)
+        .ok()
+        .flatten()
+        .map(|m| {
+            let area = m.work_area();
+            quicknote::Rect {
+                x: area.position.x as f64,
+                y: area.position.y as f64,
+                width: area.size.width as f64,
+                height: area.size.height as f64,
+            }
+        })
+        // No monitor found for the cursor's own point should not happen, but
+        // a wide-open area beats refusing to show the box at all.
+        .unwrap_or(quicknote::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        });
+    let rect = *app
+        .state::<LastTrayRect>()
+        .0
+        .lock()
+        .expect("tray rect poisoned");
+    let point = match rect {
+        Some(r) => quicknote::place_below_or_above(r, size, work_area),
+        None => quicknote::place_at_cursor(cursor, size, work_area),
+    };
+    let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+        x: point.x as i32,
+        y: point.y as i32,
+    }));
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+/// `quicknote_send {text}` (§28.7): the page's only door to the service. The
+/// text arrives from shell chrome no page or payload can reach, so it goes as
+/// the one user-authored field — the vault token, the idempotency key and the
+/// serialization key are all decided here, and the page never sees any of
+/// them.
+#[tauri::command]
+fn quicknote_send(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    let Some(connection) = current_connection(&app) else {
+        return Err("Couldn't reach Turminder — is it running? Your note is still here.".into());
+    };
+    let pending = &app.state::<quicknote::Pending>();
+    let key = quicknote::key_for(pending, &text);
+    let result = quicknote::send(&connection, &text, &key);
+    if result.is_ok() {
+        quicknote::clear(pending);
+    }
+    result
+}
+
 /// Say something to whoever is at the machine (§28.6).
 ///
 /// The tray tooltip is not somewhere anybody looks, and stderr is somewhere
@@ -739,6 +859,10 @@ fn start_bundled(app: tauri::AppHandle) {
                 previous.stop();
             }
             *slot = Some(started);
+            drop(slot);
+            // Nothing to send a quick note to until the sidecar answered
+            // `/healthz` — this is the moment that stopped being true (§28.7).
+            announce_voice(&app, None);
         }
         Err(message) => sidecar::announce(&app, "failed", message),
     });
@@ -794,6 +918,9 @@ fn open_service_window(app: &tauri::AppHandle, connection: &Connection) -> Resul
 /// not reachable from chat), so the list is the whole control surface.
 fn on_tray_click(app: &tauri::AppHandle, id: &str) {
     match id {
+        // Greyed with no connection (§28.7), so a real click here always has
+        // somewhere to send the note.
+        tray::ID_QUICKNOTE => open_quicknote(app),
         tray::ID_SHOW => {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
@@ -1199,6 +1326,8 @@ pub fn run() {
         .manage(Enrolment::default())
         .manage(HomeUrl::default())
         .manage(Overlay::default())
+        .manage(LastTrayRect::default())
+        .manage(quicknote::Pending::default())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
@@ -1234,7 +1363,8 @@ pub fn run() {
             enrol_train,
             enrol_verify,
             enrol_reset,
-            overlay_state
+            overlay_state,
+            quicknote_send
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -1249,12 +1379,45 @@ pub fn run() {
             // to, and a shell with no tray and no window is a process nobody
             // can reach (§28.2).
             let settings = voice_settings::load(&handle);
-            let menu = tray::build(&handle, &settings, voice::State::Idle)?;
+            let connected = current_connection(&handle).is_some();
+            let menu = tray::build(&handle, &settings, voice::State::Idle, connected)?;
             TrayIconBuilder::with_id(tray::TRAY_ID)
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Turminder")
                 .menu(&menu)
                 .on_menu_event(move |app, event| on_tray_click(app, event.id.as_ref()))
+                // macOS and Windows hand over the tray icon's own rectangle on
+                // click; the shell keeps the last one for the quick-note box
+                // to open against (§28.7). Linux's StatusNotifierItem never
+                // emits this event at all — the box falls back to the cursor
+                // there, which is why this is a "when we get one", not a
+                // "wait for one".
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { rect, .. } = event {
+                        let app = tray.app_handle();
+                        // A first pass at scale 1.0 just to find *which*
+                        // monitor the icon is on, then the real conversion
+                        // with that monitor's own scale factor.
+                        let guess = rect.position.to_physical::<f64>(1.0);
+                        let scale = app
+                            .monitor_from_point(guess.x, guess.y)
+                            .ok()
+                            .flatten()
+                            .map(|m| m.scale_factor())
+                            .unwrap_or(1.0);
+                        let position = rect.position.to_physical::<f64>(scale);
+                        let size = rect.size.to_physical::<f64>(scale);
+                        *app.state::<LastTrayRect>()
+                            .0
+                            .lock()
+                            .expect("tray rect poisoned") = Some(quicknote::Rect {
+                            x: position.x,
+                            y: position.y,
+                            width: size.width,
+                            height: size.height,
+                        });
+                    }
+                })
                 .build(app)?;
             // Registered only when voice is on: a global hotkey an install is
             // not using is a chord stolen from whatever else wanted it.
@@ -1420,7 +1583,12 @@ mod tests {
             .filter(|name| !name.is_empty())
             .collect();
         let mut total = 0;
-        for page in ["index.html", "enroll.html", "overlay.html"] {
+        for page in [
+            "index.html",
+            "enroll.html",
+            "overlay.html",
+            "quicknote.html",
+        ] {
             let screen = std::fs::read_to_string(root.join("../dist").join(page)).unwrap();
             for piece in screen.split("invoke('").skip(1) {
                 let name = piece.split('\'').next().expect("unterminated invoke name");
@@ -1434,12 +1602,18 @@ mod tests {
         assert!(total > 0, "the screens invoke nothing at all");
     }
 
-    /// The overlay and the enrolment screen reach the shell the same way the
-    /// first screen does, and break the same way without it.
+    /// The overlay, the enrolment screen and the quick-note box reach the
+    /// shell the same way the first screen does, and break the same way
+    /// without it.
     #[test]
     fn every_screen_can_reach_the_shell() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        for page in ["index.html", "enroll.html", "overlay.html"] {
+        for page in [
+            "index.html",
+            "enroll.html",
+            "overlay.html",
+            "quicknote.html",
+        ] {
             let screen = std::fs::read_to_string(root.join("../dist").join(page)).unwrap();
             assert!(
                 screen.contains("__TAURI__"),

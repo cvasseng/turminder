@@ -1,7 +1,9 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import YAML from 'yaml';
 import { log } from '../../../core/logger.js';
 import { errMessage } from '../../../core/errors.js';
+import { newId } from '../../../core/ids.js';
 import type { Config } from '../../../core/config.js';
 import type { DataHome } from '../../../core/datadir.js';
 import { McpServerSchema, ModelEndpointSchema } from '../../../core/config-schemas.js';
@@ -11,7 +13,12 @@ import {
   probeEndpoint,
   probeSpeech,
 } from '../../../model/probe.js';
-import type { FieldSpec, FormBroker, FormValues } from '../../../chat/forms.js';
+import {
+  FormRejected,
+  type FieldSpec,
+  type FormBroker,
+  type FormValues,
+} from '../../../chat/forms.js';
 import type { ToolHub } from '../../hub.js';
 
 const l = log('tool:setup');
@@ -43,9 +50,11 @@ export interface TemplateSubmission {
    * The run this form belongs to, so an effect that has to ask one more
    * question raises it in the same conversation (§19.3). Absent means nothing
    * further can be asked — an effect that needs an answer refuses rather than
-   * choosing one.
+   * choosing one. Carries the raising call's abandonment signal too, so a
+   * second form the effect raises (the model select, K1) closes the same way
+   * the first one does.
    */
-  form?: { runId: string; conversationId: string };
+  form?: { runId: string; conversationId: string; signal?: AbortSignal };
 }
 
 export interface ConnectorTemplate {
@@ -58,10 +67,26 @@ export interface ConnectorTemplate {
    */
   fields: FieldSpec[] | ((ctx: TemplateContext) => FieldSpec[]);
   /**
+   * A business-rule check on the submitted values, run inside the broker's
+   * `submit` before the form settles (K3, §19.3): throw `FormRejected` and the
+   * same form stays open with the message, exactly like a field's own shape
+   * check. For the mistakes that need no network call to catch — a name that
+   * is not a slug.
+   */
+  validate?(values: FormValues): void;
+  /**
    * Deterministic code, not the model (§19.3): validate, write config, connect,
    * probe, report. Throwing is fine — the caller reports the failure to the run.
    */
   effect(submission: TemplateSubmission, ctx: TemplateContext): Promise<unknown>;
+  /**
+   * Is this effect's failure one a human can fix by trying again (K3, §19.3)?
+   * Unreachable, a bad credential, a model or voice that is not installed —
+   * return the teaching message to show as the re-presented form's
+   * description; anything else (or `undefined`) ends the attempt loop as
+   * before. Never called after a success.
+   */
+  retryable?(effect: unknown, submission: TemplateSubmission): string | undefined;
 }
 
 /** Resolve a template's fields against the ctx it is being requested with. */
@@ -84,8 +109,16 @@ export function readRaw(file: string): Record<string, unknown> {
     : {};
 }
 
+/**
+ * Tmp file + rename (K4): a reader mid-write must never see a half-written
+ * `models.yaml` — the loader runs in the same process, on a git hook, on the
+ * next `turminder` invocation, all of them racing this one write.
+ */
 export function writeRaw(home: DataHome, rel: string, doc: unknown, message: string): boolean {
-  fs.writeFileSync(home.path(rel), YAML.stringify(doc), 'utf8');
+  const abs = home.path(rel);
+  const tmp = path.join(path.dirname(abs), `.${path.basename(abs)}.tmp-${newId()}`);
+  fs.writeFileSync(tmp, YAML.stringify(doc), 'utf8');
+  fs.renameSync(tmp, abs);
   return home.git.commit(message, [rel]);
 }
 
@@ -152,6 +185,20 @@ function serverName(values: FormValues): string {
 }
 
 /**
+ * Every shipped template's `validate` (K3): the name needs no network call to
+ * judge, so it is caught here, inside `submit`, rather than after an effect
+ * ran and wrote nothing. Shared because all four templates own a `name` field
+ * with the same rule.
+ */
+function validateServerName(values: FormValues): void {
+  try {
+    serverName(values);
+  } catch (e) {
+    throw new FormRejected(errMessage(e));
+  }
+}
+
+/**
  * Write one entry into config/mcp.yaml, connect it, and report its tools. The
  * file is rolled back when the server will not come up, so a failed attempt
  * leaves no dead entry behind.
@@ -192,7 +239,32 @@ async function installMcp(
   if (!hub) {
     return { installed: true, connected: false, error: 'the tool layer is not running yet' };
   }
-  const status = await hub.connectExternal(parsed.data.name);
+  let status = await hub.connectExternal(parsed.data.name);
+  if (status.needs_auth) {
+    // Reachable, and asking for a person (§19.6): keep the entry — this is not
+    // "would not connect" — and hand back the link, the way Google's
+    // activation does. The run does not wait on the browser; the callback
+    // finishes it and announces with `system.integration_activated`.
+    const begun = await hub.beginAuthorization(parsed.data.name);
+    if ('auth_url' in begun) {
+      l.info({ server: parsed.data.name }, 'mcp server installed; waiting on a sign-in');
+      return {
+        installed: true,
+        connected: false,
+        needs_auth: true,
+        auth_url: begun.auth_url,
+        redirect_uri: begun.redirect_uri,
+        granted: false,
+        next_step:
+          'Give the user this link to sign in. Connecting finishes on its own when they approve — you will not be told here. ' +
+          `If the page they land on after approving will not load (on a phone, typically), call setup.activate {integration: "${parsed.data.name}"}: it shows them a form to paste that page's address into.`,
+      };
+    }
+    status =
+      'authorized' in begun
+        ? { ...status, connected: true, tools: begun.tools }
+        : { ...status, error: begun.message };
+  }
   if (!status.connected) {
     // Roll back: an entry that cannot connect is retried on every restart and
     // explains nothing. Keep the error, drop the config.
@@ -252,6 +324,7 @@ const mcpStdio: ConnectorTemplate = {
       required: false,
     },
   ],
+  validate: validateServerName,
   async effect({ values, secrets }, ctx) {
     const name = serverName(values);
     const command = splitCommand(String(values.command ?? ''));
@@ -278,10 +351,16 @@ const mcpStdio: ConnectorTemplate = {
   },
 };
 
+/** The two answers to "how does this server let you in" (§19.6). */
+export const SIGN_IN_HEADER = 'nothing, or a credential header';
+export const SIGN_IN_OAUTH = 'a browser sign-in (OAuth)';
+
 const mcpHttp: ConnectorTemplate = {
   name: 'mcp_http',
   title: 'Connect an MCP server (http endpoint)',
-  fields: [
+  // A function because one label names the redirect a hand-registered app
+  // must list — and that depends on where this install answers (§19.6).
+  fields: (ctx) => [
     { name: 'name', label: 'Short name for this server', type: 'text' },
     {
       name: 'description',
@@ -304,11 +383,44 @@ const mcpHttp: ConnectorTemplate = {
       type: 'secret',
       required: false,
     },
+    {
+      name: 'sign_in',
+      label: 'How this server lets you in',
+      type: 'select',
+      options: [SIGN_IN_HEADER, SIGN_IN_OAUTH],
+      required: false,
+      value: SIGN_IN_HEADER,
+    },
+    {
+      name: 'oauth_client_id',
+      label:
+        'OAuth client id — only for a provider with no automatic app registration (Asana, for one). ' +
+        `Register ${ctx.tools()?.oauthRedirectUri() ?? 'this assistant’s /oauth/callback address'} as the app's redirect URL`,
+      type: 'text',
+      required: false,
+    },
+    {
+      name: 'oauth_client_secret',
+      label: 'OAuth client secret, if the provider issued one — stored in the secret store',
+      type: 'secret',
+      required: false,
+    },
   ],
+  validate: validateServerName,
   async effect({ values, secrets }, ctx) {
     const name = serverName(values);
     const header = String(values.auth_header ?? 'Authorization').trim() || 'Authorization';
     const ref = secrets.credential;
+    const clientId = String(values.oauth_client_id ?? '').trim();
+    // A client id is itself an answer to "how does it sign you in".
+    const oauth = values.sign_in === SIGN_IN_OAUTH || Boolean(clientId);
+    if (secrets.oauth_client_secret && !clientId) {
+      return {
+        installed: false,
+        error: 'invalid_server',
+        detail: 'an OAuth client secret was supplied without the client id it belongs to',
+      };
+    }
     return installMcp(
       {
         name,
@@ -316,6 +428,17 @@ const mcpHttp: ConnectorTemplate = {
         ...describedBy(values),
         url: String(values.url ?? '').trim(),
         ...(ref ? { headers: { [header]: ref } } : {}),
+        ...(oauth
+          ? {
+              auth: {
+                type: 'oauth',
+                ...(clientId ? { client_id: clientId } : {}),
+                ...(secrets.oauth_client_secret
+                  ? { client_secret: secrets.oauth_client_secret }
+                  : {}),
+              },
+            }
+          : {}),
       },
       ctx,
     );
@@ -449,6 +572,7 @@ const modelEndpoint: ConnectorTemplate = {
       },
     ];
   },
+  validate: validateServerName,
   /**
    * Probe, don't ask (plan §3b) — but probe *what* is a question only a human
    * can answer (§10.2): the suite tags one model, and an address serving
@@ -479,8 +603,22 @@ const modelEndpoint: ConnectorTemplate = {
       ...(ctx.fetch ? { fetch: ctx.fetch } : {}),
       timeoutMs: 90_000,
     });
-    if (!probe.reachable) {
-      return { added: false, error: 'unreachable', detail: probe.error, notes: probe.notes };
+    // Reachable is not the same claim as working (K4): an endpoint that
+    // answers `/models` but cannot complete against the model just probed
+    // (wrong name, not installed, out of memory) must not have that model's
+    // guesses committed as if they were measurements — the speech template's
+    // `passed` gate below is the same rule for the other kind of probe.
+    if (!probe.reachable || !probe.checks.completion) {
+      return {
+        added: false,
+        error: probe.reachable ? 'probe_failed' : 'unreachable',
+        detail:
+          probe.error ??
+          (probe.reachable
+            ? 'the endpoint answered, but the model it named did not complete a simple prompt'
+            : null),
+        notes: probe.notes,
+      };
     }
 
     const endpoint = ModelEndpointSchema.parse({
@@ -500,21 +638,38 @@ const modelEndpoint: ConnectorTemplate = {
 
     const file = ctx.home.path('config', 'models.yaml');
     const doc = readRaw(file);
-    const existing = Array.isArray(doc.endpoints) ? (doc.endpoints as { name: string }[]) : [];
+    const existing = Array.isArray(doc.endpoints)
+      ? (doc.endpoints as Record<string, unknown>[])
+      : [];
     // No embedding auto-add here (§10.6 v2): this template adds `kind: chat`
     // endpoints only — an embedding endpoint is added by the first-run setup
     // wizard or by hand; there is deliberately no chat-driven route to one
     // (multi-endpoint setup UI is out of scope, LIMITS.md).
-    const next: Record<string, unknown> = {
-      ...doc,
-      endpoints: upsertByName(existing, endpoint as { name: string }),
-    };
-    writeRaw(ctx.home, 'config/models.yaml', next, `setup: add model endpoint ${name}`);
+    const prior = existing.find((e) => e?.name === name);
+    // Merge, never replace (K4): re-adding an endpoint is how a wrong URL gets
+    // fixed, and a blind replace was how it also silently erased the pricing
+    // and hand-set fields this template does not own. `endpoint` is this
+    // effect's own fields, fresh from the probe — they win; anything else on
+    // the prior entry survives untouched, same idiom as `setup.reprobe`.
+    const merged = { ...prior, ...(endpoint as Record<string, unknown>) };
+    writeRaw(
+      ctx.home,
+      'config/models.yaml',
+      {
+        ...doc,
+        endpoints: upsertByName(existing as { name: string }[], merged as { name: string }),
+      },
+      `setup: ${prior ? 're-add' : 'add'} model endpoint ${name}`,
+    );
 
     const loaded = ctx.reloadModels();
-    l.info({ endpoint: name, caps: probe.caps, loaded }, 'model endpoint added');
+    l.info(
+      { endpoint: name, caps: probe.caps, replaced: Boolean(prior), loaded },
+      'model endpoint added',
+    );
     return {
       added: true,
+      ...(prior ? { replaced: true } : {}),
       endpoint: name,
       caps: probe.caps,
       context_size: probe.context_size ?? null,
@@ -524,6 +679,29 @@ const modelEndpoint: ConnectorTemplate = {
       notes: probe.notes,
       models_loaded: loaded,
     };
+  },
+  retryable(effect) {
+    if (
+      !effect ||
+      typeof effect !== 'object' ||
+      (effect as { added?: boolean }).added !== false
+    ) {
+      return undefined;
+    }
+    const e = effect as { error?: string; detail?: string | null };
+    if (e.error === 'unreachable') {
+      return (
+        `could not reach that endpoint (${e.detail ?? 'no response'}) — check the URL. It ` +
+        'should be the base address (e.g. http://host:8080/v1), not a specific route.'
+      );
+    }
+    if (e.error === 'probe_failed') {
+      return (
+        'the endpoint answered, but the model named did not complete a simple prompt — check ' +
+        'that it is installed and the name is exactly right, then try again.'
+      );
+    }
+    return undefined;
   },
 };
 
@@ -578,6 +756,7 @@ const speechEndpoint: ConnectorTemplate = {
       required: false,
     },
   ],
+  validate: validateServerName,
   async effect({ values, secrets }, ctx) {
     const name = serverName(values);
     const kind = String(values.kind ?? '').trim();
@@ -632,17 +811,32 @@ const speechEndpoint: ConnectorTemplate = {
     // an install gets should just work, and a second one must not silently
     // steal the route from the one that was chosen (§10.6).
     const routed = routes[kind] === undefined;
+    // Merge, never replace (K4): re-adding a speech endpoint is how a wrong URL gets
+    // fixed, and a blind replace was how it also silently erased fields like `cost`
+    // this template does not own. `endpoint` is this effect's own fields, fresh from
+    // the probe — they win; anything else on the prior entry survives untouched.
+    const prior = existing.find((e) => e?.name === name);
+    const merged = { ...prior, ...(endpoint as Record<string, unknown>) };
     const next: Record<string, unknown> = {
       ...doc,
-      endpoints: upsertByName(existing, endpoint as { name: string }),
+      endpoints: upsertByName(existing as { name: string }[], merged as { name: string }),
       routes: routed ? { ...routes, [kind]: { endpoint: name } } : routes,
     };
-    writeRaw(ctx.home, 'config/models.yaml', next, `setup: add ${kind} endpoint ${name}`);
+    writeRaw(
+      ctx.home,
+      'config/models.yaml',
+      next,
+      `setup: ${prior ? 're-add' : 'add'} ${kind} endpoint ${name}`,
+    );
 
     const loaded = ctx.reloadModels();
-    l.info({ endpoint: name, kind, routed, loaded }, 'speech endpoint added');
+    l.info(
+      { endpoint: name, kind, routed, replaced: Boolean(prior), loaded },
+      'speech endpoint added',
+    );
     return {
       added: true,
+      ...(prior ? { replaced: true } : {}),
       endpoint: name,
       kind,
       model_id: probe.model_id ?? null,
@@ -652,6 +846,32 @@ const speechEndpoint: ConnectorTemplate = {
       ...('voices' in probe && probe.voices ? { voices: probe.voices } : {}),
       models_loaded: loaded,
     };
+  },
+  retryable(effect, { values }) {
+    if (
+      !effect ||
+      typeof effect !== 'object' ||
+      (effect as { added?: boolean }).added !== false
+    ) {
+      return undefined;
+    }
+    const e = effect as { error?: string; detail?: string | null };
+    const kind = String(values.kind ?? '').trim();
+    const verb = kind === 'stt' ? 'transcribe the test audio' : 'speak the test sentence';
+    if (e.error === 'unreachable') {
+      return (
+        `could not reach that endpoint (${e.detail ?? 'no response'}) — check the URL. It ` +
+        'should be the base address (e.g. http://host:8000/v1), not a specific route like ' +
+        '/audio/speech or /audio/transcriptions.'
+      );
+    }
+    if (e.error === 'probe_failed') {
+      return (
+        `the endpoint answered, but did not ${verb} correctly — check that the model or voice ` +
+        'is installed and named exactly right, then try again.'
+      );
+    }
+    return undefined;
   },
 };
 

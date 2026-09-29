@@ -5,10 +5,15 @@ import { z } from 'zod';
 import rrule from 'rrule';
 
 const { rrulestr } = rrule;
-import { parseIso } from '../../core/time.js';
+import type { Config } from '../../core/config.js';
+import { nowIso, parseIso } from '../../core/time.js';
 import type { Repos } from '../../db/repos/index.js';
-import { matches } from '../../exec/handlers.js';
+import { matches, namesType } from '../../exec/handlers.js';
 import type { LoadedHandler } from '../../exec/handlers.js';
+import type { EventIntake } from '../../ingress/intake.js';
+import { scheduleFirePayload } from '../../scheduler/loop.js';
+import type { ScheduleRow } from '../../db/repos/schedules.js';
+import { localParts, pad } from './time.js';
 import type { ToolContext, ToolDefinition } from '../types.js';
 
 /**
@@ -40,6 +45,112 @@ export interface ScheduleDeps {
    * very next `schedule.list`, without a restart.
    */
   handlers: () => LoadedHandler[];
+  /** Where `schedule.trigger` puts the event it fires by hand (§6.2, F.2). */
+  intake: EventIntake;
+  /** `identity().frontmatter.timezone` is the one clock this install has (§6.1). */
+  config: Config;
+  /** Overridden in tests; production reads the wall clock. */
+  now?: () => Date;
+}
+
+/**
+ * How long a grace window reads out loud: whole hours or minutes where they
+ * divide evenly, seconds otherwise. Matches how a human would say it back
+ * ("grace 1h"), not how the tool stored it.
+ */
+function graceHuman(graceS: number): string {
+  if (graceS > 0 && graceS % 3600 === 0) return `${graceS / 3600}h`;
+  if (graceS > 0 && graceS % 60 === 0) return `${graceS / 60}m`;
+  return `${graceS}s`;
+}
+
+const MONTH_SHORT = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
+
+/**
+ * "30 Sep" in the given zone, with the year appended only when it isn't
+ * `now`'s. A fixed table rather than `Intl`'s own month name: `en-GB` reads
+ * September back as "Sept", a fourth letter that would make the sentence's
+ * wording depend on ICU data instead of on this file.
+ */
+function dateHuman(at: Date, timezone: string, now: Date): string {
+  const { year, month, day } = localParts(at, timezone);
+  const thisYear = localParts(now, timezone).year;
+  const monthShort = MONTH_SHORT[month - 1] ?? String(month);
+  return year === thisYear ? `${day} ${monthShort}` : `${day} ${monthShort} ${year}`;
+}
+
+/**
+ * The recurrence in a couple of words. `toText()` reads the cadence off the
+ * rule fine ("every day", "every 2 weeks on Monday") but formats `UNTIL`/
+ * `COUNT` in whatever zone the process happens to be in — wrong for a
+ * server-rendered sentence that promises the identity's own zone (§6.1). So
+ * `UNTIL`/`COUNT` are stripped before asking for the words, and rendered
+ * separately, in the right zone, by the caller.
+ */
+function frequencyPhrase(rruleStr: string, dtstart: Date): string {
+  const bare = rruleStr
+    .split(';')
+    .filter((part) => !/^(UNTIL|COUNT)=/i.test(part))
+    .join(';');
+  const text = rrulestr(bare, { dtstart }).toText();
+  const short: Record<string, string> = {
+    'every day': 'daily',
+    'every week': 'weekly',
+    'every month': 'monthly',
+    'every year': 'yearly',
+  };
+  return short[text] ?? text;
+}
+
+/**
+ * The server-rendered sentence `schedule.create`/`.list`/`.trigger` hand back
+ * (§6.2 S2) — the model quotes it rather than converting `fire_at` (UTC) and
+ * `on_miss`/`grace_s` into prose itself, which is the telephone problem this
+ * closes: a booked 07:00 Oslo reminder was once relayed back as "08:00,
+ * 4h grace", right values, wrong sentence.
+ */
+export function renderWhen(
+  row: Pick<ScheduleRow, 'fire_at' | 'rrule' | 'grace_s' | 'on_miss'>,
+  timezone: string,
+  now: Date,
+): string {
+  const fireAt = parseIso(row.fire_at) ?? now;
+  const { hour, minute } = localParts(fireAt, timezone);
+  const hhmm = `${pad(hour)}:${pad(minute)}`;
+  // fire_late on a *recurring* schedule fires the one occurrence it is
+  // standing on, late (§6.1) — it is not a promise to catch every miss.
+  const missPhrase = row.on_miss === 'skip' ? 'skipped' : 'fires late';
+  const grace = graceHuman(row.grace_s);
+
+  if (!row.rrule) {
+    const date = dateHuman(fireAt, timezone, now);
+    return `once at ${hhmm} ${timezone} on ${date}; if missed: ${missPhrase} (grace ${grace})`;
+  }
+
+  let freq = 'repeating';
+  let until: string | null = null;
+  try {
+    freq = frequencyPhrase(row.rrule, fireAt);
+    const untilAt = rrulestr(row.rrule, { dtstart: fireAt }).options.until;
+    if (untilAt) until = dateHuman(untilAt, timezone, now);
+  } catch {
+    // Rejected at `schedule.create` time; defensive only.
+  }
+  const untilPart = until ? ` until ${until}` : '';
+  return `${freq} at ${hhmm} ${timezone}${untilPart}; if missed: ${missPhrase} (grace ${grace})`;
 }
 
 /**
@@ -57,12 +168,30 @@ export function scheduleTools(deps: ScheduleDeps): ToolDefinition[] {
    * the wrong turn. It is a fact about the handlers on disk now, and nothing
    * re-checks it later — a handler deleted after creation makes the schedule
    * inert again, which is the §5.1 contract and not a wrong to right here.
+   *
+   * `consumers` and `catch_all` are a further split of the same offered set
+   * (§6.2 S4): a handler with no `match` block used to read as a consumer of
+   * every schedule in existence, which made `consumers: []` never happen and
+   * defeated the empty-list `warning` below. Only a handler whose `match`
+   * names this type, explicitly, via a `types` glob, counts as a consumer;
+   * the rest — still offered, at routing time, exactly as before — are named
+   * in `catch_all` instead, so nothing about them is hidden, only relabelled.
    */
-  const consumersFor = (eventType: string): string[] =>
-    deps
+  const routingFor = (eventType: string): { consumers: string[]; catchAll: string[] } => {
+    const offered = deps
       .handlers()
-      .filter((h) => matches(h.frontmatter, { type: eventType, source: 'scheduler' }))
-      .map((h) => h.name);
+      .filter((h) => matches(h.frontmatter, { type: eventType, source: 'scheduler' }));
+    return {
+      consumers: offered.filter((h) => namesType(h.frontmatter, eventType)).map((h) => h.name),
+      catchAll: offered.filter((h) => !namesType(h.frontmatter, eventType)).map((h) => h.name),
+    };
+  };
+
+  /** The identity's own zone (§6.1) — the one clock this install has. */
+  const timezone = () => deps.config.identity()?.frontmatter.timezone ?? 'UTC';
+  const clock = () => (deps.now ?? (() => new Date()))();
+  const whenFor = (row: Pick<ScheduleRow, 'fire_at' | 'rrule' | 'grace_s' | 'on_miss'>) =>
+    renderWhen(row, timezone(), clock());
 
   return [
     {
@@ -87,7 +216,10 @@ export function scheduleTools(deps: ScheduleDeps): ToolDefinition[] {
         on_miss: z
           .enum(['fire_late', 'skip'])
           .optional()
-          .describe('past grace; default fire_late one-shot, skip repeats'),
+          .describe(
+            'past grace; default fire_late one-shot, skip repeats; ' +
+              "on a repeat, fire_late means yesterday's, late",
+          ),
         event_type: z
           .string()
           .optional()
@@ -105,12 +237,12 @@ export function scheduleTools(deps: ScheduleDeps): ToolDefinition[] {
         },
         ctx: ToolContext,
       ) {
-        const when = parseIso(args.fire_at);
-        if (!when)
+        const fireAt = parseIso(args.fire_at);
+        if (!fireAt)
           return { error: 'invalid_arguments', detail: 'fire_at is not an ISO timestamp' };
         if (args.rrule) {
           try {
-            rrulestr(args.rrule, { dtstart: when });
+            rrulestr(args.rrule, { dtstart: fireAt });
           } catch (e) {
             return { error: 'invalid_arguments', detail: `rrule: ${(e as Error).message}` };
           }
@@ -132,7 +264,7 @@ export function scheduleTools(deps: ScheduleDeps): ToolDefinition[] {
         }
 
         const row = repos.schedules.create({
-          fireAt: when.toISOString(),
+          fireAt: fireAt.toISOString(),
           note: args.note,
           rrule: args.rrule ?? null,
           graceS: args.grace_s ?? deps.graceS,
@@ -141,7 +273,7 @@ export function scheduleTools(deps: ScheduleDeps): ToolDefinition[] {
           createdByRun: ctx.runId,
           ...(args.on_miss ? { onMiss: args.on_miss } : {}),
         });
-        const consumers = consumersFor(row.event_type);
+        const { consumers, catchAll } = routingFor(row.event_type);
         // `on_miss` comes back whether or not it was asked for: "what happens
         // if I close the lid" should be answerable from the reply (§6.1). And
         // an empty consumer list is a warning rather than a silence, because
@@ -154,7 +286,12 @@ export function scheduleTools(deps: ScheduleDeps): ToolDefinition[] {
           grace_s: row.grace_s,
           on_miss: row.on_miss,
           event_type: row.event_type,
+          // A server-rendered sentence in the identity's own zone (§6.2 S2) —
+          // the model quotes it back rather than converting fire_at itself,
+          // which is the telephone problem this closes.
+          when: whenFor(row),
           consumers,
+          catch_all: catchAll,
           ...(consumers.length
             ? {}
             : {
@@ -174,20 +311,25 @@ export function scheduleTools(deps: ScheduleDeps): ToolDefinition[] {
         return {
           schedules: repos.schedules
             .list({ includeDone: args.include_done ?? false })
-            .map((s) => ({
-              id: s.id,
-              fire_at: s.fire_at,
-              rrule: s.rrule,
-              note: s.note,
-              status: s.status,
-              grace_s: s.grace_s,
-              on_miss: s.on_miss,
-              last_fired_at: s.last_fired_at,
-              event_type: s.event_type,
-              // "Why didn't my digest run" is answerable from the tool the
-              // question is about, without reading a trace (§6.2).
-              consumers: consumersFor(s.event_type),
-            })),
+            .map((s) => {
+              const { consumers, catchAll } = routingFor(s.event_type);
+              return {
+                id: s.id,
+                fire_at: s.fire_at,
+                rrule: s.rrule,
+                note: s.note,
+                status: s.status,
+                grace_s: s.grace_s,
+                on_miss: s.on_miss,
+                last_fired_at: s.last_fired_at,
+                event_type: s.event_type,
+                when: whenFor(s),
+                // "Why didn't my digest run" is answerable from the tool the
+                // question is about, without reading a trace (§6.2).
+                consumers,
+                catch_all: catchAll,
+              };
+            }),
         };
       },
     },
@@ -205,6 +347,77 @@ export function scheduleTools(deps: ScheduleDeps): ToolDefinition[] {
             : { error: 'not_found', schedule_id: args.schedule_id };
         }
         return { schedule_id: args.schedule_id, cancelled: true };
+      },
+    },
+    {
+      name: 'schedule.trigger',
+      description:
+        'Run a schedule now, exactly as its own time arriving would. Use for "do the digest now" or to test a schedule you just wrote. Does not consume the booking: the next occurrence still happens.',
+      tier: 'se',
+      args: z.object({ schedule_id: z.string().min(1) }),
+      async execute(args: { schedule_id: string }, ctx: ToolContext) {
+        const row = repos.schedules.get(args.schedule_id);
+        if (!row) return { error: 'not_found', schedule_id: args.schedule_id };
+        if (row.status !== 'active') {
+          return {
+            error: 'not_active',
+            status: row.status,
+            schedule_id: args.schedule_id,
+            message: `this schedule is ${row.status}; create a new one rather than firing a finished booking`,
+          };
+        }
+
+        const firedAt = nowIso();
+        const result = deps.intake.submit({
+          type: row.event_type,
+          source: 'scheduler',
+          // Identical to the loop's, by construction (§6.2): a handler must not
+          // be able to tell which one woke it. `fire_at` is now and lateness is
+          // zero, because a schedule fired by hand is not a late alarm — it is
+          // this moment, on purpose, and saying otherwise would have a digest
+          // announce itself as yesterday's.
+          payload: scheduleFirePayload(row, repos.schedules.payloadOf(row), {
+            fireAt: firedAt,
+            lateByS: 0,
+            manual: true,
+          }),
+          serialization_key: row.id,
+          // Never the loop's `<id>:<fire_at>` key: colliding with it would make
+          // a hand-fire swallow the real occurrence, or be swallowed by it.
+          idempotency_key: `${row.id}:manual:${firedAt}`,
+          // Provenance is this run's, not the schedule creator's (§5.5). The
+          // clock has no caller; this does, and the depth guard only works if
+          // the chain says who pulled the trigger — a handler that fires a
+          // schedule that runs that handler must hit MAX_DEPTH, not spin.
+          caused_by: ctx.eventId,
+          emitted_by_run: ctx.runId,
+        });
+        if (result.status === 'rejected') {
+          return { error: 'loop_rejected', reason: result.reason, schedule_id: row.id };
+        }
+
+        // Deliberately nothing else: no `markFired`, no advance, no status
+        // change. Triggering is not consuming, and a user who wants the
+        // booking gone has `schedule.cancel` one call away.
+        const { consumers, catchAll } = routingFor(row.event_type);
+        return {
+          schedule_id: row.id,
+          event_id: result.event.id,
+          event_type: row.event_type,
+          fired_at: firedAt,
+          next_fire_at: row.fire_at,
+          // The booking's own sentence, unchanged by triggering it by hand
+          // (§6.2 S2) — `next_fire_at` above already says the booking itself
+          // did not move.
+          when: whenFor(row),
+          consumers,
+          catch_all: catchAll,
+          ...(consumers.length
+            ? {}
+            : {
+                warning: `No handler matches ${row.event_type}, so this fired and nothing will run — the same as it would at its booked time.`,
+              }),
+        };
       },
     },
   ];

@@ -3,7 +3,14 @@ import { newId } from '../../core/ids.js';
 import { isoPlusSeconds, nowIso } from '../../core/time.js';
 
 export type DeliveryIntent = 'notify' | 'confirm';
-export type DeliveryStatus = 'queued' | 'delivered' | 'acked' | 'expired';
+/**
+ * `missed` is a `notify` that reached its TTL still `queued` — shown on no
+ * channel at all (§7.1). It is still owed a reading, so an ack settles it.
+ */
+export type DeliveryStatus = 'queued' | 'delivered' | 'acked' | 'expired' | 'missed';
+
+/** App. A: how many `missed` rows one `delivery.missed` frame carries. */
+export const MISSED_LIST_MAX = 50;
 
 export interface DeliveryRow {
   /** The resume cursor (§7.3): a free monotonic sequence. */
@@ -92,14 +99,17 @@ export class DeliveriesRepo {
       .run(nowIso(), id);
   }
 
-  /** Any ack settles a delivery (§7.2). Unknown ids are ignored (App. D). */
+  /**
+   * Any ack settles a delivery (§7.2), a `missed` one included: reading it in
+   * the drawer is the ack it never got. Unknown ids are ignored (App. D).
+   */
   ack(id: string, device: string): Delivery | null {
     const existing = this.get(id);
     if (!existing) return null;
     this.db
       .prepare(
         `UPDATE deliveries SET status = 'acked', acked_at = ?, acked_by = ?
-          WHERE id = ? AND status IN ('queued','delivered')`,
+          WHERE id = ? AND status IN ('queued','delivered','missed')`,
       )
       .run(nowIso(), device, id);
     return this.get(id);
@@ -107,8 +117,9 @@ export class DeliveriesRepo {
 
   /**
    * Unacked, unexpired deliveries after a device's cursor (§7.3). Anything
-   * already past its TTL is marked expired here rather than replayed: a stale
-   * "meeting in 10 minutes" is anti-useful.
+   * already past its TTL is settled here rather than replayed — a stale
+   * "meeting in 10 minutes" is anti-useful as a toast — into `missed` or
+   * `expired` per `expire()`. `expired` counts both.
    */
   replayFor(lastSeenSeq: number): { replay: Delivery[]; expired: number } {
     const now = nowIso();
@@ -147,22 +158,46 @@ export class DeliveriesRepo {
     return Object.fromEntries(rows.map((r) => [r.device, r.seq]));
   }
 
+  /**
+   * Past its TTL (§7.1). A `notify` no channel ever received becomes `missed`
+   * — the TTL bounds interrupting, not existing. Everything else becomes
+   * `expired`: a delivered notify was shown, and a `confirm` nobody answered
+   * is a deny (§11.3), never something to approve late.
+   */
   expire(id: string): void {
     this.db
       .prepare(
-        `UPDATE deliveries SET status = 'expired' WHERE id = ? AND status IN ('queued','delivered')`,
+        `UPDATE deliveries
+            SET status = CASE WHEN intent = 'notify' AND status = 'queued'
+                              THEN 'missed' ELSE 'expired' END
+          WHERE id = ? AND status IN ('queued','delivered')`,
       )
       .run(id);
   }
 
-  /** Sweeps everything past its TTL; returns how many expired. */
+  /** Sweeps everything past its TTL, exactly as `expire()`; returns how many. */
   expireStale(now: string = nowIso()): number {
     return this.db
       .prepare(
-        `UPDATE deliveries SET status = 'expired'
+        `UPDATE deliveries
+            SET status = CASE WHEN intent = 'notify' AND status = 'queued'
+                              THEN 'missed' ELSE 'expired' END
           WHERE status IN ('queued','delivered') AND expires_at <= ?`,
       )
       .run(now).changes;
+  }
+
+  /**
+   * The `delivery.missed` list (§7.1, App. D): newest first, and deliberately
+   * not filtered by a device's `last_seen` — a missed row was acked by nobody,
+   * so its own status is the cursor.
+   */
+  missed(limit = MISSED_LIST_MAX): Delivery[] {
+    return (
+      this.db
+        .prepare(`SELECT * FROM deliveries WHERE status = 'missed' ORDER BY seq DESC LIMIT ?`)
+        .all(limit) as DeliveryRow[]
+    ).map(toDelivery);
   }
 
   pending(): Delivery[] {

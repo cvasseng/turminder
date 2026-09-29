@@ -226,12 +226,15 @@ describe('tool-result budget at the hub boundary (§20.3)', () => {
     // lives at the default (§20.3). `setup.list_integrations` joined it when
     // the roster outgrew 4000 chars: a half-listed capability list reads as
     // "those integrations do not exist", which is worse than a long result.
+    // `skills.fetch` joined it because the cap's hint — refine the call with
+    // offset/limit — is advice it cannot take: it has one argument, a name.
     expect(overrides).toEqual([
       'docs.outline',
       'docs.read',
       'embeds.read',
       'files.read',
       'setup.list_integrations',
+      'skills.fetch',
       'web.fetch',
     ]);
   });
@@ -295,6 +298,25 @@ describe('tool-result budget at the hub boundary (§20.3)', () => {
     );
     expect(JSON.stringify(toolMessage)).toContain('_truncated');
     expect(JSON.stringify(toolMessage)).toContain(TRUNCATION_HINT);
+
+    // …and the row says the cap fired, and how big the real answer was (C.1).
+    // Without this, a capped result and a tool that summarises by nature are
+    // indistinguishable afterwards, and how often the cap bites is a guess.
+    expect(call.truncated_from).toBeGreaterThan(20_000);
+  });
+
+  it('leaves the truncation mark off a result that fit', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    h.fake.always((req) => {
+      if (req.body.tools) return { toolCalls: [{ name: 'time.now', args: {} }] };
+      return { text: 'Just gone eight.' };
+    });
+    const sent = h.service.chat.send({ text: 'what time is it' });
+    await drain(h);
+    const call = h.service.repos.trace
+      .forEvent(sent.eventId)
+      .find((t) => t.kind === 'tool_call')!.data as any;
+    expect(call.truncated_from).toBeUndefined();
   });
 });
 
@@ -367,6 +389,32 @@ describe('mid-run elision of stale large results (§20.4)', () => {
     expect((messages[0] as any).content[0].output.value).toBe(stub);
   });
 
+  it('leaves a declared instruction result alone, however old and large', () => {
+    const messages: ModelMessage[] = [
+      toolResult('skills.fetch', { name: 'authoring-handlers', content: 's'.repeat(6000) }),
+      assistant('reading it'),
+      toolResult('web.fetch', { body: 'w'.repeat(6000) }),
+      assistant('one'),
+      assistant('two'),
+    ];
+    // The skill is the brief this run is working from (§20.4): eliding it
+    // sends the model back to re-fetch mid-task. The page beside it is data
+    // and goes, which is what shows the exemption is per tool, not a switch.
+    const elided = elideStaleResults(messages, settings, new Set(['skills.fetch']));
+    expect(elided).toEqual(['web.fetch']);
+    expect((messages[0] as any).content[0].output.value.content).toContain('ssss');
+    expect(typeof (messages[2] as any).content[0].output.value).toBe('string');
+  });
+
+  it('elides that same result when nothing declared the exemption', () => {
+    const messages: ModelMessage[] = [
+      toolResult('skills.fetch', { content: 's'.repeat(6000) }),
+      assistant('one'),
+      assistant('two'),
+    ];
+    expect(elideStaleResults(messages, settings)).toEqual(['skills.fetch']);
+  });
+
   it('never touches tool calls, assistant text or user messages', () => {
     const call: ModelMessage = {
       role: 'assistant',
@@ -434,6 +482,62 @@ describe('mid-run elision of stale large results (§20.4)', () => {
       .join('\n');
     expect(traced).toContain('pppp');
     expect(traced).not.toContain('[[elided:');
+  });
+
+  it('a fetched skill survives the whole run, whole, with no re-fetch', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    // Bigger than the elision threshold and older than its age by the end:
+    // under the old rule this was a stub by turn 4, and the observed model
+    // answered by fetching it again (2026-09-11).
+    const body = `# Long skill\n\n${'guidance. '.repeat(400)}`;
+    fs.writeFileSync(
+      path.join(h.app.home.skillsDir, 'long-thing.md'),
+      `---\nname: long-thing\ndescription: A long one.\n---\n\n${body}\n`,
+      'utf8',
+    );
+    let calls = 0;
+    h.fake.always((req) => {
+      if (!req.body.tools) return { text: 'ok' };
+      calls += 1;
+      if (calls === 1)
+        return { toolCalls: [{ name: 'skills.fetch', args: { name: 'long-thing' } }] };
+      if (calls <= 4) return { toolCalls: [{ name: 'time.now', args: {} }] };
+      return { text: 'Done, following the skill.' };
+    });
+    h.service.chat.send({ text: 'use the long skill' });
+    await drain(h);
+
+    const final = h.fake.requests.at(-1)!.body.messages as { role: string; content: unknown }[];
+    const results = final
+      .filter((m) => m.role === 'tool')
+      .map((m) => String(m.content))
+      .join('\n');
+    expect(results).toContain('guidance. guidance.');
+    expect(results).not.toContain('[[elided: skills.fetch');
+    // And it never had to ask twice — the point of keeping it. Counted by the
+    // wire-safe name (`tool-names.ts` sends dots as `__`), so this counts the
+    // calls the endpoint was actually asked to make, not the prose in the
+    // system prompt that also says "skills.fetch".
+    const asks = JSON.stringify(final).split('skills__fetch').length - 1;
+    expect(asks).toBe(1);
+  });
+
+  it('a skill comes back whole rather than cut at the default cap', async () => {
+    h = await bootService({ onboarded: true, watchFiles: false });
+    // 4000 chars is the default (§20.3); a skill this size used to arrive
+    // truncated mid-sentence, with a hint to use offset/limit arguments that
+    // `skills.fetch` does not have.
+    const body = `# Worked example\n\n${'x'.repeat(5000)}\n\nThe part that got cut.`;
+    fs.writeFileSync(
+      path.join(h.app.home.skillsDir, 'big-skill.md'),
+      `---\nname: big-skill\ndescription: A big one.\n---\n\n${body}\n`,
+      'utf8',
+    );
+    const handle = h.service.tools.handles().find((t) => t.name === 'skills.fetch')!;
+    const result = await handle.call({ name: 'big-skill' }, { runId: null, eventId: null });
+    const output = result.output as { content?: string; _truncated?: boolean };
+    expect(output._truncated).toBeUndefined();
+    expect(output.content).toContain('The part that got cut.');
   });
 });
 

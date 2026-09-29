@@ -3,6 +3,7 @@ name: failure-notice
 description: Use when the assistant's own machinery reports a failure — a handler that gave up, a schedule that was missed, a suspected loop. Not for anything the user did.
 match:
   types: ["system.*"]
+  sources: ["system"]
 tools: [deliver.notify]
 budgets:
   max_turns: 3

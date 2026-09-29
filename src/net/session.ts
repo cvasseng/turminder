@@ -61,6 +61,7 @@ export const SUPPORTED_FRAMES = [
 export const EMITTED_FRAMES = [
   'welcome',
   'delivery',
+  'delivery.missed',
   'chat.accepted',
   'event.accepted',
   'chat.delta',
@@ -78,6 +79,7 @@ export const EMITTED_FRAMES = [
   'conversation.mode',
   'form.request',
   'form.accepted',
+  'form.closed',
   'files.list.result',
   'files.read.result',
   'files.saved',
@@ -236,6 +238,25 @@ export class ChannelSession {
               expires_at: delivery.expires_at,
             }),
         });
+        // After the replay, because registering is what settles anything the
+        // replay found stale into `missed` (§7.1). One quiet list for the
+        // drawer, never N toasts, and not filtered by `last_seen`: nobody
+        // acked a missed row, so its status is the only cursor it has (D.1).
+        if (this.capabilities.includes('chat')) {
+          const missed = this.service.repos.deliveries.missed();
+          if (missed.length) {
+            this.send('delivery.missed', {
+              deliveries: missed.map((d) => ({
+                seq: d.seq,
+                delivery_id: d.id,
+                intent: d.intent,
+                payload: d.payload,
+                created_at: d.created_at,
+                expires_at: d.expires_at,
+              })),
+            });
+          }
+        }
         // Anything still waiting for a human is re-sent now (App. D.5): a
         // reconnecting page must not lose the form a run is suspended on.
         if (this.capabilities.includes('forms')) {

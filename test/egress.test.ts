@@ -77,7 +77,8 @@ describe('delivery outbox (§7.1)', () => {
       .prepare(`UPDATE deliveries SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = ?`)
       .run(id);
     expect(h.service.repos.deliveries.expireStale()).toBe(1);
-    expect(h.service.repos.deliveries.get(id)?.status).toBe('expired');
+    // Nobody was connected to receive it, so it is `missed`, not erased (§7.1).
+    expect(h.service.repos.deliveries.get(id)?.status).toBe('missed');
     expect(h.service.repos.deliveries.pending()).toHaveLength(0);
   });
 
@@ -120,7 +121,8 @@ describe('delivery outbox (§7.1)', () => {
     expect(replayed.payload.delivery_id).toBe(fresh.delivery_id);
     await new Promise((r) => setTimeout(r, 100));
     expect(client.of('delivery')).toHaveLength(0);
-    expect(h.service.repos.deliveries.get(stale.delivery_id)?.status).toBe('expired');
+    // Past its TTL and never delivered: no toast, but kept as `missed` (§7.1).
+    expect(h.service.repos.deliveries.get(stale.delivery_id)?.status).toBe('missed');
     client.close();
   });
 

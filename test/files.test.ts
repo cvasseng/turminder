@@ -9,6 +9,9 @@ import { fenceFile } from '../src/prompts/fencing.js';
 import { openDataHome } from '../src/core/datadir.js';
 import { GitRepo } from '../src/core/git.js';
 import { PathRejected } from '../src/tools/paths.js';
+import { filesTools } from '../src/tools/integrations/files.js';
+import type { FilesIndex } from '../src/rag/files-index.js';
+import type { ProjectScope } from '../src/projects/scope.js';
 import { bootService, TestClient, type ServiceHarness } from './service-harness.js';
 import { INLINE_RENDERABLE } from '../src/net/http.js';
 import { tmpDir, write } from './helpers.js';
@@ -157,6 +160,60 @@ describe('files integration (App. F.8)', () => {
     write(path.join(e.root, '.obsidian', 'workspace.json'), '{}');
     write(path.join(e.root, 'scratch.tmp'), 'x');
     expect(e.store.list().map((f) => f.path)).toEqual(['notes/a.md']);
+    e.cleanup();
+  });
+});
+
+describe('files.read/edit/append not_found suggestions (X3)', () => {
+  const ctx = { runId: 'r1', eventId: 'e1' };
+  /** `files.search` is the only consumer of `index`/`scope`; nothing here
+   *  calls it, so a stand-in that satisfies the type is enough. */
+  const tools = (store: ReturnType<typeof storeEnv>['store']) =>
+    filesTools({
+      store,
+      index: {} as unknown as FilesIndex,
+      scope: {} as unknown as ProjectScope,
+    });
+
+  it('suggests an existing root file for a misspelled, misdirected guess', async () => {
+    const e = storeEnv();
+    e.store.write('turminder_todo.md', '- [ ] one\n', 'seed');
+    const read = tools(e.store).find((t) => t.name === 'files.read')!;
+    const result = (await read.execute({ path: 'personal/turninder_todo.md' }, ctx)) as {
+      error: string;
+      did_you_mean?: string[];
+    };
+    expect(result.error).toBe('not_found');
+    expect(result.did_you_mean).toEqual(['turminder_todo.md']);
+    e.cleanup();
+  });
+
+  it('suggests nothing when nothing is close', async () => {
+    const e = storeEnv();
+    e.store.write('config/other-thing.yaml', 'x', 'seed');
+    const read = tools(e.store).find((t) => t.name === 'files.read')!;
+    const result = (await read.execute(
+      { path: 'notes/completely-unrelated-name.md' },
+      ctx,
+    )) as {
+      error: string;
+      did_you_mean?: string[];
+    };
+    expect(result.error).toBe('not_found');
+    expect(result.did_you_mean).toBeUndefined();
+    e.cleanup();
+  });
+
+  it('offers the same suggestion from files.edit', async () => {
+    const e = storeEnv();
+    e.store.write('turminder_todo.md', '- [ ] one\n', 'seed');
+    const edit = tools(e.store).find((t) => t.name === 'files.edit')!;
+    const result = (await edit.execute(
+      { path: 'personal/turninder_todo.md', find: 'x', replace: 'y', message: 'm' },
+      ctx,
+    )) as { error: string; did_you_mean?: string[] };
+    expect(result.error).toBe('not_found');
+    expect(result.did_you_mean).toEqual(['turminder_todo.md']);
     e.cleanup();
   });
 });

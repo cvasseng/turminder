@@ -184,6 +184,105 @@ describe('chat executor (§9)', () => {
     ).toHaveLength(0);
   });
 
+  it('archives a conversation quiet past the window, and says it was automatic', async () => {
+    h = await bootService({ onboarded: true });
+    h.fake.always({ text: 'ok' });
+    const sent = h.service.chat.send({ text: 'hello' });
+    await drain(h);
+    // Age the turns as well as the conversation. The distillation mark is the
+    // conversation's own `last_activity_at`, so backdating only the row would
+    // leave today's turns sitting *after* the mark — a shape no real week-old
+    // conversation has, and the reason this assertion is worth making.
+    h.app.db
+      .prepare(`UPDATE conversations SET last_activity_at = '2020-01-01T00:00:00.000Z'`)
+      .run();
+    h.app.db.prepare(`UPDATE turns SET created_at = '2019-12-31T00:00:00.000Z'`).run();
+    // The 30-minute pass takes the delta first, exactly as the sweep runs it.
+    expect(h.service.chat.distillIdle()).toBe(1);
+    await drain(h);
+
+    const before = h.fake.requests.length;
+    expect(h.service.chat.archiveIdle()).toBe(1);
+    await drain(h);
+
+    expect(h.service.repos.conversations.get(sent.conversationId)?.status).toBe('closed');
+    const closeEvent = h.service.repos.events
+      .recent({ limit: 20 })
+      .find((e) => e.type === 'system.conversation_closed');
+    expect((closeEvent?.payload as any).conversation_id).toBe(sent.conversationId);
+    // Who closed it: the user's button writes no `auto` at all (§9, App. B).
+    expect((closeEvent?.payload as any).auto).toBe(true);
+    // And it cost nothing: the idle pass already took every turn there was, so
+    // the close event's delta is empty and distillation returns before asking
+    // a model anything. A backlog archiving all at once must be free.
+    expect(h.fake.requests.length).toBe(before);
+  });
+
+  it('leaves a recent conversation alone, and archives nothing when set to 0', async () => {
+    h = await bootService({ onboarded: true });
+    h.fake.always({ text: 'ok' });
+    const fresh = h.service.chat.send({ text: 'hello' });
+    await drain(h);
+    // Two days quiet is not a week.
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString();
+    h.app.db.prepare(`UPDATE conversations SET last_activity_at = ?`).run(twoDaysAgo);
+    expect(h.service.chat.archiveIdle()).toBe(0);
+    expect(h.service.repos.conversations.get(fresh.conversationId)?.status).toBe('open');
+
+    await h.cleanup();
+    h = await bootService({ onboarded: true, dataDefaults: { conversation_archive_days: 0 } });
+    h.fake.always({ text: 'ok' });
+    const old = h.service.chat.send({ text: 'hello' });
+    await drain(h);
+    h.app.db
+      .prepare(`UPDATE conversations SET last_activity_at = '2020-01-01T00:00:00.000Z'`)
+      .run();
+    // 0 is the way back to the old rule: nobody archives but the user.
+    expect(h.service.chat.archiveIdle()).toBe(0);
+    expect(h.service.repos.conversations.get(old.conversationId)?.status).toBe('open');
+  });
+
+  it('never archives an onboarding conversation, however quiet', async () => {
+    h = await bootService({ onboarded: false });
+    const onboarding = h.service.repos.conversations.create({ mode: 'onboarding' });
+    h.app.db
+      .prepare(`UPDATE conversations SET last_activity_at = '2020-01-01T00:00:00.000Z'`)
+      .run();
+    expect(h.service.chat.archiveIdle()).toBe(0);
+    expect(h.service.repos.conversations.get(onboarding.id)?.status).toBe('open');
+  });
+
+  it('an auto-archived conversation is findable and comes back when written to', async () => {
+    // The two properties that make auto-archiving safe rather than a way to
+    // lose work (§9). If either of these ever breaks, the feature has to go.
+    h = await bootService({ onboarded: true });
+    h.fake.always({ text: 'ok' });
+    const sent = h.service.chat.send({ text: 'hello' });
+    await drain(h);
+    h.app.db
+      .prepare(`UPDATE conversations SET last_activity_at = '2020-01-01T00:00:00.000Z'`)
+      .run();
+    expect(h.service.chat.archiveIdle()).toBe(1);
+
+    // Out of the everyday list, still there when asked for.
+    expect(h.service.chat.list().map((c) => c.id)).not.toContain(sent.conversationId);
+    expect(h.service.chat.list({ includeArchived: true }).map((c) => c.id)).toContain(
+      sent.conversationId,
+    );
+
+    // And writing to it reopens it, with its history intact.
+    const again = h.service.chat.send({
+      conversationId: sent.conversationId,
+      text: 'still here?',
+    });
+    await drain(h);
+    expect(again.conversationId).toBe(sent.conversationId);
+    expect(h.service.repos.conversations.get(sent.conversationId)?.status).toBe('open');
+    expect(h.service.repos.conversations.history(sent.conversationId).length).toBeGreaterThan(
+      2,
+    );
+  });
+
   it('does not distil the same idle conversation twice', async () => {
     h = await bootService({ onboarded: true });
     h.fake.always({ text: 'ok' });
@@ -385,12 +484,16 @@ describe('onboarding (plan §3c)', () => {
     const sent = h.service.chat.send({ text: 'hello' });
     await drain(h);
 
+    // The security property: nothing was ever written outside the store.
     expect(fs.existsSync(path.join(h.dataDir, '..', 'escape.md'))).toBe(false);
     const toolCall = h.service.repos.trace
       .forEvent(sent.eventId)
       .find((t) => t.kind === 'tool_call')!.data as any;
-    expect(toolCall.ok).toBe(false);
-    expect(toolCall.result_excerpt).toContain('tool_failed');
+    // X4: a bad path is a value (`{error: "path_rejected", message}`) now,
+    // not a thrown `tool_failed` — the call "succeeds" in producing it.
+    expect(toolCall.ok).toBe(true);
+    expect(toolCall.result_excerpt).toContain('path_rejected');
+    expect(toolCall.result_excerpt).toContain('escapes the root');
   });
 
   it('offers chat the configured default toolset and nothing else', async () => {
@@ -427,6 +530,7 @@ describe('onboarding (plan §3c)', () => {
       'schedule.cancel',
       'schedule.create',
       'schedule.list',
+      'schedule.trigger',
       'skills.fetch',
       'time.now',
       'tools.open',
@@ -490,6 +594,23 @@ describe('chat activity feedback', () => {
     h.service.chat.send({ text: 'hello?' });
     await drain(h);
     expect(activity.find((a) => a.kind === 'stopped')?.reason).toBe('error');
+  });
+
+  it('names the endpoint in a person-written failure message, never the SDK text (X1b)', async () => {
+    h = await bootService({ onboarded: true });
+    const failures: string[] = [];
+    h.service.chat.onStream({ failed: (e) => failures.push(e.message) });
+    // Refused connections, not a bad HTTP status: this is the shape the
+    // evidence found — the AI SDK's generic "No output generated. Check the
+    // stream for errors." with the real cause nowhere in sight.
+    await h.fake.stop();
+    h.service.chat.send({ text: 'hello?' });
+    await drain(h);
+    expect(failures).toHaveLength(1);
+    // Names the configured endpoint (service-harness.ts's models.yaml).
+    expect(failures[0]).toContain('main');
+    expect(failures[0]).not.toMatch(/no output generated/i);
+    expect(failures[0]).not.toMatch(/check the stream for errors/i);
   });
 
   it('streams activity frames over the websocket', async () => {

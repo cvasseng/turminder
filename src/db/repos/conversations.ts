@@ -434,6 +434,26 @@ export class ConversationsRepo {
   }
 
   /**
+   * Open conversations quiet since before `cutoff` — the auto-archive sweep
+   * (§9). Unlike `needingDistillation` this does not care whether anything is
+   * owed: archiving is about the list being readable, not about work pending,
+   * so a conversation nobody ever spoke in is exactly the clutter it clears.
+   *
+   * Onboarding is the one exclusion. It is a flow the install may still be
+   * waiting on rather than a conversation someone lost interest in, and
+   * hiding a half-finished one helps nobody.
+   */
+  needingArchive(cutoff: string): ConversationRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM conversations
+          WHERE status = 'open' AND mode <> 'onboarding' AND last_activity_at < ?`,
+      )
+      .all(cutoff)
+      .map((r) => toConversation(r as ConversationRow)!);
+  }
+
+  /**
    * Namespaces this conversation has paged in (§21.2.5). The core set is not
    * stored — it is the same for every conversation and comes from config, so
    * changing the default takes effect everywhere rather than only in

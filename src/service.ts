@@ -63,6 +63,7 @@ import { GrantStore } from './tools/grants.js';
 import { RunGrants } from './tools/run-grants.js';
 import { ChatStops } from './chat/stop.js';
 import { setupTools } from './tools/integrations/setup/tools.js';
+import { handlerTools } from './tools/integrations/handler.js';
 import { ChatService } from './chat/service.js';
 import { ChatStreamHub } from './chat/stream.js';
 
@@ -607,6 +608,9 @@ export class Service {
       home: this.app.home,
       config: this.app.config,
       intake: this.intake,
+      // The OAuth redirect when no public URL is set (§19.6) — read late,
+      // because the server binds after the hub is built.
+      origin: () => this.origin,
       repos: this.repos,
       skills: this.skills,
       forms: this.forms,
@@ -614,6 +618,7 @@ export class Service {
       memory: this.memoryAgent,
       projectScope: this.projectScope,
       handlers: () => this.handlers.all(),
+      onHandlersChanged: () => this.handlers.reload(),
       files: this.files,
       ...(this.opts.hubClock ? { clock: this.opts.hubClock } : {}),
       extra: {
@@ -646,6 +651,16 @@ export class Service {
           printer: new ChromiumPrinter({ systools: this.app.systools }),
           transient: this.transient,
           origin: () => this.origin,
+        }),
+        // What a handler may run unattended is approved on a form (F.20).
+        handler: handlerTools({
+          home: this.app.home,
+          config: this.app.config,
+          forms: this.forms,
+          router: () => this.models?.router ?? null,
+          tools: () => this.toolHub,
+          grants: this.grants,
+          onHandlersChanged: () => this.handlers.reload(),
         }),
         setup: setupTools({
           home: this.app.home,
@@ -733,6 +748,11 @@ export class Service {
         try {
           const distilled = this.chat.distillIdle();
           if (distilled) l.info({ distilled }, 'distilled idle conversations');
+          // After distilling, not before. Either order distils exactly once —
+          // closing carries the same hook — but this way each pass does its
+          // own job: the 30-minute one takes the delta, and the week-old one
+          // finds nothing left to take and closes without a model call (§9).
+          this.chat.archiveIdle();
         } catch (e) {
           l.warn({ err: e }, 'idle sweep failed');
         }

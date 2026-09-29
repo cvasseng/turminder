@@ -26,8 +26,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "daemon": "tsx daemon/bin.ts",
-    "app:dev": "cd app && nix-shell --run 'cargo tauri dev'",
-    "app:build": "cd app && nix-shell --run 'cargo tauri build'"
+    "app:dev": "npm run build && cd app && nix-shell --run 'node stage-service.mjs && cargo tauri dev'",
+    "app:build": "npm run build && cd app && nix-shell --run 'node stage-service.mjs && cargo tauri build'"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.33",

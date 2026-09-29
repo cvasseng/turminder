@@ -117,16 +117,10 @@ export class SchedulerLoop {
     return this.intake.submit({
       type: row.event_type,
       source: 'scheduler',
-      payload: {
-        schedule_id: row.id,
-        note: row.note,
-        // The server knows how stale this is, so the server says so (App. B):
-        // a digest can open with "this is yesterday's" instead of inferring
-        // lateness from `time.now` and a hope.
-        fire_at: row.fire_at,
-        late_by_s: lateByS,
-        data: this.repos.schedules.payloadOf(row),
-      },
+      payload: scheduleFirePayload(row, this.repos.schedules.payloadOf(row), {
+        fireAt: row.fire_at,
+        lateByS,
+      }),
       serialization_key: row.id,
       // App. B: `<schedule_id>:<fire_at>` — a restart mid-fire cannot double up.
       idempotency_key: `${row.id}:${row.fire_at}`,
@@ -145,9 +139,23 @@ export class SchedulerLoop {
   private missed(row: ScheduleRow, now: Date, lateByS: number): boolean {
     const skipped = countOccurrences(row, now);
     const next = nextOccurrence(row, now);
+    // Whether this same occurrence is also landing as a `timer.fired`
+    // (§6.1 S3): `fire_late` already tells the handler how late it is
+    // (`late_by_s`), so this event becomes informational for that occurrence
+    // — worth keeping for the audit trail, not worth a second notice on top
+    // of the one the fired event's own handler gives. `skip` has no fire at
+    // all, which is the genuinely silent case `failure-notice` exists for.
+    const alsoFired = row.on_miss === 'fire_late';
     this.intake.submit({
       type: 'system.schedule_missed',
-      source: 'system',
+      // Structural, not a model's judgement call: `failure-notice` matches
+      // `system.*` by type alone and cannot see `also_fired` in the payload
+      // (§5.2 — the matcher takes only the envelope). Its `match` gained
+      // `sources: ["system"]` so this source change is what excludes it,
+      // deliberately — the type stays `system.schedule_missed` either way,
+      // because splitting it into two types would be a second kind of the
+      // same event for no reason but routing.
+      source: alsoFired ? 'scheduler' : 'system',
       payload: {
         schedule_id: row.id,
         fire_at: row.fire_at,
@@ -156,6 +164,7 @@ export class SchedulerLoop {
         on_miss: row.on_miss,
         skipped,
         next_fire_at: next,
+        also_fired: alsoFired,
       },
     });
     l.warn(
@@ -172,11 +181,11 @@ export class SchedulerLoop {
     // Fired for the occurrence it was actually for — `fire_at` and `late_by_s`
     // say so — and then advanced past everything else that went by while
     // nobody was home. One fire, never N.
-    if (row.on_miss === 'fire_late') this.emit(row, lateByS);
+    if (alsoFired) this.emit(row, lateByS);
 
     if (next) this.repos.schedules.markFired(row.id, nowIso(), next);
     else this.repos.schedules.setStatus(row.id, 'missed');
-    return row.on_miss === 'fire_late';
+    return alsoFired;
   }
 
   private schedule(delayMs: number): void {
@@ -199,6 +208,36 @@ export class SchedulerLoop {
     if (!next) return this.maxSleepMs;
     return Math.max(50, Math.min(this.maxSleepMs, msUntil(next)));
   }
+}
+
+/**
+ * What a fired schedule puts in front of a handler (App. B). Exported because
+ * `schedule.trigger` (F.2) fires one by hand and must be indistinguishable
+ * from the clock doing it: a handler reads this payload and nothing else, so
+ * two builders would mean two subtly different kinds of "the digest is due"
+ * and a handler tested against one of them.
+ *
+ * `manual` is the single admitted difference, and it is additive: a handler
+ * that ignores it behaves identically either way, and one that cares can say
+ * "you asked for this" instead of pretending an alarm went off. Lateness is
+ * not that difference — a hand-fired schedule is not late, it is now (§6.2).
+ */
+export function scheduleFirePayload(
+  row: ScheduleRow,
+  data: unknown,
+  opts: { fireAt: string; lateByS: number; manual?: boolean },
+): Record<string, unknown> {
+  return {
+    schedule_id: row.id,
+    note: row.note,
+    // The server knows how stale this is, so the server says so (App. B): a
+    // digest can open with "this is yesterday's" instead of inferring lateness
+    // from `time.now` and a hope.
+    fire_at: opts.fireAt,
+    late_by_s: opts.lateByS,
+    data,
+    ...(opts.manual ? { manual: true } : {}),
+  };
 }
 
 /**

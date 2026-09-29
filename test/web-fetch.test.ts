@@ -93,6 +93,18 @@ describe('web.fetch against a real server', () => {
       } else if (req.url === '/redirect') {
         res.writeHead(302, { location: '/page' });
         res.end();
+      } else if (req.url === '/rate-limited') {
+        res.writeHead(429, { 'content-type': 'text/plain', 'retry-after': '30' });
+        res.end('slow down');
+      } else if (req.url === '/unavailable') {
+        res.writeHead(503, {
+          'content-type': 'text/plain',
+          'retry-after': new Date(Date.now() + 60_000).toUTCString(),
+        });
+        res.end('down for maintenance');
+      } else if (req.url === '/rate-limited-no-header') {
+        res.writeHead(429, { 'content-type': 'text/plain' });
+        res.end('slow down');
       } else {
         res.writeHead(500);
         res.end();
@@ -149,6 +161,32 @@ describe('web.fetch against a real server', () => {
 
     const pdf = (await fetchTool().execute({ url: `${base}/binary` }, ctx)) as any;
     expect(pdf.error).toBe('unsupported_content');
+  });
+
+  it('carries retry_after_s from a 429, seconds form (X5)', async () => {
+    const result = (await fetchTool().execute({ url: `${base}/rate-limited` }, ctx)) as any;
+    expect(result.error).toBe('fetch_failed');
+    expect(result.retry_after_s).toBe(30);
+    expect(result.message).toMatch(/wait 30s/);
+    expect(result.message).toMatch(/don't retry/);
+  });
+
+  it('carries retry_after_s from a 503, HTTP-date form (X5)', async () => {
+    const result = (await fetchTool().execute({ url: `${base}/unavailable` }, ctx)) as any;
+    expect(result.error).toBe('fetch_failed');
+    // Allow a couple of seconds of slack for the request round trip.
+    expect(result.retry_after_s).toBeGreaterThanOrEqual(57);
+    expect(result.retry_after_s).toBeLessThanOrEqual(60);
+  });
+
+  it('omits retry_after_s when the server sent no Retry-After', async () => {
+    const result = (await fetchTool().execute(
+      { url: `${base}/rate-limited-no-header` },
+      ctx,
+    )) as any;
+    expect(result.error).toBe('fetch_failed');
+    expect(result.retry_after_s).toBeUndefined();
+    expect(result.message).toBe('HTTP 429');
   });
 
   it('refuses a blocked url without making a request', async () => {

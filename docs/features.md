@@ -11,12 +11,31 @@ preferences. Drop an image in and a vision-capable model looks at it; a model
 that cannot will say so rather than guess. Attachments are capped at 20 MB
 and images stay in context for the last two user turns.
 
+Focus mode hides the top bar and the sidebar and sets the conversation in a
+narrower column with larger text, for reading or writing at length. Esc brings
+the rest back.
+
+The chat can be installed as an app from the browser, on a phone or a desktop,
+and it opens to its reconnecting screen when the service is away. Installing
+needs a secure address: https, or localhost on the machine itself. A plain
+`http://` address on the local network works in the browser but cannot be
+installed.
+
 ## Handlers
 
 "When an invoice mail arrives, file it." Handlers are markdown files you
 author in chat: a description the LLM ingress matches events against, a body
 that says what to do, and frontmatter listing the tools the handler may use.
 Nothing outside that list is callable during the run.
+
+That list is yours to approve, once. When the assistant writes a handler it
+asks for the tools it wants, and a form shows each one with its description
+and a choice between letting it run on its own and asking you each time. Names
+it made up are refused before the form appears, and a pattern like `asana.*` is
+written down as the exact tools it covered that day. Afterwards the assistant
+can rewrite what the handler says freely, but a change to what it may use, or
+to which events wake it, brings the form back and leaves the file untouched
+until you answer.
 
 Some handlers and skills ship with Turminder and are installed into your data
 directory at every start. One you have edited is yours and is never
@@ -79,6 +98,21 @@ asked to be told and how late it is. Anything richer gets its own kind of
 event and its own handler file, so nothing else competes for it and the tools
 it may use while nobody is watching are written down in one place you can read.
 
+Any schedule can also be run on the spot — "do the digest now", or to prove a
+scheduled behaviour works the moment it is written rather than at seven the
+next morning. What runs is what would have run at the booked time: the same
+event, the same handler, the same grants. The booking is not spent, so a
+reminder you run today still arrives on its real date, and the handler can
+tell it was asked for rather than woken by the clock, which is how a morning
+briefing fired in the afternoon avoids opening with "good morning".
+
+A notification that nobody was connected to receive is kept rather than
+expired. The next time a chat opens it appears once, quietly, under "While you
+were away" in the activity drawer, and opening it clears it. One from a
+scheduled job stays current until that job's next run. Questions that needed
+an answer by a deadline are the exception: silence there is a no, and they
+expire as before.
+
 ## Watchers
 
 "Track this package." A status is checked on a timer by plain code, and the
@@ -102,6 +136,13 @@ back naming the server and when it will next be tried instead of vanishing.
 Fix the fault, ask the same question again, and it answers. There is also a
 capped retry in the background, so a fault fixed outside the conversation is
 picked up without one.
+
+Servers that sign in through the browser (OAuth) connect the same way. The
+assistant hands you a link, you approve access, and the tools appear. The
+sign-in is kept in the secret store and renewed without asking. If it lapses,
+one notice says so, and asking to reconnect gives you a fresh link. When the
+approval page ends up on a device that cannot reach the service, such as a
+phone, paste the address it landed on into the form the assistant offers.
 
 ## Printing and scanning
 
@@ -174,6 +215,12 @@ the assistant should run: on this computer, where the app carries its own
 Node runtime and supervises the service, or on a machine you already run it
 on, reached with a connect link. Its key lives in your keyring.
 
+The tray's *Quick note…* opens a small box by the tray icon for a line you
+don't want to hold a conversation about: "add to todo: renew the passport".
+Press Enter and the box goes away. The assistant files the note, into wherever
+you have told it your todos live or `todo.md` otherwise, and one notification
+says where. A note that could not be sent stays in the box with the reason.
+
 ## Voice
 
 Speaking to the assistant is chat with a different mouth. A recording goes to
@@ -201,6 +248,11 @@ Thinking is off for spoken conversations where the model can be told to stop —
 a second of silence before the first word is a second too long — and every
 transcription and every spoken sentence shows up in the Requests panel with
 what it cost.
+
+The chat has a microphone button too. Press it, speak, press again: what it
+heard appears in the conversation and the answer is played back. Browsers only
+allow the microphone on a secure address, so the button appears on https or
+localhost and not on a plain `http://` local-network address.
 
 ## Browser extension
 

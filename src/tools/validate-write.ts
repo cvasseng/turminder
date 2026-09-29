@@ -1,7 +1,7 @@
 import path from 'node:path';
-import matter from 'gray-matter';
 import YAML from 'yaml';
 import type { z } from 'zod';
+import { parseFrontmatter } from '../core/config.js';
 import {
   HandlerFrontmatterSchema,
   IdentitySchema,
@@ -98,17 +98,15 @@ function checkMarkdown(
   schema: z.ZodTypeAny,
   rules: MarkdownRules,
 ): WriteCheck {
-  let parsed: matter.GrayMatterFile<string>;
-  try {
-    parsed = matter(content);
-  } catch (e) {
+  const parsed = parseFrontmatter(content);
+  if (!parsed.ok) {
     return reject(
       `${label}: the YAML frontmatter is malformed`,
-      `${(e as Error).message}. It should look like:\n\n${rules.example}`,
+      `${parsed.message}. It should look like:\n\n${rules.example}`,
     );
   }
 
-  const hasFrontmatter = Object.keys(parsed.data ?? {}).length > 0;
+  const hasFrontmatter = Object.keys(parsed.data).length > 0;
   if (!hasFrontmatter) {
     return reject(
       `${label}: no YAML frontmatter — the file needs a --- block before the prose`,
@@ -132,7 +130,7 @@ function checkMarkdown(
     );
   }
 
-  if (rules.needsBody && !parsed.content.trim()) {
+  if (rules.needsBody && !parsed.body.trim()) {
     return reject(
       `${label}: the body is empty — frontmatter alone says nothing`,
       'Put the actual guidance or instructions after the closing --- line.',

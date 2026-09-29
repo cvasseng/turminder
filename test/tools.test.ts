@@ -104,6 +104,54 @@ describe('granted dispatcher (§11.4, App. F.7)', () => {
     expect(r).toEqual({ ok: true, output: { echoed: 'hi' }, empty: false });
   });
 
+  it('counts a failed read as empty and a refused write as nothing of the kind', async () => {
+    // §20.9's fallback, and the line it draws: "returned nothing" is a thing
+    // a *search* does. A write that came back {error} is telling the caller
+    // the exact thing to fix, which is the parameters — the opposite of the
+    // claim the streak note makes. Getting this wrong pushed a model off an
+    // approach that was working (2026-09-11).
+    const failing: ToolDefinition[] = [
+      {
+        name: 'read.thing',
+        description: 'a read that fails',
+        tier: 'ro',
+        args: z.object({}),
+        async execute() {
+          return { error: 'not_found', message: 'no such thing' };
+        },
+      },
+      {
+        name: 'write.thing',
+        description: 'a write the validator refuses',
+        tier: 'se',
+        args: z.object({}),
+        async execute() {
+          return { error: 'invalid_content', message: 'line 3, column 88' };
+        },
+      },
+      {
+        name: 'write.boom',
+        description: 'a write that throws',
+        tier: 'se',
+        args: z.object({}),
+        async execute() {
+          throw new Error('disk on fire');
+        },
+      },
+    ];
+    const failConn = await McpConnection.inProcess('fail', failing);
+    const d = new GrantedDispatcher(await failConn.listTools(), { tools: ['*'] }, ctx);
+    const read = await d.dispatch({ toolCallId: '1', name: 'read.thing', args: {} });
+    const write = await d.dispatch({ toolCallId: '2', name: 'write.thing', args: {} });
+    const threw = await d.dispatch({ toolCallId: '3', name: 'write.boom', args: {} });
+    expect(read.empty).toBe(true);
+    expect(write.empty).toBe(false);
+    // Even a write that blew up is broken, not futile.
+    expect(threw.ok).toBe(false);
+    expect(threw.empty).toBe(false);
+    await failConn.close();
+  });
+
   it('validates arguments at the integration boundary', async () => {
     const d = new GrantedDispatcher(handles, { tools: ['web.search'] }, ctx);
     const r = await d.dispatch({ toolCallId: '1', name: 'web.search', args: { word: 42 } });
@@ -142,6 +190,8 @@ describe('granted dispatcher (§11.4, App. F.7)', () => {
       eventId: 'event-1',
       conversationId: 'conv-1',
       handlerName: 'nudge',
+      // The request's own abort signal (§19.1) — the transport's, never `_meta`.
+      signal: expect.any(AbortSignal),
     });
     await contextConn.close();
   });
@@ -259,5 +309,43 @@ describe('config integration path safety (App. F.6)', () => {
     const tools = configTools(home, noRoutingDeps(home));
     expect(tools.find((t) => t.name === 'config.read')?.tier).toBe('ro');
     expect(tools.find((t) => t.name === 'config.write')?.tier).toBe('se');
+  });
+
+  it('lists entries instead of throwing when config.read names a directory (X4)', async () => {
+    const [read] = configTools(home, noRoutingDeps(home));
+    const ctx = { runId: null, eventId: null };
+    // Seeded directly — `config.write` refuses a new `handlers/*.md` file
+    // outright (`use_handler_create`, F.6), which is not what this test is
+    // about.
+    fs.writeFileSync(home.path('handlers', 'nudge.md'), '---\n---\nbody');
+
+    // The bare root itself — the exact shape that used to throw "path must
+    // name a file, not a directory" (evidence, 2026-09-11).
+    const bare = (await read!.execute({ path: 'handlers/' }, ctx)) as {
+      error: string;
+      files: string[];
+    };
+    // The scaffold ships a `.gitkeep` in every source directory (datadir.ts).
+    expect(bare).toEqual({ error: 'is_directory', files: ['.gitkeep', 'nudge.md'] });
+
+    // A deeper directory that isn't the special-cased root: resolves fine,
+    // then turns out to be a directory on disk.
+    fs.mkdirSync(home.path('config', 'sub'), { recursive: true });
+    const deeper = (await read!.execute({ path: 'config/sub' }, ctx)) as {
+      error: string;
+      files: string[];
+    };
+    expect(deeper).toEqual({ error: 'is_directory', files: [] });
+  });
+
+  it('returns a bad config.write path as a value, not a throw (X4)', async () => {
+    const [, write] = configTools(home, noRoutingDeps(home));
+    const ctx = { runId: null, eventId: null };
+    const result = await write!.execute(
+      { path: 'config/mcp.yaml', content: 'servers: []', message: 'nope' },
+      ctx,
+    );
+    expect(result).toMatchObject({ error: 'path_rejected' });
+    expect((result as { message: string }).message).toContain('setup form flow');
   });
 });

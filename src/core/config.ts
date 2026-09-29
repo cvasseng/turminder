@@ -181,6 +181,41 @@ export interface MarkdownDoc<T> {
   file: string;
 }
 
+/** Frontmatter that parsed, or the reason it did not. Never a throw: malformed
+ *  YAML in a file a human (or the model) authored is an expected failure. */
+export type ParsedFrontmatter =
+  { ok: true; data: Record<string, unknown>; body: string } | { ok: false; message: string };
+
+/**
+ * The one way to parse frontmatter (G.7, G.8). Everything that reads a `---`
+ * block goes through here, for a reason that cost a model three turns and two
+ * wrong diagnoses (2026-09-11, run `01M27K59B11KSJDF1F7F2YVCBX`):
+ *
+ * gray-matter caches by input string, and it writes the entry **before** it
+ * parses — so a YAML error leaves a half-built object behind, content
+ * unstripped and `data` empty. Parse the same string a second time and the
+ * library hands back that corpse without complaint: the real error ("a key
+ * node is missed at line 3") becomes "no YAML frontmatter", which is a lie
+ * about a file that plainly has some. `config.write` parses once for routing
+ * and once to validate, so a model was told to add a `---` block to a
+ * document that opened with one, and spent two retries guessing at what was
+ * actually an unquoted colon.
+ *
+ * **The empty options object is the fix and must stay.** gray-matter reads and
+ * writes its cache only when called with no options at all (`index.js`: "only
+ * cache if there are no options passed"), and `defaults({})` is identical to
+ * `defaults(undefined)` — so this parses exactly as before and cannot poison
+ * or be poisoned. Deleting the `{}` restores the bug silently.
+ */
+export function parseFrontmatter(content: string): ParsedFrontmatter {
+  try {
+    const file = matter(content, {});
+    return { ok: true, data: (file.data ?? {}) as Record<string, unknown>, body: file.content };
+  } catch (e) {
+    return { ok: false, message: (e as Error).message };
+  }
+}
+
 /** Load + validate a markdown file with YAML frontmatter (gray-matter). */
 export function loadMarkdownFile<S extends z.ZodTypeAny>(
   absPath: string,
@@ -188,17 +223,15 @@ export function loadMarkdownFile<S extends z.ZodTypeAny>(
   schema: S,
 ): MarkdownDoc<z.infer<S>> | null {
   if (!fs.existsSync(absPath)) return null;
-  let parsedMatter: matter.GrayMatterFile<string>;
-  try {
-    parsedMatter = matter(fs.readFileSync(absPath, 'utf8'));
-  } catch (e) {
-    throw new ConfigError(label, 'frontmatter is not valid YAML', (e as Error).message);
+  const parsedMatter = parseFrontmatter(fs.readFileSync(absPath, 'utf8'));
+  if (!parsedMatter.ok) {
+    throw new ConfigError(label, 'frontmatter is not valid YAML', parsedMatter.message);
   }
-  const parsed = schema.safeParse(parsedMatter.data ?? {});
+  const parsed = schema.safeParse(parsedMatter.data);
   if (!parsed.success) {
     throw new ConfigError(label, 'frontmatter failed validation', issues(parsed.error));
   }
-  return { frontmatter: parsed.data, body: parsedMatter.content.trim(), file: absPath };
+  return { frontmatter: parsed.data, body: parsedMatter.body.trim(), file: absPath };
 }
 
 /* ── Resolved settings: Appendix A defaults overridden by G.1 ─────────────── */
@@ -216,6 +249,8 @@ export interface Settings {
   chatContextTurns: number;
   /** How long quiet before a conversation is distilled. Never archives it (§9). */
   conversationIdleMin: number;
+  /** How long quiet before a conversation archives itself; 0 = never (§9). */
+  conversationArchiveDays: number;
   notifyTtlS: number;
   confirmTtlS: number;
   confirmTimeoutS: number;
@@ -307,6 +342,7 @@ export const DEFAULT_SETTINGS: Settings = {
   memoryTopK: 5,
   chatContextTurns: 40,
   conversationIdleMin: 30,
+  conversationArchiveDays: 7,
   notifyTtlS: 24 * 3600,
   confirmTtlS: 3600,
   confirmTimeoutS: 3600,
@@ -365,6 +401,9 @@ export const DEFAULT_SETTINGS: Settings = {
     'skills.fetch',
     'config.read',
     'config.write',
+    // Creating a handler is asked for in chat; the approval form, not this
+    // grant, is what lets it run anything (F.20).
+    'handler.*',
     'calendar.*',
     'asana.*',
     'setup.*',
@@ -467,6 +506,9 @@ export function resolveSettings(
   if (d.memory_top_k !== undefined) s.memoryTopK = d.memory_top_k;
   if (d.chat_context_turns !== undefined) s.chatContextTurns = d.chat_context_turns;
   if (d.conversation_idle_min !== undefined) s.conversationIdleMin = d.conversation_idle_min;
+  if (d.conversation_archive_days !== undefined) {
+    s.conversationArchiveDays = d.conversation_archive_days;
+  }
   if (d.notify_ttl_s !== undefined) s.notifyTtlS = d.notify_ttl_s;
   if (d.confirm_ttl_s !== undefined) s.confirmTtlS = d.confirm_ttl_s;
   if (d.confirm_timeout_s !== undefined) s.confirmTimeoutS = d.confirm_timeout_s;

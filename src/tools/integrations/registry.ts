@@ -62,7 +62,7 @@ export const MANIFESTS: IntegrationManifest[] = [
   core(
     'schedule',
     'Reminders and recurring work on the assistant’s own clock.',
-    ['schedule.create', 'schedule.list', 'schedule.cancel'],
+    ['schedule.create', 'schedule.list', 'schedule.cancel', 'schedule.trigger'],
     ['timer.fired'],
   ),
   core('deliver', 'Desktop notifications, and approve/deny requests.', ['deliver.notify']),
@@ -79,6 +79,11 @@ export const MANIFESTS: IntegrationManifest[] = [
     'config.write',
   ]),
   core('skills', 'Fetching the full text of a skill.', ['skills.fetch']),
+  core(
+    'handler',
+    'Creating and changing handlers — behaviours that run on their own when an event arrives.',
+    ['handler.create', 'handler.update'],
+  ),
   core(
     'embeds',
     'Rich content and mini-apps: LLM-authored HTML rendered in chat or served on its own link.',

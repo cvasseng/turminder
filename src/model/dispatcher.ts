@@ -5,6 +5,12 @@ export interface DispatchCall {
   toolCallId: string;
   name: string;
   args: unknown;
+  /**
+   * The run's own abort (stop, timeout, failure). Handed to the tool as
+   * `ToolContext.signal`, so a call the run has walked away from — a form
+   * above all — is closed rather than left to write for nobody (§19.1).
+   */
+  signal?: AbortSignal;
 }
 
 export interface DispatchResult {
@@ -23,6 +29,16 @@ export interface DispatchResult {
    * capped (§20.3). Absent means `output` is the whole truth.
    */
   traceOutput?: unknown;
+  /**
+   * The result's full serialized length, when the §20.3 cap truncated it.
+   * Recorded on the trace (C.1) so how often the cap bites is a query.
+   */
+  truncatedFrom?: number;
+  /**
+   * Leave this result out of the elision pass (§20.4) — a skill body is the
+   * run's instructions, not data it can re-fetch without losing the thread.
+   */
+  neverElide?: boolean;
   /**
    * Content-bearing arg fields to stub out of the transcript now that the call
    * has run (§20.6). Present only on calls that actually executed — a refused

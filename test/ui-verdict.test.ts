@@ -25,7 +25,7 @@ type Verdict = 'ok' | 'rejected' | 'unknown';
 type Reply = { status: number; ok?: boolean } | Error;
 
 /** Evaluate `verdict.js` against a stub `fetch` and record what it asked. */
-function load(reply: Reply): {
+function load(replies: Reply | Reply[]): {
   verdict: (value: string | null) => Promise<Verdict>;
   calls: { url: string; init: { headers: Record<string, string> } }[];
 } {
@@ -33,14 +33,22 @@ function load(reply: Reply): {
   const scope = {
     fetch: (url: string, init: { headers: Record<string, string> }) => {
       calls.push({ url, init });
+      // One reply per call, the last repeating: the second look a 401 earns
+      // can be scripted to answer differently from the first.
+      const list = Array.isArray(replies) ? replies : [replies];
+      const reply = list[Math.min(calls.length - 1, list.length - 1)]!;
       if (reply instanceof Error) return Promise.reject(reply);
       return Promise.resolve({ status: reply.status, ok: reply.ok ?? reply.status < 400 });
     },
   };
   const body = `${read('ui/verdict.js')}; return tokenVerdict;`;
-  const verdict = new Function(...Object.keys(scope), body)(...Object.values(scope)) as (
+  const raw = new Function(...Object.keys(scope), body)(...Object.values(scope)) as (
     value: string | null,
+    confirmDelayMs?: number,
   ) => Promise<Verdict>;
+  // No real pause between the two looks: the delay is a production concern,
+  // and what the suite pins is how many looks it takes.
+  const verdict = (value: string | null) => raw(value, 0);
   return { verdict, calls };
 }
 
@@ -50,9 +58,35 @@ describe('the UI asks about a token rather than inferring (§24.4)', () => {
     expect(await verdict('tok-abc')).toBe('rejected');
     // Asked the probe, and asked it *with* the token — a token-less question
     // cannot produce this answer, which is the whole point of the endpoint.
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe('/api/whoami');
-    expect(calls[0]!.init.headers.authorization).toBe('Bearer tok-abc');
+    // Twice: one refusal is not enough to destroy a credential.
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call.url).toBe('/api/whoami');
+      expect(call.init.headers.authorization).toBe('Bearer tok-abc');
+    }
+  });
+
+  it('keeps a token that was refused once and accepted on the second look', async () => {
+    // The live failure: a check that read the device file mid-write, or hit a
+    // service still booting, answered 401 to a working token, and the page
+    // deleted it and asked to be paired again. A second look a moment later
+    // gets the truth.
+    const { verdict, calls } = load([{ status: 401 }, { status: 200 }]);
+    expect(await verdict('tok-abc')).toBe('ok');
+    expect(calls).toHaveLength(2);
+  });
+
+  it('keeps a token when the second look cannot reach the server', async () => {
+    const { verdict } = load([{ status: 401 }, new TypeError('Failed to fetch')]);
+    expect(await verdict('tok-abc')).toBe('unknown');
+  });
+
+  it('asks only once when the first answer is not a refusal', async () => {
+    const { calls } = load({ status: 200 });
+    const again = load({ status: 200 });
+    await again.verdict('tok-abc');
+    expect(again.calls).toHaveLength(1);
+    expect(calls).toHaveLength(0);
   });
 
   it('clears a good token for nothing, given the chance', async () => {

@@ -6,7 +6,7 @@ import type { Config } from '../core/config.js';
 import type { BackgroundTasks } from '../core/background.js';
 import type { Repos } from '../db/repos/index.js';
 import type { EventRecord } from '../db/repos/events.js';
-import { runAgent } from '../model/agent-loop.js';
+import { runAgent, type AgentRunResult } from '../model/agent-loop.js';
 import type { ModelGateway } from '../model/gateway.js';
 import type {
   ModelCap,
@@ -212,6 +212,14 @@ export class ChatExecutor {
             const skill = tools.skills.get(namespace);
             return skill ? { name: skill.name, content: skill.body } : null;
           },
+          // A configured server that is down or waiting on a sign-in (§11.6)
+          // is not a namespace that doesn't exist — `tools.open` needs to say
+          // so instead of leaving a guess as the model's only move (X2).
+          unavailable: () =>
+            tools
+              .serverStatus()
+              .filter((s) => !s.connected)
+              .map((s) => ({ name: s.name, status: s.needs_auth ? 'needs_auth' : 'dropped' })),
         });
     const dispatcher = paged ?? granted;
 
@@ -495,7 +503,7 @@ export class ChatExecutor {
     });
 
     if (failed) {
-      const message = stopped ? 'stopped' : (result.error ?? 'the model returned nothing');
+      const message = stopped ? 'stopped' : chatFailureMessage(result);
       // Chat failures are reported in-band. A retry an hour later would answer
       // a question the user has long since re-asked, so the event is complete.
       stream.failed({ conversationId: conversation.id, message });
@@ -519,13 +527,16 @@ export class ChatExecutor {
       // A user-stopped run gets no banner: the person who ended it knows.
       stream.failed({
         conversationId: conversation.id,
-        message: `answer cut short (${result.stopReason})${
-          result.stopReason === 'max_tokens'
-            ? ' — raise chat.max_tokens in config/turminder.yaml'
-            : result.stopReason === 'timeout'
-              ? ' — raise chat.timeout_s in config/turminder.yaml'
-              : ''
-        }`,
+        message:
+          result.stopReason === 'error'
+            ? `answer cut short — ${chatFailureMessage(result)}`
+            : `answer cut short (${result.stopReason})${
+                result.stopReason === 'max_tokens'
+                  ? ' — raise chat.max_tokens in config/turminder.yaml'
+                  : result.stopReason === 'timeout'
+                    ? ' — raise chat.timeout_s in config/turminder.yaml'
+                    : ''
+              }`,
       });
       l.warn(
         {
@@ -647,6 +658,19 @@ export class ChatExecutor {
   }
 }
 
-export function chatFailureMessage(e: unknown): string {
-  return errMessage(e);
+/**
+ * §28.2's rule applied to the chat UI (X1b): a run that failed at the
+ * endpoint is a message a person reads and acts on, never the AI SDK's own
+ * wording — which endpoint, that it did not answer, and what to check.
+ * `result.endpoint` is set even when the very first turn never completed
+ * (agent-loop.ts names it from the failure itself, X1a), so the endpoint is
+ * always known here.
+ */
+export function chatFailureMessage(
+  result: Pick<AgentRunResult, 'stopReason' | 'error' | 'endpoint'>,
+): string {
+  if (result.stopReason !== 'error') return result.error ?? 'the model returned nothing';
+  const endpoint = result.endpoint || 'the model endpoint';
+  const cause = result.error ?? 'it did not answer';
+  return `${endpoint} is not answering (${cause}). Check that it is running and reachable, then try again.`;
 }

@@ -13,6 +13,15 @@ export interface ToolContext {
   eventId: string | null;
   conversationId?: string | null;
   handlerName?: string | null;
+  /**
+   * Fires when whoever made this call has stopped waiting for it: the
+   * transport timed out, or the run was stopped, timed out or failed (§19.1).
+   * Not provenance and not `_meta` — it crosses the MCP transport as the
+   * protocol's own `notifications/cancelled`, and arrives on the serving side
+   * as that request's signal. A tool that waits on a human hands it to the
+   * form broker, which is what stops an abandoned form from ever writing.
+   */
+  signal?: AbortSignal;
 }
 
 export const META_KEY = 'turminder';
@@ -30,6 +39,25 @@ export interface ToolDefinition<A = any> {
    * limits. External MCP tools never get an override.
    */
   maxResultChars?: number;
+  /**
+   * Keep this tool's results out of the §20.4 elision pass. For the one kind
+   * of result that is not data but *instructions* — a skill body the run is
+   * meant to be following. Eliding those trades a stale-data saving the run
+   * never wanted for a re-fetch that costs a whole turn and, worse, sends the
+   * model back to re-read its brief mid-task. Declare it nowhere else: every
+   * other large result is exactly what elision is for.
+   */
+  neverElide?: boolean;
+  /**
+   * This call waits on a person — it raises a form (§19.1) — and returns the
+   * longest that wait may take, in seconds, read at call time so a reload of
+   * `form_timeout_s` applies. The transport then waits that long plus the
+   * ordinary tool budget for the effect (App. A), instead of giving up at the
+   * tool-call timeout while the human is still typing. Declare it only on a
+   * tool that genuinely suspends on an answer; everything else keeps the
+   * ceiling that makes a hung tool fail.
+   */
+  awaitsHuman?(): number;
   /**
    * Did this result contain nothing (§20.9)? A **structural** fact the tool
    * declares — zero matches, zero results, no entries — never a judgement
@@ -80,6 +108,8 @@ export interface ToolHandle {
   source: string;
   /** Per-tool transcript budget (§20.3); bundled integrations only. */
   maxResultChars?: number;
+  /** Exempt from elision (§20.4); bundled integrations only — never MCP. */
+  neverElide?: boolean;
   /** Structural emptiness (§20.9); bundled integrations only — never MCP. */
   isEmpty?(result: unknown): boolean;
   /** Content-bearing arg fields to stub after execution (§20.6). */
@@ -100,4 +130,11 @@ export interface ToolCallOutcome {
    * that cannot answer "what did the tool say".
    */
   traceOutput?: unknown;
+  /**
+   * The full serialized length, when the §20.3 cap fired — so how often the
+   * cap bites, and how hard, is a query rather than a guess (C.1). Set only by
+   * the cap itself: a tool that supplies its own `traceOutput` for other
+   * reasons has truncated nothing.
+   */
+  truncatedFrom?: number;
 }

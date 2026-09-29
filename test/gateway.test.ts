@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FakeLlama } from './fake-llama.js';
 import { gatewayFor, RecordingDispatcher } from './model-stack.js';
 import { MemoryTraceSink, type LlmCallTrace } from '../src/model/types.js';
-import type { ModelGateway } from '../src/model/gateway.js';
+import { ModelCallError, type ModelGateway } from '../src/model/gateway.js';
 
 describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
   let fake: FakeLlama;
@@ -248,6 +248,59 @@ describe('ModelGateway against a llama.cpp-shaped endpoint', () => {
     // The routing decision rides the error-path row too, not just success.
     expect(rows.at(-1)?.purpose).toBe('chat');
     expect(rows.at(-1)?.resolved_by).toBe('kind_default');
+    // X1a: the HTTP status rides the unwrapped cause, not the AI SDK's own
+    // wrapper text.
+    expect(rows.at(-1)?.error?.message).toContain('HTTP 500');
+  });
+
+  it('unwraps a refused connection to its root cause, scrubbed and named (X1a/b)', async () => {
+    // Refuses connections from here on — nothing is listening at this port.
+    await fake.stop();
+    const trace = new MemoryTraceSink();
+    let thrown: unknown;
+    try {
+      await gw.turn({
+        selector: { purpose: 'chat' },
+        priority: 'event',
+        system: 's',
+        messages: [{ role: 'user', content: 'x' }],
+        trace,
+      });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(ModelCallError);
+    const err = thrown as ModelCallError;
+    expect(err.endpoint).toBe('fake');
+    // Never the AI SDK's own wrapper text.
+    expect(err.message).not.toMatch(/no output generated/i);
+    expect(err.message).not.toMatch(/failed after \d+ attempts/i);
+    expect(err.message).toMatch(/ECONNREFUSED|fetch failed/i);
+
+    const rows = trace.ofKind('llm_call') as LlmCallTrace[];
+    expect(rows.at(-1)?.stop_reason).toBe('error');
+    expect(rows.at(-1)?.error?.message).toBe(err.message);
+  });
+
+  it('unwraps a refused connection the same way when streaming (X1a)', async () => {
+    await fake.stop();
+    const trace = new MemoryTraceSink();
+    let thrown: unknown;
+    try {
+      await gw.turn({
+        selector: { purpose: 'chat' },
+        priority: 'event',
+        system: 's',
+        messages: [{ role: 'user', content: 'x' }],
+        trace,
+        onDelta: () => {},
+      });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(ModelCallError);
+    expect((thrown as ModelCallError).message).not.toMatch(/no output generated/i);
+    expect(trace.ofKind('llm_call').at(-1)).toMatchObject({ stop_reason: 'error' });
   });
 
   it('queues concurrent calls on one endpoint and reports the wait', async () => {

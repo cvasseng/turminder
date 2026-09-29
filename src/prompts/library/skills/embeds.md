@@ -142,25 +142,22 @@ The pattern, in order:
 
 1. `embeds.create` the page, with a button calling `turminder.event('...')`.
 2. Tell the user what the button will do and what it needs access to.
-3. Write the handler with `config.write` to `handlers/<name>.md`, carrying the
-   binding and only the tools the job needs:
+3. Create the handler with `handler.create`, carrying the binding and only
+   the tools the job needs — the user approves them on a form:
 
-```markdown
----
-name: workout-logger
-description: Records a set logged from the workout embed.
-embed: 01J...            # the embed id
-tools: [files.append]
----
-
-The event payload has the exercise and the reps. Append one line to
-files/workout-log.md and say nothing else.
+```json
+{"name": "workout-logger",
+ "description": "Records a set logged from the workout embed.",
+ "embed": "01J...",
+ "requested_tools": ["files.append"],
+ "reason": "to log each set you record in the workout app",
+ "body": "The payload has the exercise and the reps. Append one line to files/workout-log.md and say nothing else."}
 ```
 
-The `embed:` key is both the wiring and the leash: with no `match:` of its own
+`embed` is both the wiring and the leash: with no `event_types` of its own
 the handler fires only for `embed.action` from that embed, and it is deleted
-along with the embed. The handler's `tools:` are the *entire* set of things the
-app can cause — write them as narrowly as the job allows.
+along with the embed. Its tools are the *entire* set of things the app can
+cause — ask for them as narrowly as the job allows.
 
 ## Presentations
 

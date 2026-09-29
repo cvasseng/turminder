@@ -123,6 +123,26 @@ describe('device token store (§24)', () => {
     expect(app.tokens.revoke('tablet')).toBe(false);
   });
 
+  it('replaces channels.yaml whole, so no reader ever sees it empty (§24.4)', () => {
+    boot = bootTmp();
+    const { app, dataDir } = boot;
+    const ui = app.newUiToken!;
+    const file = path.join(dataDir, 'config', 'channels.yaml');
+    const before = fs.statSync(file).ino;
+
+    const created = app.tokens.create('tablet');
+    if ('error' in created) throw new Error('create refused a fresh name');
+
+    // A new inode means the file was swapped in by rename rather than
+    // truncated and rewritten in place. The in-place write had a window where
+    // the file was empty, and an empty file reads as "no devices", which
+    // answered 401 to every working token that asked during it.
+    expect(fs.statSync(file).ino).not.toBe(before);
+    expect(fs.readdirSync(path.dirname(file)).filter((f) => f.includes('.tmp-'))).toEqual([]);
+    expect(app.tokens.authenticate(ui)).toBe('ui');
+    expect(app.tokens.authenticate(created.token)).toBe('tablet');
+  });
+
   it('authenticates nothing it should not', () => {
     boot = bootTmp();
     const { app } = boot;

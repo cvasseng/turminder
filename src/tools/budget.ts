@@ -14,6 +14,8 @@ export interface CappedResult {
   output: unknown;
   /** Set only when the cap fired: what the tool actually returned. */
   traceOutput?: unknown;
+  /** Set only when the cap fired: the full serialized length, for C.1. */
+  truncatedFrom?: number;
 }
 
 function serialize(output: unknown): string {
@@ -41,6 +43,7 @@ export function capResult(output: unknown, maxChars: number): CappedResult {
       hint: TRUNCATION_HINT,
     },
     traceOutput: output,
+    truncatedFrom: serialized.length,
   };
 }
 
@@ -69,6 +72,10 @@ export function budgeted(handle: ToolHandle, defaultMaxChars: number): ToolHandl
           : capped.traceOutput !== undefined
             ? { traceOutput: capped.traceOutput }
             : {}),
+        // Whether the cap fired is this wrapper's own fact, and it is the only
+        // thing that knows it: by the time the loop sees a result, a capped one
+        // and a tool that always returned a summary look identical (C.1).
+        ...(capped.truncatedFrom !== undefined ? { truncatedFrom: capped.truncatedFrom } : {}),
       };
     },
   };

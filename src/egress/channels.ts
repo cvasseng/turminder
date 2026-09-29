@@ -32,7 +32,12 @@ export class ChannelRouter {
     // Anything it has not seen yet, replayed now (§7.3).
     const { replay, expired } = this.deliveries.replayFor(channel.lastSeen);
     for (const delivery of replay) this.push(channel, delivery);
-    if (expired) l.info({ expired, device: channel.device }, 'expired stale deliveries');
+    // The replay only looks past this device's cursor; a stale row behind it
+    // must still be settled before anyone lists what was missed (§7.1).
+    const behind = this.deliveries.expireStale();
+    if (expired + behind) {
+      l.info({ expired: expired + behind, device: channel.device }, 'settled stale deliveries');
+    }
     return () => {
       this.channels.delete(channel);
       l.info({ device: channel.device }, 'channel unregistered');

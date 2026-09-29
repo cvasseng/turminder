@@ -31,7 +31,7 @@ is no tagged release, only a rolling `nightly` prerelease built from `main`.
 The context rules are what make a local model workable: 30,000 tokens per
 run, tool results capped at 4,000 characters where they enter the transcript,
 and 8 tool namespaces in the prompt until the model asks for more. The suite
-is 67 test files (`npm test`), three of which exist to keep those numbers
+is 74 test files (`npm test`), three of which exist to keep those numbers
 from drifting.
 
 ## Run it
@@ -61,22 +61,25 @@ pairing](docs/running.md).
 ## What it can do
 
 - Chat with streaming and tool use; images if the model can see.
-- Handlers: markdown behaviors matched to events, each with an explicit tool grant.
+- Handlers: markdown behaviors matched to events, each with a tool grant you approve once in a form.
 - Memory as markdown files with RAG retrieval, every change a git commit.
 - A file workspace, optionally your Obsidian vault, where `@turminder do X` becomes an event.
 - Schedules and reminders as desktop notifications, with approve/deny buttons on gated actions.
 - Booking a schedule says which handler will run it, and warns you when nothing will.
+- Any schedule runs on demand, exactly as its own time arriving would, without using up the booking.
 - Schedules that know the laptop was shut: a late reminder still arrives, a stale digest does not.
+- A notification nobody was there to see waits under "While you were away" instead of expiring.
 - Watchers that poll in plain code and wake the model only when the answer changes.
 - Asana, Google Calendar, weather, web search, page fetch and file download built in, anything else over MCP.
 - An MCP server that drops is reported as down and reconnected on the next call, with no restart.
+- MCP servers that sign in through the browser connect with a link you approve.
 - Printers and scanners on your network, found for you: print a file from the workspace, scan a page into it, ask whether it is out of ink. Talks IPP and AirScan directly — no driver, no print queue — and remembers the certificate each machine showed the first time.
 - Credentials go to your OS keychain or a GPG file; the model only ever sees `${secret:KEY}`.
 - Embeds: sandboxed charts, dashboards and slides whose numbers come from frozen tool calls.
 - PDF and .docx reading by outline, from the workspace or from a web address, and PDF export of any embed or markdown file.
 - Projects: islands of files, memories and past chats that reach a prompt only while loaded.
-- Voice: send it a recording, hear the answer back, and read what it heard as an ordinary conversation. Any OpenAI-audio-compatible transcriber and synthesiser, connected by asking, with the language and the speaking voice chosen from a form you can hear before you pick.
-- Clients: a Linux desktop app, a browser extension, and phone pairing you approve from a device you trust.
+- Voice: speak from the desktop app or the chat's mic button, hear the answer back, and read what it heard as an ordinary conversation. Any OpenAI-audio-compatible transcriber and synthesiser, connected by asking, with the language and the speaking voice chosen from a form you can hear before you pick.
+- Clients: a Linux desktop app with a tray quick-note box, an installable web app, a browser extension, and phone pairing you approve from a device you trust.
 - An activity panel: everything in flight, what it is waiting on, and what gave up and why.
 - Cost per endpoint and per conversation, a live Requests panel of every model call, and a trace of every tool call.
 

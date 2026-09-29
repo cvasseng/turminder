@@ -128,10 +128,17 @@ export class DeviceTokens {
     if (!presented) return null;
     const offered = tokenSha256(presented);
     let device: string | null = null;
-    for (const row of this.rows()) {
+    const rows = this.rows();
+    for (const row of rows) {
       const stored = row.token_sha256 ?? (row.token ? tokenSha256(row.token) : '');
       if (sameHash(offered, stored)) device = row.device;
     }
+    // A refusal is the event that costs someone a re-pairing, and until now it
+    // left no record, so "the browser keeps asking for a token" could not be
+    // told apart from a genuinely revoked one. Say how many devices were loaded
+    // when it happened: zero, with devices on disk, is a broken read rather than
+    // a bad token. Never the token, never its hash.
+    if (device === null) l.warn({ devices_loaded: rows.length }, 'token not recognised');
     return device;
   }
 
@@ -193,11 +200,17 @@ export class DeviceTokens {
   }
 
   private write(devices: ChannelsDevice[], message: string): void {
-    fs.writeFileSync(
-      this.home.path('config', 'channels.yaml'),
-      YAML.stringify({ devices }),
-      'utf8',
-    );
+    // Temp file + rename, never an in-place write. `writeFileSync` truncates
+    // first, and `authenticate()` re-reads this file on every request, so a
+    // check landing in that window saw an empty file, which parses as no
+    // devices at all. It then answered 401 to a working token, and a 401 is
+    // the one answer that makes a browser throw its token away (§24.4). A
+    // rename is atomic on one filesystem: a reader sees the old file or the
+    // new one, never neither.
+    const target = this.home.path('config', 'channels.yaml');
+    const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+    fs.writeFileSync(tmp, YAML.stringify({ devices }), 'utf8');
+    fs.renameSync(tmp, target);
     this.home.git.commit(message, ['config/channels.yaml']);
     for (const listener of this.listeners) listener();
   }

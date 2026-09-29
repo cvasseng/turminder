@@ -123,6 +123,19 @@ export function skillTools(loader: SkillLoader): ToolDefinition[] {
       description:
         'Fetch the full text of a skill by name. Do this when a skill listed in your system prompt looks relevant to the task. Skills are data-dir files at skills/<name>.md — config.read and config.write reach them, files.* does not.',
       tier: 'ro',
+      /**
+       * A skill is a document, and this is the tool whose job is returning one
+       * (§20.3) — the same 20k the other document tools take. At the default
+       * 4000 the three largest shipped skills came back cut mid-sentence, with
+       * a hint telling the model to narrow the call using offset/limit
+       * arguments this tool does not have and should not need: a skill is read
+       * whole or not at all. The handler-authoring skill lost its worked
+       * example that way, and the handler written from it lost its `match`
+       * block (2026-09-11).
+       */
+      maxResultChars: 20_000,
+      /** Instructions, not data (§20.4) — see `neverElide` on ToolDefinition. */
+      neverElide: true,
       args: z.object({ name: z.string().min(1) }),
       async execute(args: { name: string }) {
         loader.reload();

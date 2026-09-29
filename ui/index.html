@@ -14,6 +14,12 @@
     />
     <title>Turminder</title>
     <link rel="stylesheet" href="/style.css" />
+    <!-- Installable where the page is a secure context (§9, §24.4) — the SW
+         registration that makes it actually installable is app.js's, guarded
+         the same way, because a manifest with nothing behind it is a browser
+         menu item that does nothing. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#101214" />
   </head>
   <body>
     <!-- Until this browser has a device token it gets this and nothing else.
@@ -179,21 +185,42 @@
       <span class="dot" id="status-dot"></span>
       <!-- Devices and sign-out: whole-install actions, so they belong beside
            the identity rather than at the foot of the conversation list. The
-           divider separates them from the rail, which navigates instead. -->
+           divider separates them from the rail, which navigates instead.
+           Below `ui_compact_max` (§9.1) they stay right here — moving them to
+           the sidebar would put them behind a closed column on a phone — and
+           fold behind one summary button instead; `display: contents` above
+           that width keeps the two buttons unwrapped, so nothing changes for
+           a column-width reader. -->
       <span class="strip-divider" aria-hidden="true"></span>
+      <details id="account-overflow" class="strip-overflow">
+        <summary data-icon="more" title="Account" aria-label="Account actions"></summary>
+        <div class="strip-overflow-menu">
+          <button
+            id="forget-token"
+            class="icon"
+            data-icon="logout"
+            title="Sign out — this browser will need the device token again"
+            aria-label="Sign out"
+          ></button>
+          <button
+            id="devices-toggle"
+            class="icon"
+            data-icon="key"
+            title="Devices and access tokens"
+            aria-label="Devices and access tokens"
+          ></button>
+        </div>
+      </details>
+      <span class="strip-divider" aria-hidden="true"></span>
+      <!-- Focus mode (§9.1): hides everything else in this strip, so the way
+           back in cannot live here — see #focus-exit, outside `#status`. -->
       <button
-        id="forget-token"
+        id="focus-toggle"
         class="icon"
-        data-icon="logout"
-        title="Sign out — this browser will need the device token again"
-        aria-label="Sign out"
-      ></button>
-      <button
-        id="devices-toggle"
-        class="icon"
-        data-icon="key"
-        title="Devices and access tokens"
-        aria-label="Devices and access tokens"
+        data-icon="focus"
+        title="Focus mode — centre the transcript and hide the chrome"
+        aria-label="Enter focus mode"
+        aria-pressed="false"
       ></button>
       <span class="strip-divider" aria-hidden="true"></span>
       <!-- One drawer, four tabs. A tablist rather than four toggles because
@@ -261,6 +288,16 @@
       </div>
     </div>
     <div id="shell">
+      <!-- Focus mode's only way back once it has hidden `#status` (§9.1):
+           outside the strip on purpose, so hiding the strip cannot also hide
+           the control that undoes it. Esc does the same thing from anywhere. -->
+      <button
+        id="focus-exit"
+        type="button"
+        data-icon="x"
+        title="Leave focus mode (Esc)"
+        aria-label="Leave focus mode"
+      ></button>
       <!-- Below the sheet threshold (App. A) the side panes overlay the
            transcript; this is what you tap to dismiss them. It covers the
            shell and not the status strip on purpose — the tab rail stays live
@@ -332,6 +369,20 @@
             placeholder="Say something. Enter sends, shift+enter for a newline."
             autofocus
           ></textarea>
+          <!-- The chat UI as a voice client (§33.6): hidden, not disabled,
+               everywhere `isSecureContext && navigator.mediaDevices` is not
+               true — a plain-HTTP LAN install never grows a control that
+               could not work (§24.4). A click records; a click stops it. -->
+          <button
+            type="button"
+            id="mic"
+            class="icon"
+            data-icon="mic"
+            title="Record a voice message"
+            aria-label="Record a voice message"
+            aria-pressed="false"
+            hidden
+          ></button>
           <!-- Shown only while this conversation has a run in flight: the
                answer streaming past is the thing it stops (App. D chat.stop). -->
           <button
@@ -435,7 +486,9 @@
              still owes you an outcome for, and what owes it a click. No
              payloads reach here — a row is what the server wrote about an
              event, never the event. A live window, deliberately not a log
-             browser. -->
+             browser. It also holds "while you were away": notifications
+             nobody was connected to see (§7.1, `delivery.missed`), which are
+             deliveries the assistant wrote, read here instead of toasted. -->
         <div
           id="panel-activity"
           role="tabpanel"

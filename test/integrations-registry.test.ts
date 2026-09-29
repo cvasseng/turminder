@@ -139,6 +139,7 @@ describe('the manifest registry (§19.5)', () => {
       'time',
       'config',
       'skills',
+      'handler',
       'embeds',
       'docs',
       'history',

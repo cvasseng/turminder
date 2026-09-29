@@ -97,3 +97,65 @@ export function resolveWritablePath(home: DataHome, rel: string): string {
   if (denied) throw new PathRejected(`${segments.join('/')} is not writable: ${denied}`);
   return abs;
 }
+
+function basename(p: string): string {
+  const i = p.lastIndexOf('/');
+  return i < 0 ? p : p.slice(i + 1);
+}
+
+function dirname(p: string): string {
+  const i = p.lastIndexOf('/');
+  return i < 0 ? '' : p.slice(0, i);
+}
+
+/**
+ * Plain Levenshtein distance over two strings. Small and dependency-free
+ * (App. J) — exactly what "did you mean" needs, and nothing it doesn't.
+ */
+function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i += 1) {
+    const cur = [i];
+    for (let j = 1; j <= n; j += 1) {
+      cur[j] =
+        a[i - 1] === b[j - 1]
+          ? prev[j - 1]!
+          : 1 + Math.min(prev[j]!, cur[j - 1]!, prev[j - 1]!);
+    }
+    prev = cur;
+  }
+  return prev[n]!;
+}
+
+/**
+ * Up to 3 existing store paths a `not_found` guess probably meant (App. F.8,
+ * F.14, X3): ranked by basename edit distance, then by sharing the attempted
+ * directory — a misspelled filename is common, a misremembered directory is
+ * not. Computed from the store's own listing (`existing`), never a model
+ * call, and empty when nothing is close enough to be worth suggesting.
+ */
+export function didYouMean(existing: string[], attempted: string): string[] {
+  const attemptedBase = basename(attempted).toLowerCase();
+  const attemptedDir = dirname(attempted);
+  return existing
+    .map((candidate) => {
+      const candidateBase = basename(candidate).toLowerCase();
+      return {
+        candidate,
+        distance: levenshtein(attemptedBase, candidateBase),
+        sameDir: dirname(candidate) === attemptedDir,
+        candidateLen: candidateBase.length,
+      };
+    })
+    .filter(
+      ({ distance, candidateLen }) =>
+        distance <= Math.max(2, Math.ceil(Math.max(attemptedBase.length, candidateLen) / 2)),
+    )
+    .sort((a, b) => a.distance - b.distance || Number(b.sameDir) - Number(a.sameDir))
+    .slice(0, 3)
+    .map((m) => m.candidate);
+}

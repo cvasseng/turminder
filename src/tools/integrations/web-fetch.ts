@@ -163,6 +163,27 @@ export interface PageError {
   message: string;
   url?: string;
   content_type?: string;
+  /**
+   * On a 429 or 503 whose `Retry-After` we could parse (X5): seconds until
+   * the server said it would take another request. The repeat-call guard
+   * (§20.7) already stops an identical retry inside one run; this is what
+   * tells the *next* run the wait was real rather than a fresh problem.
+   */
+  retry_after_s?: number;
+}
+
+/**
+ * RFC 9110 §10.2.3: `Retry-After` is either a whole number of seconds, or an
+ * HTTP-date. Never negative — a date already in the past means "now". `null`
+ * when the header is absent or unparsable.
+ */
+export function parseRetryAfter(header: string | null): number | null {
+  if (!header) return null;
+  const trimmed = header.trim();
+  if (/^\d+$/.test(trimmed)) return Number(trimmed);
+  const at = Date.parse(trimmed);
+  if (Number.isNaN(at)) return null;
+  return Math.max(0, Math.round((at - Date.now()) / 1000));
 }
 
 /**
@@ -261,11 +282,22 @@ export async function fetchPage(
     });
     const contentType = res.headers.get('content-type') ?? '';
     if (!res.ok) {
+      // X5: 429 and 503 are the two statuses `Retry-After` is meaningful on
+      // (RFC 9110 §15.5.5, §15.6.4) — a rate limit or an outage with a known
+      // end, as opposed to a client error retrying won't fix either way.
+      const retryAfterS =
+        res.status === 429 || res.status === 503
+          ? parseRetryAfter(res.headers.get('retry-after'))
+          : null;
       return {
         error: 'fetch_failed',
-        message: `HTTP ${res.status}`,
+        message:
+          retryAfterS !== null
+            ? `HTTP ${res.status} — the server asked to wait ${retryAfterS}s before trying again; don't retry this url again this run`
+            : `HTTP ${res.status}`,
         url: key,
         content_type: contentType,
+        ...(retryAfterS !== null ? { retry_after_s: retryAfterS } : {}),
       };
     }
     if (!isReadableAsText(contentType)) return unsupportedContent(contentType, key);

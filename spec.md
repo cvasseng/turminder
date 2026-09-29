@@ -148,7 +148,9 @@ over rows that were already being written.
   age out, because a capture that died in silence is precisely the case where
   silence is the bug; and `queued`/`delivered` deliveries carrying actions,
   because a `confirm` raised while the reader was in another conversation is
-  otherwise something they have to remember.
+  otherwise something they have to remember. `missed` notifies (§7.1) show
+  here too, as "while you were away" — they arrive with `hello`
+  (`delivery.missed`, App. D), not with `event.list`, and leave when acked.
 - **It is a live window, not a log browser.** Recent N, recent 24h; terminal
   rows age out of it. A full event-log browser — search, filters, arbitrary
   history — is a different and larger feature, and is deliberately not this
@@ -207,6 +209,16 @@ budgets:                  # optional overrides of global defaults
 Instructions to the executing agent, in plain markdown...
 ```
 
+The model does not write this file. A chat run creates a handler with
+`handler.create` and changes one with `handler.update` (App. F.20): it
+passes structured arguments — triggers, the tools it wants, the body, and
+why — and the server renders the frontmatter. What the handler may call and
+when it runs (`match`, `watch`, `embed`, `tools`, `confirm`) is approved by
+the user on a form, once, and after that is out of the model's reach
+(§19.4); `config.write` edits an existing handler's prose, description and
+budgets but keeps those keys as approved (F.6). A human editing the file
+directly is unaffected.
+
 ### 5.2 Matching (v1)
 
 - The `match` block is a deliberately impoverished grammar: **field → list of
@@ -216,6 +228,12 @@ Instructions to the executing agent, in plain markdown...
 - **No `match` block means match everything.** A matcher can only exclude,
   never conclude. False positives cost a cheap-model token check; false
   negatives are the only sin.
+- **A catch-all is written on purpose or not at all.** "Match everything"
+  is the loader's reading of a file with no matcher, not a default for
+  authoring: `handler.create` refuses a handler with no `event_types`, no
+  `sources` and no `embed` unless the call says `catch_all: true` (F.20).
+  A `watch:` subscription is not a matcher — it makes file changes arrive,
+  and does nothing to stop every other event being offered too.
 - **V1 ships with matchers optional and largely unused.** At expected scale
   (≤ ~50 handlers), one fast-model applicability pass carrying *all* handler
   descriptions is affordable per event.
@@ -315,6 +333,17 @@ schedule, not of how the service came to notice.
 - Whatever is skipped or fired late, the miss is announced as
   `system.schedule_missed` (§13.2). A one-shot that is skipped ends as
   `missed`; a recurring one stays `active` at its next occurrence.
+- **One outage, one notice.** When `fire_late` *does* fire — the occurrence
+  it was standing on, not every one it missed — `system.schedule_missed`
+  carries `also_fired: true` (App. B): the fired event's own `late_by_s`
+  already tells the handler, and its handler's own notification already
+  tells the user, so a second, generic notice on top would be the same
+  outage said twice. Only a genuinely silent `skip` miss is offered to the
+  shipped `failure-notice` handler; the also-fired case reaches it as a
+  different `source` (`scheduler`, not `system`) on the same event type,
+  because `failure-notice`'s matcher sees only the envelope (§5.2) and
+  cannot key off a payload field — splitting the *type* in two would make
+  two kinds of the same event for no reason but routing.
 - **A schedule keeps the wall clock of the machine it runs on.** "Every day at
   08:00" means 08:00 after a daylight-saving transition as well as before it,
   so recurrence is corrected for the change in UTC offset between one
@@ -351,13 +380,34 @@ So the server closes the loop the same way it closes the lateness one
   no model call, no cost, the same function the pipeline uses — and it is
   computed at creation, when there is still a human in the conversation to
   hear the answer.
-- **An empty list is a warning, not a silence.** `consumers: []` comes with
-  `warning` saying in one sentence that nothing will run this. An assistant
-  that reads it offers to write the handler; one that ignores it has been
-  told, and the trace records that it was told.
-- **`schedule.list` carries the same field**, so "why didn't my digest
+- **`consumers` names only a handler that wrote itself for this type** —
+  a `match.types` glob that actually names it, explicitly. A handler with no
+  `match` block offers itself to everything (§5.2), which is right for
+  routing and wrong for this field: it used to read as a consumer of every
+  schedule in existence, which meant `consumers: []` never happened and the
+  empty-list `warning` below never fired. Such a handler still runs — that
+  is unchanged — it is just named in a separate `catch_all: [handler
+  names]` instead, so nothing about it is hidden, only correctly labelled.
+- **An empty `consumers` list is a warning, not a silence**, whatever
+  `catch_all` holds. `consumers: []` comes with `warning` saying in one
+  sentence that nothing will run this. An assistant that reads it offers to
+  write the handler; one that ignores it has been told, and the trace
+  records that it was told.
+- **`schedule.list` carries the same two fields**, so "why didn't my digest
   run" is answerable from the tool the question is about, without reading
   a trace.
+- **The reply also carries `when`**, a sentence rendered server-side in the
+  identity's own zone (§6.1) — the same zone `time.now` reads — naming the
+  cadence, the time of day, the end date if any, and what a miss does:
+  `"daily at 07:00 Europe/Oslo until 30 Sep; if missed: skipped (grace
+  1h)"`. The model quotes it rather than converting `fire_at` (UTC),
+  `grace_s` and `on_miss` into prose itself — the telephone problem this
+  closes, observed 2026-09-23: a booked 07:00 Oslo reminder with a one-hour
+  grace and a `skip` policy was relayed back as "08:00 … 4h grace …
+  fires late", every value read off the same correct reply. Costs nothing
+  per request: it is a result field, not description prose (§21.4).
+  `schedule.trigger`'s reply carries the booking's own `when`, unchanged by
+  triggering it by hand.
 
 The list is a fact about the handlers on disk *now*. A handler deleted
 after a schedule was created makes the schedule inert again, and nothing
@@ -383,6 +433,44 @@ instead of competing with every other one:
   ordering obvious to anyone reading the reply: name the type, get
   `consumers: []`, write the handler, and the next `schedule.list` shows it
   owned.
+
+**A schedule can be fired by hand** — `schedule.trigger {schedule_id}` (F.2),
+for "run the digest now" and for the question the `consumers` line cannot
+answer, which is whether the handler that owns this event actually *works*.
+Before it, proving a scheduled behaviour end to end meant waiting for
+07:00 or rehearsing the handler's steps by hand in chat and hoping the real
+run would take the same ones (observed 2026-09-11). Normative:
+
+- **The event is the timer's event.** Same `event_type`, same `source`
+  (`scheduler`, so a matcher on source still matches), same payload shape,
+  same serialization key — built by the same function, because two builders
+  would be two subtly different kinds of "the digest is due". A handler must
+  not be able to tell which one woke it, except by looking at the one field
+  that says so.
+- **`manual: true` rides the payload** (App. B), and it is the only
+  difference. Additive: a handler that ignores it behaves identically either
+  way, and one that cares can say "you asked for this" rather than narrating
+  an alarm that did not go off.
+- **Now, not late.** `fire_at` is the moment of the call and `late_by_s` is
+  zero. A hand-fired schedule is not an occurrence found late, and dressing
+  it as one would have a digest open by announcing itself as yesterday's.
+  §6.1's grace and `on_miss` are about *time* and are not consulted.
+- **Triggering never consumes the booking.** No `last_fired_at`, no advance
+  to the next occurrence, no status change: a one-shot fired by hand still
+  fires on Friday, and a daily still runs tomorrow. Cancelling is a
+  different verb, one call away, and the reply carries `next_fire_at` so the
+  distinction is visible where the decision is made. Only `active` schedules
+  fire; a cancelled or finished one is `{error: "not_active"}` rather than a
+  quiet resurrection.
+- **The idempotency key is `<id>:manual:<fired_at>`**, never the loop's
+  `<id>:<fire_at>` — sharing it would let a hand-fire swallow the real
+  occurrence, or be swallowed by it.
+- **Provenance is the caller's, not the schedule creator's** (§5.5). The
+  clock has no caller and the loop rightly points at whoever booked the
+  schedule; this call has one, and the depth and cycle guards only work if
+  the chain records it. A handler that triggers a schedule that runs that
+  same handler must hit `MAX_DEPTH` and be rejected — `{error:
+  "loop_rejected", reason}` — rather than spin.
 
 **The shipped fallback is deliberately small.** `handlers/scheduled-task.md`
 (§12.3) matches bare `timer.fired` and is granted `deliver.notify`,
@@ -413,6 +501,7 @@ A delivery is a row in the outbox:
   "expires_at": "...",        // TTL — a stale "meeting in 10 min" is anti-useful
   "created_by": "…",          // handler run / event id
   "status": "queued"          // queued → delivered → acked | expired
+                              // notify only: queued → missed → acked
 }
 ```
 
@@ -423,6 +512,31 @@ A delivery is a row in the outbox:
   deployments. In-process delivery just acks fast.
 - `delivered` ≠ `acked`. Un-acked deliveries are replayed on reconnect if
   unexpired.
+- **`expires_at` bounds interrupting, not existing.** Past it nothing is
+  toasted, pushed or spoken — that is what the TTL is for. But a `notify`
+  that reaches it still `queued`, delivered to no channel at all, becomes
+  **`missed`**, not `expired`: a digest nobody was around to see is still
+  the digest, and erasing it made scheduled work look broken when no client
+  had been connected for days. A `missed` row is never replayed as a
+  `delivery`; it is sent as one quiet `delivery.missed` list on `hello` to
+  `chat`-capable devices (App. D), which show it in the activity drawer
+  (§4.2.1) under "while you were away", and opening or dismissing one acks
+  it (`missed → acked`; any ack settles, §7.2). A `notify` that was
+  `delivered` and never acked still becomes `expired` — a channel showed
+  it. A `confirm` always becomes `expired`: silence is a deny (§11.3, D.3),
+  and a late approval is not something to offer.
+- **Scheduled work lives until its next occurrence.** A `notify` queued by
+  a run whose event came from the scheduler (`source: "scheduler"`, payload
+  `schedule_id`, App. B) defaults to expiring at that schedule's next
+  occurrence — tomorrow's digest is what supersedes today's — or the
+  ordinary `notify` default (App. A) when there is none: a one-shot, or a
+  schedule since finished or cancelled. An explicit `ttl_s` (F.3) still
+  wins, **including a shorter one**. The model is the only party that knows
+  a "meeting in 10 minutes" reminder on a recurring schedule goes stale in
+  ten minutes, and since an unseen `notify` that outlives its TTL is
+  `missed` rather than erased, a too-short TTL (a daily digest given 1h,
+  seen twice live) now costs a toast, never the notification. `confirm`
+  TTLs are never schedule-derived.
 
 ### 7.2 Channels
 
@@ -496,6 +610,12 @@ the server's (`POST /api/speak`, App. E), exactly as every word of a
   previous mark as `since` (App. B), and the pass reads only turns after
   it. This is the duplication gate: a fact the distiller never re-sees is
   a fact it cannot re-file, however weak the dedupe verdict is that day.
+- **A model call failure is never mistaken for a JSON one** (X1c): the pass
+  checks `stopReason` before parsing the model's answer, so an endpoint down
+  or refusing connections settles the run with `error: "endpoint_error"` and
+  retries on the event's ordinary backoff (§13.2) — never
+  `"Unexpected end of JSON input"`, which is what an empty answer used to be
+  misread as. The cause itself rides the `llm_call` trace row (App. C.1).
 - **The pass knows what is already remembered.** Its message includes the
   in-scope memory index — name + description of every general memory and
   every memory in the conversation's loaded islands — as "already
@@ -547,12 +667,36 @@ the server's (`POST /api/speak`, App. E), exactly as every word of a
   applicability gate** (a direct message is always applicable) and gets
   interactive priority in the inference scheduler, but otherwise rides the
   common agent layer — tools, skills, memory, traces.
-- **Sessions:** a `conversations` table in `events.db` holds turns.
-  **Only the user closes a conversation** (archiving it): going quiet is not
-  the same as being done with it, and a conversation that archived itself
-  behind the user's back is a conversation they lost. Closing triggers the
-  memory distillation pass (§8.2); so does the idle timeout, but that leaves
-  the conversation open and in the list — it distils, it does not archive.
+- **Sessions:** a `conversations` table in `events.db` holds turns. Closing a
+  conversation archives it and triggers the memory distillation pass (§8.2);
+  the 30-minute idle timeout also distils but leaves the conversation open and
+  in the list.
+- **A conversation archives itself after `conversation_archive_days` of
+  silence** (App. A: 7 days; `0` turns the sweep off). The same sweep that
+  distils idle conversations closes week-old ones, through the same
+  `close` path a user's archive button takes — one event
+  (`system.conversation_closed`, carrying `auto: true`), one frame to every
+  connected client, one state afterwards. Onboarding conversations are
+  excluded: that is a flow the install may still be waiting on, not a chat
+  someone drifted away from.
+  - **This reverses the original rule** that only a user ever closes one
+    (Christer, 2026-09-11). That rule was written against a real fear —
+    *"a conversation that archived itself behind the user's back is a
+    conversation they lost"* — and the fear is answered by two properties
+    that are now **load-bearing rather than conveniences**: the sidebar can
+    list archived conversations (`conversation.list {include_archived}`,
+    D.1), and writing to an archived one **reopens** it. Break either and
+    this feature starts hiding people's work; they are not optimisations to
+    drop later.
+  - **Archiving deletes nothing by itself, but it does start a clock.**
+    Ephemeral embeds are reaped `embed_ttl_days` after their conversation
+    closes (§22.1), so embeds that would have lived indefinitely in a
+    never-archived conversation now age out — 30 days after *their own* last
+    use, never sooner. Said here because the setting that causes it is here.
+  - By the time the window is reached the idle pass has long since taken the
+    delta, so the close event's distillation reads no new turns and returns
+    without a model call. A week of accumulated conversations archiving on
+    one sweep costs nothing.
 - **Interfaces:**
   - the assistant's own simple chat UI streams over the same WS protocol as
     the daemon — one push mechanism, two consumers. Streaming `chat.delta`
@@ -603,6 +747,25 @@ the server's (`POST /api/speak`, App. E), exactly as every word of a
   usage line carries the conversation's **estimated cost** (§10.5). When
   the resolved endpoint declares reasoning efforts, the selector also
   carries the **effort control** (§10.6) — same persistence, same rules.
+- **The chat UI is installable** (`ui/manifest.webmanifest`, `ui/sw.js`)
+  wherever the page is a **secure context** — https, or `localhost` — because
+  a service worker is unregisterable anywhere else, the same restriction
+  §24.4 already states for `getUserMedia`. Plain-HTTP LAN (`bind: 0.0.0.0`,
+  no `public_url`) is therefore not installable; put it behind
+  `gateway.public_url` (G.1) over https, or open it on `localhost`, to get
+  it. The service worker caches the **shell only** — `index.html`, `app.js`,
+  `style.css`, the manifest's icons — network-first, so an online reader
+  always gets what the server is serving right now; it never touches
+  `/api/*`, `/ws`, `/embed*` or an upload, and it never caches `/` itself
+  (that route answers `setup.html` until onboarded, App. E). Offline, a
+  navigation falls back to the cached `index.html`, which shows the same
+  "connecting…" / "disconnected" status the composer already shows a
+  socket that will not open (§9.1) — there is no separate offline page. The
+  cache name carries a hash of the shell's own bytes (`x-turminder-ui-version`,
+  a response header on every static UI GET), and the page registers the
+  worker at `/sw.js?v=<hash>`: a shell edit changes the hash, which changes
+  the registration URL, which is what installs a fresh worker and a fresh
+  cache generation — with no build step maintaining a version number.
 
 ### 9.1 The shell at any width (normative)
 
@@ -753,6 +916,19 @@ smaller: seven figures do not fit 390px, and clipping them mid-number reads as
 broken. Collapsed it carries two — context pressure, and the live turn or the
 cost — with a trailing ellipsis; tapping it renders the full set, wrapped, and
 so does widening past the phone breakpoint.
+
+**Focus mode** (`body.focus`) exists for the one thing every other rule in
+this section works around: sometimes the reader wants nothing else on the
+page. Toggled from the strip and persisted in `localStorage` the same way the
+sidebar's own collapse is, it hides the status strip, forces the sidebar shut
+for as long as it is on without rewriting what the wide layout is set to
+underneath, centres the transcript and the composer at `ui_focus_max` (App.
+A — in `ch`, because the shell is monospace and a character is a fixed width
+there rather than a subjective one), and raises the transcript's own font
+size a step. The strip is what a reader would otherwise use to leave, and
+focus mode hides it, so leaving cannot depend on it: `Esc` and a small
+control floating in a corner of the page are the two ways out, and both work
+regardless of where the reader last clicked.
 
 ---
 
@@ -1209,6 +1385,14 @@ garbles a path garbles the sentence describing it identically, and the person
 being asked to authorise something is the least technical reader in the system.
 Payload shape in App. D.3.
 
+**The allowlist itself is approved by the same reader, by the same rule.** A
+handler's `tools`/`confirm` grant is what lets a side-effecting tool run with
+nobody present, so it is never the model's to write: `handler.create` and
+`handler.update` raise a form listing each requested tool by name with the
+first sentence of its own catalog description, and the human picks *on its
+own* (`tools`) or *ask me each time* (`confirm`) for each (App. F.20). The
+model's `reason` is shown as its reason, never as the description of a tool.
+
 ### 11.4 Enforcement point
 
 The capability allowlist is enforced in the **tool dispatcher**, not in the
@@ -1295,6 +1479,22 @@ health.
   while the service ran is honoured), but a reconnect never adds, removes
   or re-tiers servers — that is `setup.form`'s job (§19.3) and there is one
   writer, not two (§12.2).
+- **`needs_auth` is not dropped.** A server that signs in with a browser
+  (G.5 `auth: {type: oauth}`, §19.6) can be reachable and still refuse us:
+  never signed in, or its refresh token expired or was withdrawn. The SDK
+  refreshes an expired access token on its own; when a refresh cannot fix
+  it, the connect or call ends in the SDK's `UnauthorizedError`, which is
+  caught as a value — never a crash. The server is then down with
+  `needs_auth: true` in every status surface (`connected: false`, `error:
+  "sign-in required"`), and it is **off the backoff loop**: no reconnect
+  cures a missing sign-in, and each attempt would mint a link nobody sees.
+  Its tools stay advertised, as above, and a call returns `{error:
+  "needs_auth", message}` naming `setup.activate {integration: <name>}`
+  without attempting a reconnect. A server that had signed in before gets
+  exactly one `system.integration_needs_auth` notice per loss (App. B) —
+  without a link in it; the link is minted when someone asks. A completed
+  sign-in clears the state and takes the ordinary path: reconnect,
+  re-list, `system.integration_activated`.
 
 ---
 
@@ -1522,6 +1722,17 @@ cannot make it do anything, and a spoken word cannot approve a `confirm`
    The residual risk — external text pasted into a note — is accepted and
    mitigated by the conservative default grant on the shipped file-request
    handler (§18.4).
+4. **A handler's grant is a capability the model would otherwise grant
+   itself.** A handler runs its `tools` unattended — at 07:00, on a hostile
+   email — including tools chat may only use behind a confirm. So the
+   approved half of a handler file (`match`, `watch`, `embed`, `tools`,
+   `confirm`) is carved out of what `config.write` can change (F.6): it is
+   written only by `handler.create`/`handler.update` after a human submits
+   the approval form (F.20), with the concrete tool names and their catalog
+   descriptions in front of them, or by the human editing the file. The
+   rest of a handler file — its prose, description, budgets — stays
+   `config.write`'s, because instructions are the point of authoring one and
+   they can only use what was approved.
 
 ### 14.5 Embed containment (summary; §22.3–22.4 are normative)
 
@@ -1689,13 +1900,14 @@ under their own grants.
   satellite) — the server half is device-agnostic by construction (§33): a
   satellite is one more consumer of `/api/voice` and `/api/speak`, built when
   someone owns the hardware. Parked 2026-08-30 for want of it.
-- **The browser UI's microphone button** — the second consumer of
-  `/api/voice`; lands once the shell's voice (§28.6) has soaked.
 - **Routing editable from chat** (a `setup.route` form rewriting
   `routes:`) — the handler-routing form (F.6) covers the one place a model's
   own choice had to be fenced; editing the purpose→route table itself is
   hand-edited config for now, and `turminder models` is the read side.
   (§10.6)
+- **Quick note extras** — a global hotkey for the box, attaching the
+  clipboard or a screenshot, a history of sent notes in the box. The tray
+  item and the typed line are the whole of v1. (§28.7)
 
 ## 17. Decisions adopted with a flag
 
@@ -1900,6 +2112,20 @@ capable devices. Field types: `text | url | number | select | secret`, each
 optionally **prepopulated** by the agent from what the conversation already
 established. V1 renders forms only in the chat UI.
 
+**A form lives no longer than the call that raised it.** A tool that
+suspends on a human declares so (`awaitsHuman`), and the transport waits
+`form_timeout_s` plus the ordinary tool budget for it (App. A) rather than
+the flat tool-call timeout — which used to give up at two minutes while the
+form stayed on screen, so the model summoned another and the first still
+wrote when answered. When the call *is* abandoned — the transport gives up,
+or the run is stopped (`chat.stop`), exceeds its `timeout_s`, or fails — the
+tool's abort signal (`ToolContext.signal`, carried across MCP as
+`notifications/cancelled`) closes the form: it settles `abandoned`, a
+`form.closed` frame (App. D.2) retracts the card, and a late submit gets
+`error(not_found)`. **An abandoned form can never write** — no secret, no
+config, no commit — because the broker refuses the submit before anything
+is split, and a template effect does not run for a call already given up on.
+
 ### 19.2 Secrets stay out of band
 
 Secret-typed fields never ride the tool result. The UI submits all values
@@ -1924,7 +2150,9 @@ tool taking `routes` as an argument.
 ### 19.3 Connector templates
 
 Shipped form definitions compiled into the service (like base prompts):
-`mcp_stdio`, `mcp_http`, `model_endpoint`, and `generic`. Template
+`mcp_stdio`, `mcp_http`, `model_endpoint`, and `speech_endpoint` — a form
+with no `template` is the generic case (F.9), whose fields *are* the form
+rather than overrides onto one. Template
 submissions can carry **server-side effects executed by the setup
 integration itself** (deterministic code, not the model): the MCP templates
 validate the entry, write `config/mcp.yaml` (with secret refs, and the
@@ -1932,12 +2160,20 @@ optional `description:` the §21.2.2 catalog reads), connect, probe the
 server's tool list, and return the outcome to the resumed run.
 The agent never writes `config/mcp.yaml` by any path (§14.4.1); the human
 submitting the template form — exact command/URL visible — is the install
-gate. `model_endpoint` reuses the §3b probe suite and appends a `kind: chat`
-entry to `models.yaml` — this template never writes `kind: embedding` or the
-legacy `embedding:` block (§10.1, §8.3).
+gate. `model_endpoint` reuses the §3b probe suite and, once the probed model
+actually **completes** a prompt rather than merely answering `/models` (K4:
+reachable is not the same claim as working), merges a `kind: chat` entry into
+`models.yaml` by name — a fresh probe's own fields (`url`, `model`, `caps`,
+`context_size`, `probed_model`, `classes`) overwrite an entry of the same
+name, everything else on it (pricing, hand-set fields) survives, and the
+effect reports `replaced: true`. This template never writes `kind: embedding`
+or the legacy `embedding:` block (§10.1, §8.3). The `speech_endpoint` template
+merges the same way: a fresh probe's fields overwrite an entry of the same
+name, everything else survives, and it also reports `replaced: true`.
 
 **An effect may raise one more form when its own form is what made the
-question askable.** `model_endpoint` is the case and the only one shipped:
+question askable, or when its own answer turned out not to work.**
+`model_endpoint` is the first case shipped:
 §10.2 requires a human to say which model gets probed, the choice wants a
 select over the endpoint's own `/models` listing, and that listing lives behind
 the URL the form was collecting — so it cannot be offered before the first
@@ -1953,6 +2189,37 @@ authority: a name the user knows works outranks a list that omits it. Its `class
 already configured the field opens with no prefill, because "fast and best"
 is a reasonable default for the first endpoint and furniture — or wrong —
 for a second, where the point is usually to split them (§10.6).
+
+`handler.create` (F.20) is the other shipped case, with the same shape: the
+routing form (F.6) asks which model runs a handler, and until the grant form
+has been approved there is no handler to ask it about — a declined grant must
+not have cost the user a second question. It is raised after the first
+settles, only when a real routing choice exists, and a cancel on either
+writes nothing.
+
+**A third shape widens the same exception (K3): a fixable effect failure
+re-presents the same form, not a new question.** `unreachable`, a bad
+credential, and a model or voice that is not installed are mistakes a human
+can *fix*, not something else to ask — a template's `effect` says so
+(`retryable`), and `setup.form` re-raises the identical form, prefilled with
+what was submitted, with the failure as its `description`, bounded at **3**
+attempts in the one tool call. The model is handed only the final attempt's
+outcome plus `attempts` (F.9) — the retry loop belongs to the code, not the
+model (root cause 3, K3). A template's own `validate` runs earlier still,
+inside `submit` itself (App. D.5, F.9): a mistake that needs no network call
+to judge — a name that is not a slug — keeps the *same* form open with the
+message, via the ordinary field-rejection path, and costs no attempt at all.
+
+**One form on screen per run.** The form broker refuses a request from a
+run that already has a form pending, before any frame goes out:
+`{error: "form_pending", form_id, message: "the user hasn't answered the form
+already on screen — wait, or end your turn"}` (F.9), where `form_id` names
+the form still waiting. The check is by run, not by arguments — the repeat
+guard (§20.7) already catches byte-identical calls, and the loop it missed
+was a model re-asking with different prefills. The one-more-form exception
+above is untouched because it is sequential: the first form has settled
+before the second is raised. A form with no run (pairing, D.5) is never
+refused.
 
 ### 19.4 Access is granted, never assumed
 
@@ -1980,6 +2247,19 @@ Two invariants make this a grant rather than a formality:
 
 The agent is instructed to ask *before* reporting that it cannot do something:
 "I have no tool for that" is only true once access has been requested.
+
+**A handler is the same question asked about a run nobody watches.** Its
+`tools:` list is a grant to a future run — one that fires on a schedule or on
+someone else's email — so it gets the same treatment as `grants.yaml` rather
+than the path fence alone: `handler.create`/`handler.update` (App. F.20)
+match the requested names against the live catalog (`unknown_tools` for
+anything that does not exist, globs pinned as concrete names), show the user
+each tool with its own description and a *freely* / *ask me each time*
+choice, and write only what was approved. After that, `config.write` keeps
+those keys as they are (F.6, §14.4.4); changing what a handler may call is
+another form. Chat's own grant and a handler's are independent: approving a
+tool for a handler grants chat nothing, and chat having a tool grants a
+handler nothing.
 
 ### 19.5 The connect skill
 
@@ -2023,6 +2303,49 @@ activate through the form flow:
   the callback lands, the integration finishes activation and emits
   `system.integration_activated`; a shipped handler turns that into a
   notify. The run does not stay suspended across the browser round-trip.
+- **`activation: oauth` for external MCP servers** (G.5 `auth: {type:
+  oauth}`). Same shape as Google's, with one difference that decides the
+  design: **the redirect is fixed and stable** — `GET /oauth/callback` on
+  the service's own HTTP server (App. E), at `gateway.public_url` when set
+  (§24.3), else the address the server bound (`http://127.0.0.1:<port>`
+  for a loopback or wildcard bind). Providers without dynamic
+  registration (Asana) match a hand-registered app's redirect exactly,
+  which Google's ephemeral loopback port can never satisfy; the
+  `mcp_http` template's client-id label names this URL so it can be
+  registered. Most providers accept plain `http` only for a loopback
+  redirect — anything else wants `gateway.public_url` on https.
+  - *Install:* `setup.form {template: "mcp_http"}` with "a browser sign-in
+    (OAuth)" (and, for a provider without registration, the client
+    id/secret) writes the entry; the connect comes back `needs_auth`
+    (§11.6), which is **not** a rolled-back failure — the effect keeps the
+    entry and returns `{installed: true, connected: false, needs_auth: true,
+    auth_url, redirect_uri}`. The agent hands the user the link; the run
+    does not wait on the browser.
+  - *Signing in (again):* `setup.activate {integration: <server>}` names
+    an `mcp.yaml` server. With no link out it returns `{pending: true,
+    auth_url, redirect_uri}` — or, when a refresh still works, reconnects
+    and returns the activation outcome. A link already handed out for that
+    server is handed out again, never replaced: replacing it would dead-end
+    the page the person is approving on.
+  - *Callback:* `state` gates it (unguessable, single-use, compared in
+    constant time against the store, so a restart between consent and
+    callback still lands); the code is exchanged (`finishAuth`), the pending
+    verifier/`state` cleared either way, then the §11.6 path — reconnect,
+    re-list — and `system.integration_activated`. The browser gets a small
+    page written for a person, never JSON and never the code echoed back.
+  - *The phone case:* a loopback redirect on a phone lands on the phone's
+    own localhost and fails to load. Calling `setup.activate` for the
+    server **while its link is out** raises the paste-back form (D.5,
+    template label `oauth_paste`): one `url` field for the address the
+    failed page left in the address bar. The server extracts `code` and
+    `state` from it; the value is never in a result, so it never enters
+    model context. An address without a code keeps the same form open,
+    saying why (§19.3 K3). If the callback lands meanwhile, the form closes
+    itself (`form.closed`) and the call returns the activation outcome; a
+    sign-in heard by the call that is showing that form is not also
+    announced with `system.integration_activated`.
+  - The URL is never logged, and the store blob (§27) is the only place
+    tokens, a registered client or a pending verifier ever live.
 - **Deactivation:** `setup.deactivate` stops pollers, removes the
   activation record, and hides the tools; secrets are deliberately retained
   (removal is a manual/`turminder token`-style operation, so reactivation
@@ -2130,7 +2453,24 @@ external MCP servers identically:
 
 - A `ToolDefinition` may declare `maxResultChars` to raise its own cap
   (a tool whose *job* is returning a document, called with explicit
-  limits). External MCP tools never get an override.
+  limits). External MCP tools never get an override. **A tool that cannot
+  be called more narrowly must declare one**, because the hint the cap
+  attaches tells the model to refine the call with `offset`/`limit`/
+  `max_results`: advice that is actionable for `files.read` and a dead end
+  for `skills.fetch`, which takes a name and returns a document whole.
+  v1's overrides are `files.read`, `docs.read`, `web.fetch`,
+  `embeds.read`, `setup.list_integrations` and `skills.fetch`, all 20k.
+  The measured cost of getting this wrong: at the default cap the three
+  largest shipped skills came back cut mid-sentence, and the
+  handler-authoring one lost the worked example that a model was reading
+  in order to write a handler — which it then wrote without a `match`
+  block (2026-09-11, run `01M27K59B11KSJDF1F7F2YVCBX`).
+- **The cap records itself on the trace**: a `tool_call` row gains
+  `truncated_from` (C.1), the full serialized length, present only when
+  the cap actually fired. Without it a capped result and a tool that
+  summarises by nature are indistinguishable afterwards, and "how often
+  does this bite, and on what" is a guess rather than a query — which is
+  how those three skills went weeks unnoticed.
 - **Order of operations matters:** the trace `result_excerpt` and the
   activity summary derive from the **original** output; only the transcript
   gets the capped form. The trace must show what the tool actually
@@ -2169,6 +2509,18 @@ tool if you need it again. Never copy this marker into a tool call]]"
   from the elision point onward.
 - Only tool **results** are elided — never tool calls (cheap), never
   assistant text, never user messages.
+- **A tool may declare `neverElide` and opt its results out**, for the one
+  result that is not data but *instructions*: a skill body (G.8), which the
+  run is meant to be following while it works. The arithmetic that justifies
+  elision inverts here — a 6k-char skill costs ~1.5k tokens a turn to keep,
+  and re-fetching it costs a whole turn, which is more; and the token cost is
+  the smaller half. A model whose brief vanished mid-task stops working and
+  goes back to re-read it, which is what the observed run did at turn 4, and
+  the digest it was building waited while it did (2026-09-11). Declared on
+  `skills.fetch` and nowhere else in v1: every other large result is exactly
+  what elision is for, and a tool that opts out because its results are merely
+  *important* has misread this paragraph. External MCP tools never declare it
+  — nothing out there authors this run's instructions.
 - The trace is untouched: it recorded the original at call time (§20.3).
 - Interaction with §20.3: the cap bounds any single result at 4000 chars,
   so elision targets the 2000–4000 band and, more importantly, the *sum*
@@ -2400,11 +2752,22 @@ prompted into noticing this reliably; the loop can count.
   `maxResultChars`, §20.3) — e.g. `web.query`: `match_count === 0`;
   `web.fetch`: extracted text under a floor; `files.search` /
   `memory.query` / `history.search`: empty `results`; `files.list`:
-  empty `entries`. Tools without the predicate: any `{error: …}` return
-  counts as empty, nothing else — **fail-open**; external MCP tools get
-  exactly this fallback and never a predicate. Deterministic code decides
-  "returned nothing", never "was useless" — that judgment stays with the
-  model.
+  empty `entries`. Tools without the predicate: an `{error: …}` return
+  **from a `ro` tool** counts as empty, nothing else — **fail-open**;
+  external MCP tools get exactly this fallback and never a predicate.
+  Deterministic code decides "returned nothing", never "was useless" —
+  that judgment stays with the model.
+- **Only a read can be futile.** A refused or failed `se` call never
+  counts, whatever it returned and whether it returned or threw. The
+  streak note's whole claim is that the *approach* is wrong rather than
+  the parameters, and a write that came back `{error}` is the parameters,
+  by construction: the loader, the API or the validator is naming the one
+  thing to fix. Told otherwise, a model that had just been handed the
+  exact problem is pushed to abandon the approach that was working. The
+  observed case: one `config.read` of a directory plus two writes the
+  handler validator refused made three `config.*` errors, and the third
+  write — the one that succeeded — arrived wrapped in advice to try
+  something else (2026-09-11).
 - **The loop counts streaks per tool namespace, per run**: consecutive
   empty results from `web.*`, reset by any non-empty result from that
   namespace. From the `futile_streak_threshold`-th consecutive empty
@@ -2514,8 +2877,20 @@ grants and are single-shot; they are not paged):
 3. **`tools.open {namespace}`** (App. F.12) opens one namespace for the
    rest of the conversation. Result: `{opened, tools: [names]}`. Unknown or
    zero-granted namespace → `{error: "unknown_namespace",
-   available: [...]}`. There is no `tools.close` in v1 (deferred, §16) —
-   the open set is **monotonic per conversation**.
+   available: [...]}` — and, when any configured external server is
+   currently `dropped` or `needs_auth` (§11.6), also
+   `unavailable: [{name, status}]` plus a `message` explaining that these
+   exist but are unreachable right now (dropped: reconnecting on its own,
+   try later; `needs_auth`: the user has to sign in again, `setup.activate
+   {integration: <name>}` mints a link) — omitted entirely when nothing is
+   down, so a healthy install's error is unchanged byte for byte. A
+   namespace that is down is not one that doesn't exist, and a guessed name
+   must not be the model's only move (painpoints X2). Naming exactly one of
+   those unavailable servers is a more specific case of the same fact, so it
+   gets its own shape rather than the plain list:
+   `{error: "namespace_unavailable", name, status, message}`. There is no
+   `tools.close` in v1 (deferred, §16) — the open set is **monotonic per
+   conversation**.
 4. **Implicit open:** a model call to a tool that is granted but closed
    (it remembered `HassTurnOn` from earlier history) does NOT fail — the
    dispatcher opens that tool's namespace, records
@@ -2782,8 +3157,9 @@ A handler may declare `embed: <embed_id>` in frontmatter (G.7):
   (repair for crashes mid-cascade). This is what prevents the dead-handler
   graveyard.
 - The authoring flow for an interactive mini-app is therefore: create the
-  embed → author the bound handler (via `config.write`, carrying the
-  binding) → the handler's grants define everything the app can cause.
+  embed → author the bound handler (via `handler.create` with `embed:`,
+  F.20 — the user approves its tools on the form) → the handler's grants
+  define everything the app can cause.
 
 ### 22.6 UI
 
@@ -3347,6 +3723,34 @@ argument fences the rest:
   the one surface with no WS session — having no token is the entire reason
   it exists — so §9's "the UI talks WS only" carves out this alongside the
   token entry.
+- **A stored token is thrown away only on proof (normative).** A WebSocket
+  handshake's status is invisible to script, so a socket that never opened
+  says nothing about the token. The UI asks `GET /api/whoami` with the token
+  itself:
+  - **Two 401s in a row, `whoami_confirm_ms` apart (App. A), condemn the
+    token.** Only then is it deleted and the gate opened.
+  - **A 200 means the token is good**, so the UI keeps it and retries.
+  - **A network error, a 5xx or a 403 proves nothing**, so the UI keeps
+    the token and retries.
+
+  One 401 is not proof: a check can read `channels.yaml` mid-write or land
+  on a service still booting, and neither repeats a moment later. Before
+  this rule, every such blink cost a re-pairing (Christer, 2026-09-23: one
+  phone reached `phone-5`). The server side of the same promise:
+  - `channels.yaml` is written by temp file + rename, never in place, so a
+    reader sees the old device list or the new one, never an empty one;
+  - a token that matches no device is logged with the number of devices
+    loaded (never the token or its hash), so a refusal caused by a broken
+    read can be told from a revoked token;
+  - the UI asks the browser to keep the origin's storage
+    (`navigator.storage.persist()`), since eviction is the other quiet way
+    a phone forgets.
+
+  None of this helps across **origins**. A token lives in the storage of
+  the origin that stored it, so `http://<lan-ip>:7787` and
+  `http://<hostname>:7787` are two browsers as far as pairing is concerned.
+  `gateway.public_url` (G.1) is what makes the QR link and the bookmark
+  the same origin.
 
 ---
 
@@ -3471,7 +3875,12 @@ file and the `os` backend's guarantee is theater. Consequences:
 - **Values are opaque strings**, up to `secret_value_max_kb` (App. A) —
   a serialized JSON blob is a normal value. The Google token file becomes
   the key `GOOGLE_OAUTH_TOKEN`; a dropped `credentials.json` is read once,
-  stored as `GOOGLE_CLIENT_CREDENTIALS`, and the file deleted.
+  stored as `GOOGLE_CLIENT_CREDENTIALS`, and the file deleted. Each
+  external MCP server that signs in with a browser (G.5, §19.6) keeps one
+  blob, `MCP_OAUTH_<NAME>` (the server name, key-slugged): its dynamically
+  registered client, its tokens, the pending PKCE verifier and `state`,
+  and when it last completed a sign-in — written and read only through
+  `config.secretStore`, never logged, never in a result.
 - **Integrations acquire and persist secrets only through the store
   interface.** Writing a file under `secrets/` from anywhere but the store
   module is mechanically forbidden (the same guard style as App. I's
@@ -3695,7 +4104,8 @@ page loads leaves a screen that claims to still be working.
   bundled copy — one UI, zero drift, and every UI improvement reaches the
   app with the service. The shell's own chrome is the tray and its menu,
   the welcome and connect screens, and — when voice is enabled (§28.6) — the
-  listening overlay and the wake-word enrolment screen; nothing else. Both the
+  listening overlay and the wake-word enrolment screen, and the quick-note box
+  (§28.7); nothing else. Both the
   welcome and the connect screen are reachable from the tray in every mode, not
   only on first run, because the box with the GPU is often not the box with the
   microphone, and because a mode chosen once must stay a choice (Christer,
@@ -3807,6 +4217,42 @@ Signing is a per-platform story, and only one platform has a gate:
   dependency management; the AppImage is the one for everyone else, who
   should not need a package manager's blessing to run a program. Neither
   replaces the other.
+- **A nix box can build the AppImage as a pre-flight, and only as one.**
+  `app/appimage.mjs` asks for `--bundles appimage` by name, exactly as the
+  runner does, after supplying the ten things the AppImage leg assumes an
+  FHS system provides: `pkg-config --libs-only-L` answering with one path
+  rather than nix's transitive twelve (Tauri strips two bytes and treats the
+  rest as a directory); a `schemasdir` that exists, since nixpkgs keeps
+  GSettings schemas under `share/gsettings-schemas/<pkg>/`; writable
+  stand-ins for the two module directories the gtk plugin copies and then
+  writes a generated cache into, which are read-only in the store; a glib
+  libdir without the `-gdb.py` files nixpkgs puts beside the libraries,
+  which the plugin's `libgobject-*.so*` glob matches and linuxdeploy's ELF
+  parser aborts on; the buildInputs closure on `LD_LIBRARY_PATH`, because
+  linuxdeploy re-resolves every NEEDED entry *after* rewriting rpath and a
+  library it refuses to bundle must still be findable; a tools directory the
+  build owns, holding empty unexecutable placeholders for the two plugins
+  whose `#! /bin/bash` NixOS cannot run and this build never needs; no
+  `SOURCE_DATE_EPOCH`, which nix-shell exports and appimagetool's mksquashfs
+  calls a conflict; a clean-up of the read-only store copies a failed run
+  leaves in the AppDir; and the libraries AppImage's excludelist leaves to
+  the host, which a nix box does not have, declared as `bundle > linux >
+  appimage > files` and passed with `--config` so the tracked
+  `tauri.conf.json` is never written to. That last set is **discovered, not
+  listed**: whatever the finished AppDir still cannot resolve is bundled and
+  the build repeated, because a copy of linuxdeploy's excludelist here would
+  rot the first time theirs changed. The answer is remembered between runs,
+  so the steady state is one build and a new dependency still cannot go
+  missing quietly.
+- **The pre-flight artifact runs, and only where it was built.** It needs no
+  nix-shell and no `LD_LIBRARY_PATH`, which is the whole point of bundling
+  that last set. What it cannot escape is the ELF interpreter: linuxdeploy
+  rewrites rpaths and never that, so the bundle keeps its `/nix/store`
+  loader — the same trap that keeps the pinned Node runtime off nix. So this
+  is the AppImage equivalent of cross-staging: it proves the packaging
+  works, it is **never** the shipped artifact, and the script says so on
+  every run. `bundle.targets` is unchanged, and a plain `cargo tauri build`
+  still emits the `deb` alone.
 - **macOS**: **signed and notarized** (Developer ID) wherever there is an
   identity to sign with — for that audience an unsigned app barely
   exists. This clause was once absolute ("a build that cannot be signed
@@ -3871,8 +4317,10 @@ Signing is a per-platform story, and only one platform has a gate:
   and Tauri builds only those the host can produce — so one config serves
   all three and a Linux run still emits just the `deb`. AppImage stays off
   the list because that list also serves the nix developer build; a release
-  adds it per-target on the command line instead (§32.3), which is the one
-  thing a shared config cannot express.
+  adds it per-target on the command line instead (§32.3), and so does the
+  pre-flight above — which is the one thing a shared config cannot express,
+  and the reason both of them name it rather than the config doing it for
+  everybody.
 - **Cross-staging is possible and never trusted.** `npm ci` can be told
   which platform's optional native packages to resolve, so a bundle tree
   for another OS can be assembled anywhere — useful for checking that the
@@ -4048,6 +4496,115 @@ config, the `mode.json` precedent of §28.1. (Christer, 2026-08-30.)
   `tauri-plugin-global-shortcut`, pinned in `app/Cargo.lock`. Linux first,
   as §28 says — PipeWire and PulseAudio through `cpal`. Barge-in, voice
   approval of confirms, and detectors beyond rustpotter are §16.
+
+### 28.7 Quick note from the tray (normative)
+
+A line typed at the tray and then left alone: "add to todo: renew the
+passport", "remind me Friday to call the garage", "remember the router
+password is on the back of the box". The person does not want a
+conversation and is not waiting for an answer. They want the line to reach
+the assistant and be dealt with. (Christer, 2026-09-23.)
+
+**It is an event, not a chat turn.** Opening a conversation per note would
+fill the sidebar with one-line chats that archive themselves a week later
+(§9). Holding one "notes" conversation would give every note the prompt,
+history and prefix-cache cost of a chat it has nothing to do with. The shape
+already exists: the extension's capture (§29.3) is a typed human sentence,
+posted as an event with the device's token and handled by a shipped
+handler. A quick note is that capture with no page attached.
+
+- **The tray item.** *Quick note…* heads the tray menu, above *Talk to it*,
+  in both modes (§28.1). It is **greyed** while the shell has no working
+  connection, and its tooltip says why. A box that accepts text it cannot
+  send would lose that text.
+- **The window is shell chrome** (§28.2): a local page `quicknote.html`
+  in the shell bundle, built like the overlay. It is undecorated,
+  always on top, absent from the taskbar, and built hidden the first time
+  it is needed. It holds a single text field that grows to four lines,
+  and nothing else. Nothing is fetched from the service, so the window
+  opens instantly and works the same in both modes.
+- **Placement: under the tray icon, or as close as the platform says.**
+  macOS and Windows report the tray icon's rectangle on click, and the
+  shell keeps the last one it was given. The window opens just below that
+  rectangle when the tray is at the top of the screen, and just above it
+  when the tray is at the bottom. Linux trays (StatusNotifierItem) report
+  no position at all, and a menu-item click never carries one. There the
+  window opens at the **cursor position** at the moment of the click,
+  which is next to the tray, because the menu was just opened from it.
+  Both cases are clamped to the monitor's work area. This uses no
+  positioning plugin; Tauri's core gives both numbers (App. J unchanged).
+- **Keys.** Enter sends. Shift+Enter adds a new line. Esc hides the window.
+  Losing focus also hides it. Hiding **keeps the draft** in memory for the
+  life of the process: text typed and then clicked away from is still
+  there when the item is opened again. A successful send clears it.
+- **The token never enters the page.** The page invokes a core command,
+  `quicknote_send {text}`. The Rust core posts with the vault-held token
+  (§28.2), the same way the voice path does. The webview holds no
+  credential, as for every other shell screen.
+- **The request** is `POST /api/events` (App. E, unchanged) with:
+  - `{type: "note.captured", payload: {text}, idempotency_key,
+    serialization_key: "note.captured"}`;
+  - an `idempotency_key` minted by the shell once per note and reused on a
+    retry, so a send that timed out after it landed does not add the
+    todo twice;
+  - a serialization key that queues notes from any device behind each
+    other, so two quick todos cannot race each other into the same file;
+  - `source` stamped server-side from the device (App. E).
+
+  `text` is trimmed and ≤ `quick_note_max_chars` (App. A). The field
+  enforces the cap as you type. The server enforces it again and answers
+  `{error: "too_large"}`.
+- **What the window says, and when it goes away.** A `2xx` shows a brief
+  *Sent* tick and then hides the window. Any failure leaves the window
+  open with the **text intact** and a message written for a person, as
+  §28.2 requires:
+  - unreachable: "Couldn't reach Turminder — is it running? Your note is
+    still here.";
+  - `403`: the stored connection was rotated, and *Connect to another
+    instance…* is the fix;
+  - `413`: the note is too long.
+
+  There is **no offline queue**. A queue is a store the shell does not
+  have, and the draft staying in the box is the honest version of one.
+- **No reply comes back to the box.** The window is not a chat. The outcome
+  arrives the way every other outcome does: one delivery (§7), rendered as
+  a native notification by the shell (§28.2), held under quiet mode
+  (§28.6), and missed rather than lost when nobody is around (§7.1).
+  While the handler works, the event appears in the pending drawer (§4.2.1)
+  like any other.
+- **Trust.** `text` was typed by the authenticated human into shell chrome
+  no page or payload can reach. It is the instruction, and it renders
+  outside the untrusted fence (App. B trust registry: `note.captured →
+  user_fields: ["text"]`).
+- **The shipped handler, `quick-note`** (§12.3; installed at scaffold,
+  user-editable like any handler):
+  - Matches `note.captured`, and treats `text` as the whole request.
+  - Budget `max_turns: 6`.
+  - Grant: `memory.query`, `memory.save`, the `files.*` tools minus
+    delete (`list`, `read`, `write`, `append`, `edit`, `search`),
+    `schedule.create`, `schedule.list`, `skills.fetch`, `time.now`,
+    `deliver.notify`.
+  - **No `web.*`.** A note is a thing to file, not a thing to research, and
+    the smallest grant that files it is the right one to run unattended
+    (§6.2's argument for `scheduled-task`).
+  - **No integration tools either.** A shipped handler cannot know which
+    integrations an install has. Routing "todo" to Asana is a grant the
+    user adds through `handler.update` and its approval form.
+  - **Where a todo goes** is decided by memory first: what the user has said
+    about where their todos live. With no answer there, the handler
+    appends to `todo.md` in the files store (§18), creating it if absent,
+    and its notification names that file, so a wrong default is visible
+    the first time rather than silently wrong forever.
+  - It always ends with **exactly one** `deliver.notify`. That notification
+    is terse and past tense, and says where the note went ("Added to
+    todo.md: renew the passport"). When the note is too ambiguous to act
+    on, the notification asks instead of guessing. The user answers with
+    another quick note or in chat. Nothing is silently dropped.
+- **Deferred (§16):** a global hotkey for the box (the voice hotkey's
+  machinery would serve, but a second always-registered shortcut is a
+  conflict on someone else's desktop until it is a setting); attaching the
+  clipboard or a screenshot; a history of sent notes in the box. Past
+  notes are events and are already in the event log.
 
 ---
 
@@ -4633,11 +5190,15 @@ and smoke-tested, and Tauri bundles it.
   `sqlite-vec` publishes no `windows-arm64` package.
 - **`linux-x64` also ships an AppImage.** It is the one leg that overrides
   `bundle.targets`, because that config has to keep a nix `cargo tauri build`
-  working and AppImage cannot be built there (§28.4) — while a runner, which
-  is not a nix box, can. A `.deb` and an AppImage are for different people:
-  one integrates with a package manager, the other needs nothing installed.
-  `linux-arm64` gets the `deb` alone; linuxdeploy's arm64 support is not
-  something to make a nightly depend on.
+  working and this is the one target that asks for more than the config gives.
+  A `.deb` and an AppImage are for different people: one integrates with a
+  package manager, the other needs nothing installed. **The shipped one is
+  always the runner's.** §28.4's pre-flight builds an AppImage on a nix box
+  too, but that one keeps its `/nix/store` ELF interpreter and runs nowhere
+  else — it checks the packaging, the way cross-staging does, and has no more
+  business in a release than a cross-staged tree does. `linux-arm64` gets the
+  `deb` alone; linuxdeploy's arm64 support is not something to make a nightly
+  depend on.
 - **Staging is always native, never cross.** `stage-service.mjs` runs with
   no `--target`, so its §28.4 smoke test can actually run — and it refuses
   to finish unless the assembled sidecar answers both `/healthz` and `/`. A
@@ -4720,10 +5281,10 @@ moved by the server and never narrated by the model (§26's rule), the
 transcript is an ordinary `chat.message` on an ordinary conversation, the
 reply is an ordinary run, and what the speaker hears is that reply read
 aloud by a `tts` endpoint (§10.9). Nothing here is a second loop. The first
-voice device is the desktop shell (§28.6); the browser UI's microphone
-button and any satellite are further consumers of the same two routes
-(§16). Push-to-talk is the v1 trigger; a wake word is the device's concern.
-(Christer, 2026-08-29/30.)
+voice device is the desktop shell (§28.6); the chat UI's own microphone
+button (§33.6) and any satellite (§16) are further consumers of the same
+two routes. Push-to-talk is the v1 trigger; a wake word is the device's
+concern. (Christer, 2026-08-29/30.)
 
 ### 33.1 The voice conversation
 
@@ -4848,6 +5409,36 @@ Adding or replacing a speech endpoint is the `speech_endpoint` template
 quiet mode, audio devices and the hotkey are shell state (§28.6, §28.1):
 the daemon is display-and-ack (§14.3) and the server does not flip
 switches on a client machine; the assistant can say where the tray menu is.
+
+### 33.6 The chat UI as a voice client
+
+The chat UI's own microphone is the second consumer of `/api/voice` §16 used
+to defer: a mic button in `#composer`, present only when `isSecureContext &&
+navigator.mediaDevices` — the same secure-context restriction §24.4 already
+states for `getUserMedia`, so a plain-HTTP LAN install never grows a control
+that could not work; there, the button is hidden, not disabled. A click
+starts recording via `MediaRecorder`; a second click stops it.
+
+`MediaRecorder` never produces `audio/wav` — Chrome and Firefox record
+`audio/webm` (opus), Safari `audio/mp4` — and §33.2 accepts only
+`audio/wav`. Rather than widen the route to sniff whatever container a
+browser happened to produce (teaching every future caller the same sniff),
+the chat UI converts client-side before it sends anything: the Web Audio
+API decodes the recording, `ui/app.js` downmixes it to mono, resamples to
+16 kHz by linear interpolation, and writes a plain RIFF/WAVE header around
+the 16-bit PCM — no dependency, and `/api/voice` stays exactly the one-format
+adapter §33.2 describes.
+
+The reply plays through an `Audio` element built from the response body,
+the same way `GET /api/voice/preview` already does (§33.5).
+`X-Turminder-Transcript` and `X-Turminder-Conversation` (§33.2) name what was
+heard and where it landed, and the chat UI opens that conversation, labelled
+`voice` like any other (§33.1). Every status `/api/voice` can answer —
+`413`, `415`, `422`, `502`, `503` (App. E) — is shown as a sentence in the
+transcript rather than a native alert, the same place an upload failure
+already says so (§26.2). Nothing here is a new capability: the request
+carries the same bearer device token every other `/api/*` call does, and the
+reply is the ordinary chat pipeline's, read aloud.
 
 ---
 
@@ -5136,14 +5727,18 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | `ui_transcript_min` | 420px | §9.1 — what a column may never take from the transcript |
 | `ui_compact_max` | 640px | §9.1 — phone density (targets, one-line usage) |
 | `ui_short_max` | 480px viewport height | §9.1 — landscape phone; the height-driven rules |
+| `ui_focus_max` | 90ch | §9.1 — focus mode's centred transcript/composer width |
 | Conversation idle timeout (distils; never archives) | 30 min | §9 |
-| Delivery default TTL | 24h (`notify`), 1h (`confirm`) | §7.1 |
+| Conversation auto-archive (`conversation_archive_days`) | 7 days quiet; `0` = never | §9 |
+| Delivery default TTL | 24h (`notify`), 1h (`confirm`); a scheduler-origin `notify`: until the schedule's next occurrence, else 24h | §7.1 |
+| Missed-delivery list (`delivery.missed`) | newest 50 | §7.1, App. D |
 | Confirm round-trip timeout | 1h → treated as **deny** | §11.3 |
 | Schedule grace window | 3600s | §6 |
 | WS heartbeat interval / miss limit | 30s / 2 missed → close | App. D |
 | `pair_ttl_s` | 600s | §24.4 — how long a pairing code waits to be approved |
 | `pair_pending_max` | 8 | §24.4 — pairing requests pending at once |
 | `pair_poll_interval_s` | 2s | §24.4 — the gate's claim poll |
+| `whoami_confirm_ms` | 1500 ms | §24.4 — the pause before the second look that condemns a stored token |
 | Trace payload retention | 90 days | §13.1 |
 | Tool-result transcript cap (`tool_result_max_chars`) | 4000 chars serialized; per-tool `maxResultChars` override, never for external MCP | §20.3 |
 | Elision threshold (`elide_threshold_chars`) | 2000 chars serialized | §20.4 |
@@ -5157,6 +5752,7 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Binding call timeout / on_serve cache TTL | 10s per call / 60s | §23.2 |
 | PDF print timeout / virtual-time-budget | 60s / 10s | §23.4 |
 | Tool call timeout (the transport's, not the tool's) | 120s | §11.1 — every bundled integration is served over the in-memory MCP transport, whose SDK default is 60s; that default is therefore a ceiling on every tool in the system. It must sit **above** every tool's own budget, or the transport decides a tool failed and the tool's own error — the one that says what was being attempted — is lost. It was exactly equal to the PDF print timeout, and a tie went to the transport |
+| Tool call timeout for a tool that awaits a human | `form_timeout_s` + the 120s above | §19.1 — only tools that declare `awaitsHuman` (bundled integrations only: every form-raising `setup.*` tool per F.9's footer, `config.write` for the routing form on `handlers/*.md` (F.6), `handler.create`, `handler.update`); the human gets the whole form timeout and the answer's effect gets the ordinary tool budget. The run's own `timeout_s` still bounds it: a run that ends abandons the call, and the form with it |
 | Background concurrency per endpoint | 1 | §10.3 |
 | `web.search` max_results / timeout | 5 / 10s | §11.2 |
 | `web.query` max_matches / per-match cap / find context window | 20 / 2000 chars / ±200 chars | App. F.5 |
@@ -5165,7 +5761,7 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | File-watch quiescence (`files.quiescence_s`) | 30s | §18.4 |
 | `file.changed` per-file rate limit (`files.watch_rate_limit_s`) | 600s, coalescing | §18.4 |
 | File markers (`files.markers`) | `["@turminder"]` | §18.4 |
-| Form round-trip timeout | 1h → treated as **cancelled** | §19.1 |
+| Form round-trip timeout (`form_timeout_s`) | 1h → treated as **cancelled** | §19.1 |
 | Weather forecast cache TTL | 15 min per rounded (4-decimal) coordinate | App. F.11 |
 | Geocoding cache TTL / rate | 30 days / ≤1 req/s to Nominatim | App. F.11 |
 | Fabrication-guard retries | 1 per assistant response, then strip + trace | §20.8 |
@@ -5200,6 +5796,7 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Capture content cap (`capture_max_chars`) | 100,000 chars | §29.3 |
 | Capture field cap (`capture_field_max_chars`) | 4000 chars per matcher field | §29.3 |
 | Capture note cap (`capture_note_max_chars`) | 2000 chars | §29.3 |
+| Quick note cap (`quick_note_max_chars`) | 2000 chars | §28.7 |
 | Futility streak threshold (`futile_streak_threshold`) | 3 consecutive empty results per namespace | §20.9 |
 | Watcher minimum cadence (`watch_min_interval_s`) | 300s (create refuses tighter) | §30.3 |
 | Watcher default cadence | 1800s when `every_s` omitted | §30.3 |
@@ -5220,22 +5817,26 @@ the keys named there; the table above is the shipped default set.
 | Type | Source | Payload (JSON shape) |
 |---|---|---|
 | `chat.message` | `chat` | `{conversation_id, text, attachments?: [{upload_id, name, mime, bytes}]}` — attachment metadata only, never bytes (§26.2) |
-| `timer.fired` | `scheduler` | `{schedule_id, note, fire_at, late_by_s, data?}` — `data` is the stored payload. `fire_at` is the occurrence this fire is *for* and `late_by_s` how far behind it the fire is: **the server knows the event is six hours stale, so the server says so** rather than leaving a handler to infer it from `time.now` and a hope (§6). Zero on a punctual fire; never negative. A schedule may name its own `event_type` instead (§6.2, F.2): the label routes, everything else here — payload, trust class, both keys — is unchanged, and a model-named type can never earn a `user_fields` entry |
+| `timer.fired` | `scheduler` | `{schedule_id, note, fire_at, late_by_s, data?, manual?: true}` — `data` is the stored payload; `manual` is present only when `schedule.trigger` fired it by hand (§6.2), where `fire_at` is the moment of the call and `late_by_s` is zero. Its idempotency key is `<schedule_id>:manual:<fired_at>`, never the clock's. `fire_at` is the occurrence this fire is *for* and `late_by_s` how far behind it the fire is: **the server knows the event is six hours stale, so the server says so** rather than leaving a handler to infer it from `time.now` and a hope (§6). Zero on a punctual fire; never negative. A schedule may name its own `event_type` instead (§6.2, F.2): the label routes, everything else here — payload, trust class, both keys — is unchanged, and a model-named type can never earn a `user_fields` entry |
 | `notification.action` | daemon device id | `{delivery_id, action, run_id?}` |
 | `desktop.session_locked` / `desktop.session_unlocked` | daemon device id | `{}` |
 | `desktop.idle` | daemon device id | `{idle_s}` |
 | `email.received` | `imap.<account>` | `{message_id, thread_id, from, to[], subject, date, body_text, attachments[{filename, mime, size}]}` |
+| `asana.inbox_item` | `asana.<workspace>` | `{section, task: {gid, name, notes, completed, due_on, due_at, created_at, modified_at, created_by, assignee, projects[], tags[], parent, permalink_url}, comments: [{at, by, text}]}` — a task arrived in (or, on other than the first poll, was already sitting in) the configured My Tasks inbox section (the `AsanaInboxSource` poller). `notes` is de-HTML'd and capped at 4000 chars. Idempotency key `asana:<gid>:<section>:<modified_at>`; serialization key `asana:<gid>` |
+| `asana.task_scheduled` | `asana.<workspace>` | same shape as `asana.inbox_item` — a task moved into the configured "do it today" section instead of the inbox, only emitted when `asana.watch_daily` is on. Same keys, section-scoped |
 | `system.handler_failed` | `system` | `{event_id, handler, error, attempts}` |
 | `system.loop_suspected` | `system` | `{rejected_type, caused_by, depth}` |
-| `system.schedule_missed` | `system` | `{schedule_id, fire_at, late_by_s, note, on_miss, skipped, next_fire_at}` — one per catch-up, never one per occurrence (§6.1): `skipped` says how many went by, so a week away is one honest event rather than seven runs. Emitted whether the policy fired the occurrence late or skipped it — the miss happened either way |
-| `system.conversation_closed` | `system` | `{conversation_id, turn_count, since}` — the user archived it. `since` = the `distilled_at` mark before this trigger claimed it (null on a first pass); the distillation pass reads only turns after it (§8.2) |
+| `system.schedule_missed` | `system`, or `scheduler` when `also_fired` (§6.1 S3) | `{schedule_id, fire_at, late_by_s, note, on_miss, skipped, next_fire_at, also_fired: bool}` — one per catch-up, never one per occurrence (§6.1): `skipped` says how many went by, so a week away is one honest event rather than seven runs. Emitted whether the policy fired the occurrence late or skipped it — the miss happened either way. `also_fired` is true exactly when `fire_late` also emitted a `timer.fired` for this occurrence, which already carries `late_by_s` to its own handler — the source becomes `scheduler` rather than `system` for that case only, structurally excluding it from the shipped `failure-notice` handler (whose `match` cannot see payload fields, only the envelope, §5.2), because one outage earns one notice, not two |
+| `system.conversation_closed` | `system` | `{conversation_id, turn_count, since, auto?: true}` — it was archived: by the user, or by the §9 sweep after `conversation_archive_days` of silence, which is what `auto` says. `since` = the `distilled_at` mark before this trigger claimed it (null on a first pass); the distillation pass reads only turns after it (§8.2) |
 | `system.conversation_idle` | `system` | `{conversation_id, turn_count, since}` — quiet past the idle window; distils without archiving (§9). `since` as above |
 | `webhook.<name>` | `http` | verbatim POST body (App. E.3) |
 | `file.request` | `files` | `{path, line, text, context}` — `context` ≈ ±10 lines around the marker (§18.4) |
 | `file.changed` | `files` | `{path, change: "created"\|"modified"\|"deleted"}` — handler reads current state (§18.4) |
-| `system.integration_activated` | `system` | `{integration, tools: [...]}` (§19.6) |
+| `system.integration_activated` | `system` | `{integration, tools: [...]}` (§19.6) — also emitted when an external MCP server's browser sign-in completes (`integration` is the server name), except when the `setup.activate` call showing that sign-in's paste-back form hears it as its own result |
+| `system.integration_needs_auth` | `system` | `{integration, message}` (§11.6) — an external MCP server that had signed in before lost its sign-in (refresh expired or withdrawn). One per loss: idempotency key `mcp-auth:<name>:<iso time of the loss>`; never for a server that never signed in. No link in it — `setup.activate` mints one on request. Consumed by the shipped `failure-notice` handler |
 | `embed.action` | `embed.<id>` | `{embed_id, action, data?}` — fenced untrusted; rate-limited (§22.4) |
 | `page.captured` | capturing device id | `{url, title, domain, matcher, fields?, content, note?, truncated}` (§29.3) — `note` is user-authored per the trust map below; everything else fenced |
+| `note.captured` | capturing device id | `{text}` (§28.7) — one line or a few typed into the shell's quick-note box; `text` is user-authored per the trust map below. Idempotency key minted by the shell per note; serialization key `note.captured` |
 | `watch.due` | `scheduler` | `{watch_id}` — consumed by the watcher engine (§30.2), **never offered to ingress** (typed skip, the `chat.message` precedent) |
 | `system.asset_invalid` | `system` | `{category: "handlers"\|"skills", file, message, shipped: bool}` — a handler or skill that failed to parse or validate at load (§12.3). Idempotency key `sha256(file + message)`, so a reload storm is one event and a *new* breakage is a new one; consumed by the shipped `failure-notice` handler like every other `system.*` |
 | `watch.changed` | `watcher` | `{watch_id, note, from, to, terminal: bool, state_file}` (§30.2) |
@@ -5250,8 +5851,9 @@ authenticated human rather than carried from outside — which the prompt
 assembler renders *outside* the fence, immediately before it, as
 `Note from <user_name>: "<value>"`, and removes from the fenced
 serialization. The registry lives in code beside the assembler; this
-table is its normative source. v1 declares exactly one:
-`page.captured → user_fields: ["note"]` (§29.3). A field earns this only
+table is its normative source. It declares exactly two:
+`page.captured → user_fields: ["note"]` (§29.3) and
+`note.captured → user_fields: ["text"]` (§28.7). A field earns this only
 when a device-token-authenticated human typed it into trusted UI — never
 because a payload claims it. Idempotency keys:
 `email.received` uses RFC 5322 Message-ID; `timer.fired` uses
@@ -5343,8 +5945,9 @@ CREATE TABLE deliveries (
   created_at     TEXT NOT NULL,
   expires_at     TEXT NOT NULL,
   created_by_run TEXT REFERENCES runs(id),
-  status         TEXT NOT NULL DEFAULT 'queued'
-                 CHECK (status IN ('queued','delivered','acked','expired')),
+  status         TEXT NOT NULL DEFAULT 'queued'     -- 'missed': a notify that
+                 CHECK (status IN ('queued','delivered','acked','expired',
+                                   'missed')),       -- expired still queued (§7.1)
   delivered_at   TEXT,
   acked_at       TEXT,
   acked_by       TEXT                                -- device id
@@ -5401,7 +6004,7 @@ CREATE TABLE conversations (
   title            TEXT,                             -- set by distillation pass
   mode             TEXT NOT NULL DEFAULT 'normal'
                    CHECK (mode IN ('normal','onboarding')),
-  status           TEXT NOT NULL DEFAULT 'open'      -- 'closed' only by user action (§9)
+  status           TEXT NOT NULL DEFAULT 'open'      -- 'closed' by the user, or by the §9 sweep
                    CHECK (status IN ('open','closed')),
   created_at       TEXT NOT NULL,
   last_activity_at TEXT NOT NULL,
@@ -5510,13 +6113,23 @@ derivation. A column rather than a new `mode` value, because SQLite cannot
 widen a CHECK without rebuilding the table, and because the device name is
 the fact worth keeping.
 
+Added by the missed-delivery migration (§7.1; migration 014): `deliveries`
+is rebuilt with `'missed'` added to the `status` CHECK — the rebuild 013
+avoided, taken here because a status is what this is. Rows are copied
+verbatim, `seq` values and the `AUTOINCREMENT` high-water mark included,
+because `seq` is every device's `last_seen` cursor (§7.3) and a reused seq
+would hide a new delivery behind an old ack. Existing `expired` rows stay
+`expired`: which of them were never delivered is recorded (`delivered_at`
+null), but reclassifying history is a separate decision, not a migration
+default.
+
 ### C.1 Trace `data` shapes (by `kind`)
 
 - `verdict` — `{handler, offered: true, matched: bool, reason}` (one row per
   handler offered; §5.3)
 - `llm_call` — `{model, priority, purpose, queue_wait_ms, duration_ms,
   tokens_in, tokens_out, stop_reason, prompt_evaluated?, endpoint,
-  requested_class?, resolved_by, cost?, currency?}` — `prompt_evaluated` is
+  requested_class?, resolved_by, cost?, currency?, error?}` — `prompt_evaluated` is
   llama.cpp `timings.prompt_n` when the endpoint sent it (§21.1); absent
   otherwise. `purpose`/`endpoint`/`requested_class`/
   `resolved_by: "override"|"frontmatter"|"route"|"kind_default"` record the
@@ -5527,12 +6140,20 @@ the fact worth keeping.
   than guessing. Speech calls (§10.9) are the same kind with
   `purpose: stt|tts`, zero tokens, and `audio_s` (seconds transcribed or
   produced) or `chars` (characters spoken); `cost` is stamped from the
-  per-kind price.
+  per-kind price. On `stop_reason: "error"`, `error: {class, message}` carries
+  the transport/API failure unwrapped from the AI SDK's own wrapper (a
+  `RetryError`'s `lastError`, an `APICallError`'s `cause`) down to its root —
+  `getaddrinfo ENOTFOUND host`, `connect ECONNREFUSED`, an HTTP status — with
+  any credential riding in a URL stripped; never a header, a key, or the AI
+  SDK's own generic wrapper text (X1a). Absent on rows written before this
+  field existed.
 - `tool_call` — `{tool, args, ok: bool, result_excerpt, duration_ms,
   denied?: 'not_granted'|'confirm_denied'|'confirm_timeout',
-  implicit_open?: string, futile_streak?: int}` — `result_excerpt` is
-  truncated to 1000 chars; `futile_streak` present only on results the
-  §20.9 backstop wrapped;
+  implicit_open?: string, futile_streak?: int, truncated_from?: int}` —
+  `result_excerpt` is truncated to 1000 chars; `futile_streak` present only
+  on results the §20.9 backstop wrapped; `truncated_from` only on results
+  the §20.3 cap truncated, carrying what the full serialization measured, so
+  the cap is tunable from queries rather than anecdotes;
   `args` stored verbatim; `implicit_open` names the namespace a
   granted-but-closed call paged in on its way through (§21.2.4, F.12).
 - `delivery` — `{delivery_id, intent}`
@@ -5584,7 +6205,7 @@ server closes.
 | type | payload | server response |
 |---|---|---|
 | `hello` | `{device, capabilities: string[], last_seen: number}` | `welcome` — MUST be the first frame; anything else first → `error(not_ready)` + close |
-| `ack` | `{delivery_id}` | none (idempotent; unknown id ignored) |
+| `ack` | `{delivery_id}` | none (idempotent; unknown id ignored) — settles a `queued`, `delivered` or `missed` row (§7.1); an `expired` one stays expired |
 | `event` | `{type, payload, occurred_at?, idempotency_key?}` | `event.accepted {event_id}` or `error` — the daemon-as-source path (§7.3); source is set server-side to the device id |
 | `chat.send` | `{conversation_id?, text, attachments?: [upload_id], pins?: {endpoint?: string, effort?: string}}` | `chat.accepted {conversation_id, event_id}` — omitted conversation_id creates one; an unknown or expired upload id → `error(not_found)` at send time, never silently dropped (§26.2). `pins` applies the §10.6 overrides to the conversation **before the run is dequeued** — it exists because a pick made while composing the first message must govern that very message, not the one after (the one-turn lag, found live 2026-08-22); validation identical to `conversation.model`, and an invalid pin fails the send rather than half-applying |
 | `chat.history` | `{conversation_id, before_seq?, limit?=50}` | `chat.history.result {turns: [{seq, role, text, created_at, attachments?: [{upload_id, name, mime}]}], more: bool}` — the UI re-renders thumbnails via `GET /api/uploads/<id>` (§26.2) |
@@ -5617,7 +6238,15 @@ server closes.
 highest delivery `seq` the device has ever acked (0 for never). On
 `welcome`, the server replays all deliveries with `seq > last_seen`,
 `status IN ('queued','delivered')`, and `expires_at` in the future; anything
-expired is marked `expired` at that moment.
+past it is marked at that moment — `missed` for a still-`queued` `notify`,
+`expired` otherwise (§7.1). Then, to a `chat`-capable device, every
+`missed` row goes out once as `delivery.missed` (D.2). **That list ignores
+`last_seen`.** `last_seen` is one device's high-water mark of acks, and a
+`missed` row is by definition acked by nobody: filtering it by a cursor
+would only hide an old missed digest behind a newer ack (a device that
+acked seq 44 would never see a missed seq 35), and the chat UI says
+`last_seen: 0` anyway. The row's own status is the cursor — it leaves the
+list when any device acks it.
 
 ### D.2 Server → client
 
@@ -5625,6 +6254,7 @@ expired is marked `expired` at that moment.
 |---|---|
 | `welcome` | `{server_time, instance_name, user_name, replay_count, configured, onboarding, frames, emits}` — `instance_name` and `user_name` are both null until onboarding has written an identity (G.3) |
 | `delivery` | `{seq, delivery_id, intent, payload, expires_at}` — payload shapes in D.3 |
+| `delivery.missed` | `{deliveries: [{seq, delivery_id, intent: "notify", payload, created_at, expires_at}]}` — the `missed` notifies (§7.1), newest first, at most App. A's 50; sent once, right after `welcome` and the replay, to `chat`-capable devices, and only when non-empty. **One frame, not N `delivery` frames**: a missed row is something to read in the drawer, not a toast, and a page older than this frame ignores it instead of toasting a backlog. Not itself outboxed — a re-derivation over rows, re-sent on every `hello` until each is acked (`ack`, D.1). A payload's `actions` are shown as nothing: their moment has passed |
 | `chat.accepted` / `event.accepted` | as above |
 | `chat.delta` | `{conversation_id, run_id, text}` — transient, never persisted or replayed; a reconnecting client re-fetches via `chat.history` |
 | `chat.retract` | `{conversation_id, run_id}` — **unsay the turn in flight** (§20.8). The client drops everything it is holding for this run's current assistant message; what replaces it arrives as ordinary `chat.delta`s. No text, because the client's job is to render what it is told rather than work out which characters moved. Transient like `chat.delta`, and safe to miss: a reconnecting client re-fetches the settled turn, which was never anything but clean |
@@ -5632,9 +6262,10 @@ expired is marked `expired` at that moment.
 | `chat.stopped` | `{conversation_id, run_id\|null}` — the reply to `chat.stop` (D.1), to the requesting device; everyone else sees the run end through the ordinary `chat.done`/`chat.error` it causes |
 | `chat.activity` | `{conversation_id, run_id, activity}` — what the run is doing now (queued, thinking, reasoning, tool_call, tool_result, `awaiting_confirm {tool}`, usage, stopped); transient, never persisted. `awaiting_confirm` is sent as the run suspends on a §11.3 confirmation, so a surface that cannot show the confirm card — `/api/voice` (§33.2) — can say so and stop rather than hold a connection open until the App. A timeout |
 | `chat.usage` | `{conversation_id, run_id, model, turns, context_used, prompt_evaluated, billed_with_timings, tokens_in, tokens_out, context_size, conversation_tokens_in, conversation_tokens_out, duration_ms, queue_wait_ms, cost: {run, conversation, currency}\|null}` — `cost` per §10.5 (null when every call in scope was costless; always an estimate from configured prices, rendered as "est."). §21.1: `context_used` is the peak single-turn prompt (the headline), `tokens_in`/`tokens_out` are cumulative billing (secondary). `prompt_evaluated` is null when the endpoint sent no `timings`; `billed_with_timings` is the prompt total those turns account for, so cache-hit % is computed over the turns it actually covers rather than over the whole run |
-| `chat.error` | `{conversation_id, message}` |
+| `chat.error` | `{conversation_id, message}` — for a run that failed at the endpoint (`stopReason: "error"`), `message` is §28.2's rule applied here (X1b): the endpoint's name, that it did not answer, and what to check, never the AI SDK's own wrapper text |
 | `conversation.mode` | `{conversation_id, mode}` — sent when a conversation is in `onboarding` mode, or is a voice conversation (`mode: "voice"`, derived from `voice_device`, §33.1), so the UI can label it |
 | `form.request` | `{form_id, run_id, conversation_id, title, template?, fields: [FieldSpec]}` — see D.5 |
+| `form.closed` | `{form_id, reason: "abandoned"\|"timeout"}` — **retract this form**: the server closed it without an answer (§19.1) — the call that raised it was abandoned, or it timed out. Sent to every attached `forms`-capable device; the client removes the card (or marks it closed and disables its controls). Not sent for a submit or cancel, which the answering device already knows about. Transient like `form.request`, and safe to miss: a closed form is not re-sent on reconnect, and a submit against one gets `error(not_found)` whether or not the card was retracted |
 | `embed.resolve.result` / `embed.manifest.result` / `embed.list.result` / `embed.promoted` / `embed.demoted` | as in D.1 |
 | `embed.changed` | `{embed_id}` — the embed's content or bound data changed and anything rendering it is a version behind (§22.6); sent to `chat`-capable devices, transient like `files.changed`. Not sent for state-pouch writes |
 | `event.list.result` | `{events: [{id, type, source, summary, status, attempts, next_attempt_at, received_at, last_error}], deliveries: [{delivery_id, intent, title, status, expires_at}]}` — what the system owes you an outcome for, and what owes it a click (§4.2.1). `deliveries` are the `queued\|delivered` rows carrying actions: a `confirm` raised while you were reading another conversation is otherwise a thing you have to remember. `summary` and `last_error` are server-written; **no payload, ever** |
@@ -5721,6 +6352,23 @@ replaced by `${secret:<secret_key>}` references**; everything else passes
 through verbatim → the suspended run resumes with the split result. First
 submit wins (idempotent on `form_id`); other devices receive nothing
 further — a re-rendered stale form's submit gets `error(not_found)`.
+A form the server closes without an answer — its call abandoned, or its
+timeout reached (§19.1) — is retracted with `form.closed` (D.2) and is from
+then on exactly such a stale form: its submit writes nothing. One run has at
+most one form pending (§19.3); a second request is refused with
+`form_pending` and sends no frame.
+`template` on a form outside `setup.form` is a label the UI shows, never a
+second schema: `grant_access` (`setup.request_access`, §19.4),
+`handler_grants` (F.20 — one `select` per concrete tool, options *On its
+own* / *Ask me each time*, field named after the tool), and `oauth_paste`
+(`setup.activate` on an MCP server whose sign-in link is out, §19.6 — the
+**paste-back field**: one `url` field, `redirected_to`, for the address a
+failed redirect left in the browser's address bar). Its value is consumed
+server-side — `code` and `state` extracted, the exchange run — and is never
+returned to the run, so it never reaches model context or a `tool_call`
+trace; an address carrying no code is refused inside `submit` and the same
+form stays open. The form closes itself (`form.closed`) when the callback
+completes the same sign-in first.
 Pending `form.request`s are re-sent after `welcome` to `forms`-capable
 devices. Forms are transient like `chat.delta` — never outboxed; the
 suspension row is the durable state.
@@ -5744,6 +6392,7 @@ localStorage and uses it for `/ws`.
 |---|---|
 | `GET /` | chat UI; serves the setup page instead when `models.yaml` is absent/invalid (plan-v1 §3b). A `#connect=<token>` URL fragment (the §24.3 QR payload) is consumed client-side — **by the setup page too** (scan the first-run QR before configuring and the token survives setup instead of vanishing): token stored, fragment stripped via `history.replaceState`, connect — the fragment never reaches the server |
 | `GET /healthz` | `{status:"ok", db_version, layout_version, linked}` — no auth. `linked` is whether **any** device token exists (§24): the chat UI's gate must choose what to tell someone before it holds a credential to ask with — scan the QR your assistant shows, or (nothing linked, nobody to ask) the CLI. A boolean and nothing more: never a count, never a device name |
+| `GET /oauth/callback` | **no bearer auth** — the approving browser holds no device token; gated by `state` instead (unguessable, single-use, constant-time matched against the §27 blobs) with PKCE behind it (§19.6). `?code&state` → exchanges the code, reconnects and re-lists the server (§11.6), emits `system.integration_activated` → 200; `?error=…` from the provider → 400; no code or state → 400; an unknown or already-used `state` → 403; the exchange or reconnect failing → 502. Every answer is a small `text/html` page written for a person ("you can close this tab"), `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, a `default-src 'none'` CSP; the query is never echoed or logged. The stable redirect a hand-registered OAuth app lists: `<gateway.public_url or bound origin>/oauth/callback` |
 | `POST /api/setup/probe` | `{url, api_key?, model?, kind?: "chat"="chat"\|"embedding"}` → chat: `{reachable, model_id?, models?: [string], context_size?, caps: {json: bool, tools: bool}, error?}`; `models` is every id the endpoint lists and `model_id` is the one these caps were **measured against** — absent `model`, the first it lists, which is all an endpoint serving one model can mean. The page re-probes with `model` when someone picks another, because a capability tag describes a model rather than an address (§10.2). The chat result also carries `efforts?: ["none"]` — the one reasoning level a probe can *verify* (§10.6): the same question asked twice, once with the endpoint's `no_think` fragment, tagged only when it reasoned the first time and not the second. Reported, never auto-written into G.2: a partial `efforts` list would deny the levels nobody measured. The key is presented as **both** `Authorization: Bearer` and `x-api-key`, since `/v1/models` is commonly served from a provider's native API rather than its OpenAI-compatible layer and the two disagree on how a key travels; embedding: `{reachable, model_id?, dimensions?, error?}` — a real `/v1/embeddings` (then native `/embedding`) round-trip whose vector length is `dimensions`; "answered at all" is never the question (§27.1's lesson). Only enabled while unconfigured |
 | `POST /api/setup/commit` | `{endpoints: [ModelEndpoint], embedding?: bool, embedding_url?}` (App. G.2) — `embedding: false` is a decline and writes no block; otherwise the URL defaults to the first endpoint's root and inherits that endpoint's `${secret:}` key reference when it *is* that root (§28.5) → writes `models.yaml`, git commit, 200. The embedding field is **offered on the setup page, optional, with the honest consequence stated** ("without it, semantic search runs on keyword overlap — everything works, recall is cruder"); it landed here after the block spent a day hand-edited and silently broken (2026-08-23). First run only, the response also carries `ui_token` so the page can open `/ws` without the operator copying it out of the terminal — the value comes from the scaffold's in-memory carrier, never from disk (§24: there is only a hash there), so a service that did not create this data dir omits the field |
 | `POST /api/events` | inject an event: `{type, payload, occurred_at?, idempotency_key?, serialization_key?}` → `{event_id}` — generic webhook/testing ingress; `webhook.<name>` types conventionally. **`source` is stamped server-side from the authenticated device** (matching the WS `event` frame, D.1) — a caller-supplied `source` is ignored: provenance comes from the token, identity from the type. Payload caps per App. A where the type declares them (§29.3) → `{error: "too_large"}` |
@@ -5823,15 +6472,16 @@ Every `se` call performs a git commit; commit message =
 
 | tool | tier | args | returns |
 |---|---|---|---|
-| `schedule.create` | se | `{fire_at: iso8601, note: string, rrule?: string, data?: object, grace_s?: int, on_miss?: "fire_late"\|"skip", event_type?: string}` | `{schedule_id, fire_at, rrule, grace_s, on_miss, event_type, consumers: [handler names], warning?}` — `on_miss` (§6.1) defaults per kind: `fire_late` for a one-shot, `skip` for a recurrence. It comes back whether or not it was asked for, because "what happens if I close the lid" should be answerable from the reply. `consumers` is the §5.2 envelope matcher run over the event this schedule will emit — deterministic, no model call — and an empty one carries `warning` saying nothing will run this (§6.2). `event_type` defaults to `timer.fired`; a custom one must be `^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$` and not claim a reserved namespace → `{error: "reserved_event_type", prefix}` |
-| `schedule.list` | ro | `{include_done?: bool=false}` | `{schedules: [{id, fire_at, rrule, note, status, grace_s, on_miss, last_fired_at, event_type, consumers}]}` — next fire, miss policy and *who will run it* per row, so "why didn't my digest run" is answerable from the tool the question is about rather than from a trace (§6.2) |
+| `schedule.create` | se | `{fire_at: iso8601, note: string, rrule?: string, data?: object, grace_s?: int, on_miss?: "fire_late"\|"skip", event_type?: string}` | `{schedule_id, fire_at, rrule, grace_s, on_miss, event_type, when: string, consumers: [handler names], catch_all: [handler names], warning?}` — `on_miss` (§6.1) defaults per kind: `fire_late` for a one-shot, `skip` for a recurrence; on a recurrence, `fire_late` means the one occurrence it was standing on, late, not every missed one. It comes back whether or not it was asked for, because "what happens if I close the lid" should be answerable from the reply. `when` is a sentence server-rendered in the identity's own zone (§6.1) — `"daily at 07:00 Europe/Oslo until 30 Sep; if missed: skipped (grace 1h)"` — for the model to quote rather than convert itself; costs nothing per request (§21.4). `consumers` is the §5.2 envelope matcher run over the event this schedule will emit, kept to handlers whose `match.types` explicitly names it — deterministic, no model call — and an empty one carries `warning` saying nothing will run this (§6.2). `catch_all` names handlers that would also run only because they declared no `match` at all (§6.2 S4); they do not count against the empty-list check. `event_type` defaults to `timer.fired`; a custom one must be `^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$` and not claim a reserved namespace → `{error: "reserved_event_type", prefix}` |
+| `schedule.list` | ro | `{include_done?: bool=false}` | `{schedules: [{id, fire_at, rrule, note, status, grace_s, on_miss, last_fired_at, event_type, when, consumers, catch_all}]}` — next fire, miss policy, the same rendered `when` sentence, and *who will run it* per row (split the same way as `schedule.create`), so "why didn't my digest run" is answerable from the tool the question is about rather than from a trace (§6.2) |
 | `schedule.cancel` | se | `{schedule_id: string}` | `{schedule_id, cancelled: true}` |
+| `schedule.trigger` | se | `{schedule_id: string}` | `{schedule_id, event_id, event_type, fired_at, next_fire_at, when, consumers, catch_all, warning?}` — fires a booked schedule **now**, emitting exactly what the timer would (§6.2). `next_fire_at` and `when` are the booking, unchanged: triggering never consumes it. Non-active → `{error: "not_active", status}`; unknown id → `{error: "not_found"}`; a depth or cycle violation (§5.5) → `{error: "loop_rejected", reason}` |
 
 ### F.3 `deliver` (§7.1)
 
 | tool | tier | args | returns |
 |---|---|---|---|
-| `deliver.notify` | se | `{title: string, body: string, spoken?: string (≤ `spoken_max_chars`; the one sentence a speaker says instead of title and body, §33.3), actions?: [{id, label}], ttl_s?: int}` | `{delivery_id}` |
+| `deliver.notify` | se | `{title: string, body: string, spoken?: string (≤ `spoken_max_chars`; the one sentence a speaker says instead of title and body, §33.3), actions?: [{id, label}], ttl_s?: int}` | `{delivery_id}` — omitted `ttl_s` defaults per App. A, and for a scheduler-origin run to the schedule's next occurrence (§7.1); an explicit one wins |
 
 `confirm` deliveries are NOT a tool — they are created by the dispatcher
 itself during the §11.3 confirmation round-trip. No model ever requests one.
@@ -5885,6 +6535,14 @@ itself during the §11.3 confirmation round-trip. No model ever requests one.
   bodies keyed by arbitrary URL would grow the database with nothing to
   prune them. A cached page answers only callers whose read ceiling it
   actually covered.
+- **A rate limit or an outage says when to come back** (X5): a `fetch_failed`
+  from a `429` or `503` response carries `retry_after_s` when the server sent
+  `Retry-After` (seconds, or an HTTP-date converted to seconds from now), and
+  `message` says plainly not to retry the same call this run. The §20.7
+  repeat-call guard already stops an identical retry inside one run; this is
+  what stops the *next* run from treating a live rate limit as a fresh
+  problem. Absent when the server sent no `Retry-After`, or on any other
+  status.
 - **The JS-rendered tell** (§20.9): when extraction comes back nearly
   empty from a script-dominated page — extracted text under
   `spa_text_floor_chars` while the fetched markup exceeds 10× that
@@ -5902,8 +6560,8 @@ itself during the §11.3 confirmation round-trip. No model ever requests one.
 
 | tool | tier | args | returns |
 |---|---|---|---|
-| `config.write` | se | `{path: string, content: string, message: string, rechoose_routing?: bool}` | `{path, committed: true}`, or for `handlers/*.md`: `{path, committed, routing: {chosen_by: "user"\|"table"\|"kept", endpoint?, class?, effort?, note?}, ignored: string[]}` |
-| `config.read` | ro | `{path: string}` | `{path, content}` |
+| `config.write` | se | `{path: string, content: string, message: string, rechoose_routing?: bool}` | `{path, committed: true}`, or for `handlers/*.md`: `{path, committed, routing: {chosen_by: "user"\|"table"\|"kept", endpoint?, class?, effort?, note?}, ignored: string[], pinned?: string[], message?}`; `{error: "use_handler_create"}` for a handler file that does not exist yet, `{error: "use_handler_update"}` for one whose current frontmatter does not parse — both write nothing; `{error: "path_rejected", message}` for any path the F.6 rules below refuse (X4) — nothing written. Awaits a human (App. A) for the routing form on `handlers/*.md`: an abandoned call closes the form and writes nothing (§19.1) |
+| `config.read` | ro | `{path: string}` | `{path, content}`; `{error: "is_directory", files: [...]}` for a path naming a directory — one of the three roots itself, bare, or any directory beneath one — listing what is there rather than refusing (X4); `{error: "path_rejected", message}` for any other rejected path |
 
 `path` is data-dir-relative and MUST resolve (after normalization, symlinks
 denied) under `config/`, `handlers/`, or `skills/`. Anything else —
@@ -5942,6 +6600,49 @@ model learns to stop) and decides them itself:
 Only a human editing `handlers/*.md` directly sets these keys without the
 form; `HandlerFrontmatterSchema` and `validateWrite` are unchanged (G.7).
 
+**A handler's approved half is pinned the same way** (§19.4, F.20):
+`match`, `watch`, `embed`, `tools` and `confirm` are never accepted from
+`config.write` either. Every handler write replaces whatever the model sent
+for those five keys with the values the file already carries — the ones a
+human approved on a `handler.*` form, or wrote by hand — and `pinned` names
+the keys whose sent value differed and was discarded, with a `message`
+saying `handler.update` is the way to change them. A key the model simply
+omitted is kept, not dropped. So `config.write` remains the tool for the
+rest of an existing handler — its prose, `description`, `budgets`,
+`enabled`, and `rechoose_routing` — and never for what it may run:
+
+- **A handler file that does not exist yet** → `{error:
+  "use_handler_create"}`, nothing written. With the approved half stripped,
+  a new file would be a catch-all (§5.2) that may call nothing — exactly the
+  accident `handler.create`'s structured arguments exist to prevent — so the
+  refusal names the door instead of writing it.
+- **An existing file whose frontmatter does not parse** → `{error:
+  "use_handler_update"}`, nothing written: there is no approved set to keep,
+  and rewriting it is a new approval.
+
+The routing rules' "the file is new" condition is therefore never met
+through `config.write`; it is `handler.create`'s, which reuses this routing
+logic unchanged (F.20).
+
+**A write to `handlers/*.md` invalidates the handler loader's cache**, in
+the same call, before it returns. Handlers are re-read per event (§5.1), and
+between events the loaded set is a cache — so a run that authored a handler
+and then asked `schedule.create` who would run its event was answered from
+the set that existed before it wrote, i.e. told another handler's name. The
+model read that as its own handler and reported the fix as verified
+(2026-09-11). `consumers` is defined as a fact about the files on disk *now*
+(§6.2); a cache that outlives the write makes that sentence false.
+
+**Frontmatter is parsed once per write, through the one shared parser**
+(G.7). gray-matter caches by input string and populates the entry *before*
+parsing it, so a YAML error leaves a hollow entry behind and the next parse
+of the same document returns it silently: the second reader is told the file
+has no frontmatter at all. `config.write` parses for routing and again to
+validate, so the model that sent an unquoted `: ` inside a description was
+told to add a `---` block the document already had, and burned two retries
+guessing (2026-09-11). The error a write is refused with must be the error
+the document actually has, on every parse, or the retry is a coin flip.
+
 ### F.7 Dispatcher mechanics (§11.4, normative)
 
 1. A run's dispatcher is constructed from the granted tool list (handler
@@ -5961,7 +6662,8 @@ form; `HandlerFrontmatterSchema` and `validateWrite` are unchanged (G.7).
    the run continues and may explain itself.
 
 Default chat grant (configurable): `memory.*`, `schedule.*`, `watch.*`,
-`usage.*`, `project.*`, `web.*`,
+`usage.*`, `project.*`, `web.*`, `handler.*` (F.20 — the approval form is
+its gate),
 `time.*`, `weather.*`, `deliver.notify`, `docs.*`, `history.*`, `files.*`
 with `files.delete` at the `confirm` level, `web.download` inheriting
 `web.*` deliberately (§23.6 — it writes the store, but so does `files.write`,
@@ -5977,10 +6679,10 @@ phone" step, §24.3), `setup.secrets_backend` (the vault offer, §27.1).
 | tool | tier | args | returns |
 |---|---|---|---|
 | `files.list` | ro | `{dir?: string="", glob?: string}` | `{entries: [{path, size, mtime, binary: bool}]}` |
-| `files.read` | ro | `{path: string, offset_lines?: int, limit_lines?: int}` | `{path, content, truncated: bool, mime}`; binary files → `{path, binary: true, size, mime}` (metadata only, §18.2). `mime` rides both shapes because the panel picks a renderer from what the file *is* (§18.5), and the NUL-byte heuristic behind `binary` answers a different question |
+| `files.read` | ro | `{path: string, offset_lines?: int, limit_lines?: int}` | `{path, content, truncated: bool, mime}`; binary files → `{path, binary: true, size, mime}` (metadata only, §18.2). `mime` rides both shapes because the panel picks a renderer from what the file *is* (§18.5), and the NUL-byte heuristic behind `binary` answers a different question. `{error: "not_found", message, did_you_mean?: [path]}` for a missing file (X3, below) |
 | `files.write` | se | `{path: string, content: string, message: string}` | `{path, committed: true, action: "created"\|"overwritten"}` |
 | `files.append` | se | `{path: string, content: string, message: string}` | `{path, committed: true}` |
-| `files.edit` | se | `{path: string, find: string, replace: string, message: string}` | `{path, committed: true}` or `{error: "no_match"\|"multiple_matches", matches: int}` — `find` must match **exactly once** (§18.3) |
+| `files.edit` | se | `{path: string, find: string, replace: string, message: string}` | `{path, committed: true}` or `{error: "no_match"\|"multiple_matches", matches: int}` — `find` must match **exactly once** (§18.3), or `{error: "not_found", message, did_you_mean?: [path]}` (X3) |
 | `files.search` | ro | `{query: string, k?: int=5}` | `{results: [{path, excerpt, score}], retrieval: "vector"\|"lexical"\|"empty"}` — files corpus ONLY, disjoint from `memory.query` and `history.search` (§18.1, §25) |
 | `files.delete` | se | `{path: string, message: string}` | `{path, deleted: true}` — git makes it recoverable |
 
@@ -5993,14 +6695,22 @@ writes succeed without version control and return `committed: false` —
 the write happened, the history didn't; the same applies to every
 committing flow (memory, config, embeds).
 
+**`not_found` says which file was probably meant** (X3): `files.read`,
+`files.edit`, `files.append` (which never actually returns it — it creates
+a missing file instead — but shares the guard) and `docs.*` (F.14, for a
+store path) all carry `did_you_mean`, up to 3 existing store paths ranked
+by basename edit distance, then by sharing the attempted directory —
+computed from the store's own listing, never a model call, and absent when
+nothing is close enough to be worth suggesting.
+
 ### F.9 `setup` (§19)
 
 | tool | tier | args | returns |
 |---|---|---|---|
-| `setup.form` | se | `{template?: "mcp_stdio"\|"mcp_http"\|"model_endpoint" (§10.2: asks **which model** — a select over the endpoint's own `/models` listing, free text when it has none — and probes that one; never list position)\|"speech_endpoint" (§10.9: kind `stt`\|`tts`, url, key, model, voice — probed before anything is written), title: string, embed_id?: string (render that embed in the form as a preview, App. D.5), fields?: [FieldSpec] (generic form when no template; templates supply their own fields, `fields` entries then override prefills by name)}` | `{submitted: true, values: {…non-secret…}, secrets: {field: "${secret:KEY}"}, effect?: {…template outcome, e.g. mcp: {connected, tools: […]}}}` or `{submitted: false, reason: "cancelled"\|"timeout"}` |
+| `setup.form` | se | `{template?: "mcp_stdio"\|"mcp_http" (§19.6: `sign_in` "a browser sign-in (OAuth)", optional `oauth_client_id`/`oauth_client_secret` → G.5 `auth`; a `needs_auth` connect keeps the entry and its effect is `{installed: true, connected: false, needs_auth: true, auth_url, redirect_uri, granted: false, next_step}`)\|"model_endpoint" (§10.2: asks **which model** — a select over the endpoint's own `/models` listing, free text when it has none — and probes that one; never list position)\|"speech_endpoint" (§10.9: kind `stt`\|`tts`, url, key, model, voice — probed before anything is written), title: string, embed_id?: string (render that embed in the form as a preview, App. D.5), fields?: [FieldSpec] (generic form when no template — the fields *are* the form; with a template, entries override prefills by name, and a name the template does not have is refused rather than appended, K5)}` | `{submitted: true, values: {…non-secret…}, secrets: {field: "${secret:KEY}"}, effect?: {…template outcome, e.g. mcp: {connected, tools: […]}}, attempts?: int (only when > 1: a fixable effect failure re-presented the same form, prefilled, up to 3 times total — §19.3 K3)}` — submitted with no `template`, the same shape instead carries `note` (these values were written nowhere, K5) and never `effect` or `attempts`; or `{submitted: false, reason: "cancelled"\|"timeout"\|"no_channel"\|"abandoned"}`; `{error: "form_pending", form_id, message}` when this run already has a form on screen — no second frame is sent (§19.3); `{error: "unknown_field", fields: [names]}` when a template override names a field the template does not have (K5); `{error: "no_conversation"\|"no_run"}`. Awaits a human (App. A): the transport waits `form_timeout_s` + the tool budget across every attempt, and an abandoned call closes whichever form is open and skips its effect (§19.1) |
 | `setup.request_access` | se | `{tools: [string] (names or globs), reason: string, description?: string}` | `{granted: true, level: "tools"\|"confirm", patterns: [...], tools: [...]}` or `{granted: false, reason}`; `{error: "nothing_to_grant"\|"unknown_tools"}` when there is nothing to ask for (§19.4) |
-| `setup.list_integrations` | ro | `{}` | `{integrations: [{name, description, activation, active: bool, provides}], mcp_servers: [{name, transport, connected: bool, tools: [...], granted: [...], error?, next_retry_at?}], ungranted_tools: [...], stale_model_tags?: [{endpoint, model, probed_model}]}` (§19.6) — `connected` and `granted` are different questions (§19.4). `stale_model_tags` rides along **only when non-empty** (§10.2): an endpoint whose `caps` were measured against a model it no longer names, which is the state that makes the assistant report a capability the model actually has as missing — `setup.reprobe` is the answer. `connected` means the transport is **alive** (§11.6), never that a config entry exists; a dropped server reports `false` with the error that took it down and `next_retry_at`, the ISO time of its next automatic reconnect (App. A `mcp_reconnect_backoff`) — its tools stay listed (§11.6), so "down" has to say "and it will be tried again" or it reads as "gone" |
-| `setup.activate` | se | `{integration: string, prefill?: {name: value}}` | activation-form round-trip (§19.6); returns the activation outcome, or `{pending: true, auth_url}` for `oauth` integrations, or `{submitted: false, …}` |
+| `setup.list_integrations` | ro | `{}` | `{integrations: [{name, description, activation, active: bool, provides}], mcp_servers: [{name, transport, connected: bool, tools: [...], granted: [...], error?, next_retry_at?, needs_auth?: true}], ungranted_tools: [...], stale_model_tags?: [{endpoint, model, probed_model}]}` (§19.6) — `connected` and `granted` are different questions (§19.4). `stale_model_tags` rides along **only when non-empty** (§10.2): an endpoint whose `caps` were measured against a model it no longer names, which is the state that makes the assistant report a capability the model actually has as missing — `setup.reprobe` is the answer. `connected` means the transport is **alive** (§11.6), never that a config entry exists; a dropped server reports `false` with the error that took it down and `next_retry_at`, the ISO time of its next automatic reconnect (App. A `mcp_reconnect_backoff`) — its tools stay listed (§11.6), so "down" has to say "and it will be tried again" or it reads as "gone". `needs_auth: true` is the other kind of down (§11.6): waiting on a person to sign in, never retried, answered by `setup.activate` |
+| `setup.activate` | se | `{integration: string, prefill?: {name: value}}` | activation-form round-trip (§19.6); returns the activation outcome, or `{pending: true, auth_url}` for `oauth` integrations, or `{submitted: false, …}`; `{error: "unknown_field", fields: [names]}` when `prefill` names a field the manifest does not have (K5). `integration` may instead name an `mcp.yaml` server with `auth: {type: oauth}` (§19.6): no link out → `{pending: true, integration, auth_url, redirect_uri, message}` (not suspended), or — a refresh still working — `{activated: true, integration, tools, granted: false, next_step}`; a link already out → the paste-back form (D.5 `oauth_paste`), returning `{activated: true, …}` as above when the pasted address or the callback completes it, `{activated: false, integration, error, message}` when the exchange fails, or `{submitted: false, reason, integration, auth_url, message}` (the link still works). `{error: "not_oauth"}` for a server that does not sign in with a browser, `{error: "already_active"}` for one that is connected |
 | `setup.deactivate` | se | `{integration: string}` | `{integration, deactivated: true}` — secrets retained (§19.6) |
 | `setup.rebuild_index` | se | `{}` | `{submitted, rebuilt, indexes?: {memory, files, history}}` each `{indexed, vectors}` — wipes and re-derives every search corpus (§8.3), **behind a form confirmation** (a one-choice button row, D.5): the model asks, the human clicks, deterministic code rebuilds. Decline or timeout → `{submitted: false}` / `{rebuilt: false}`, nothing discarded. For after an embedding endpoint or model change |
 | `setup.secrets_backend` | se | `{}` | `{submitted, backend?, migrated?: int}` — probes which §27.1 backends this machine offers (`os` positively identified, gpg binary present, plain always), renders a **choice form** naming each with its honest tradeoff (the §27.1 portability caveat for `os`, the permanent startup warning for `plain`), and on submit runs the same pin-and-migrate path as `turminder secrets migrate`. This is the conversational half §27.1 promised onboarding; the onboarding grant carries it (F.7) |
@@ -6016,7 +6726,22 @@ Suspension per F.7/D.5. Template and activation submissions execute their
 server-side effect (validate → write config → connect/probe → report)
 inside the integration, deterministically (§19.3, §19.6). Trace `tool_call`
 records for `setup.*` store field names only; secret values appear as `***`
-(§14.4.2).
+(§14.4.2). One form per run (§19.3) is enforced by the form broker, not per
+tool, so every form-raising `setup.*` tool is refused the same way while a
+form is pending: `setup.form` and `setup.activate` return the `form_pending`
+error above, the others report it as `{submitted: false, reason:
+"form_pending"}` through their ordinary not-submitted shape.
+
+Every tool in this table that raises a form declares `awaitsHuman` (App. A)
+and skips its own effect for a call already abandoned by the time its form
+settles (§19.1) — `setup.form` and `setup.activate` are where this is spelled
+out because §19.3's retry loop and field checks live there; the rest
+(`setup.request_access`, `setup.rebuild_index`, `setup.pricing`,
+`setup.voice`, `setup.printers`) inherit the same two rules without repeating
+them per row: `awaitsHuman: () => config.settings.formTimeoutS`, and an
+abandoned outcome returns `{submitted: false, reason: "abandoned"}` (or the
+tool's own already-documented not-submitted shape) before the write that
+answer would have caused.
 
 ### F.10 `time`
 
@@ -6048,7 +6773,7 @@ the result so answers can carry it. No activation required
 
 | tool | tier | args | returns |
 |---|---|---|---|
-| `tools.open` | ro | `{namespace: string}` | `{opened, tools: [names], skill?: {name, content, note}}` or `{error: "unknown_namespace", available: [...]}` — when a skill named exactly like the namespace exists, its **full body rides the open result**: "read the skill first" was demonstrably skipped, and a rule the model must remember loses to a body it cannot fail to see. Delivered once per conversation by construction (opens are sticky; the idempotent re-open omits it) |
+| `tools.open` | ro | `{namespace: string}` | `{opened, tools: [names], skill?: {name, content, note}}` or `{error: "unknown_namespace", available: [...], unavailable?: [{name, status: "dropped"\|"needs_auth"}], message?}` or `{error: "namespace_unavailable", name, status, message}` — when a skill named exactly like the namespace exists, its **full body rides the open result**: "read the skill first" was demonstrably skipped, and a rule the model must remember loses to a body it cannot fail to see. Delivered once per conversation by construction (opens are sticky; the idempotent re-open omits it). `unavailable`/`message` ride the `unknown_namespace` result only when a configured external server is `dropped` or `needs_auth` (§11.6) — a down namespace is not one that doesn't exist, so a guess isn't the model's only move (painpoints X2); naming that server's own name exactly gets the more specific `namespace_unavailable` shape instead of the plain list |
 
 Not a hub integration: a synthetic definition injected by the
 `PagedDispatcher` wrapper (chat runs only), because it mutates the run's
@@ -6086,7 +6811,7 @@ is structurally rejected — charting is Highcharts (§23.3).
 |---|---|---|---|
 | `docs.outline` | ro | `{path: string}` | PDF: `{path, kind: "pdf", pages: int, toc?: [{title, page, level}], preview: [{page, first_line}]}`. DOCX: `{path, kind: "docx", headings: [{title, level, index}], paragraphs: int, tables: int, has_tracked_changes: bool, comments: int}` — heading `index` values are content-item indices, usable directly as `range` bounds (§23.5). Cheap structure, never content. Other formats → `{error: "unsupported_format", message}` |
 | `docs.read` | ro | `{path: string, pages?: string ("3" \| "10-20", ≤ 20 pages/call — PDF), range?: string (content-item indices, ≤ 500 items/call — DOCX)}` | `{path, pages\|range, text, truncated}` — extracted text, §20.3-capped; docx tables serialize as rows like F.5; docx text is final text, tracked insertions applied (§23.5). Scanned PDFs → `{error: "no_text_layer"}`; the wrong selector for the format → `{error: "bad_args", message}` naming the right one |
-| `docs.to_pdf` | se | `{source: string (embed id \| files-store path to .md/.html), out_path: string}` | `{out_path, bytes, committed: bool}` or `{error: "systool_missing", message, hint}` — chromium print of the served artifact (§23.4); output written to the files store with a git commit |
+| `docs.to_pdf` | se | `{source: string (embed id \| files-store path to .md/.html), out_path: string}` | `{out_path, bytes, committed: bool}` or `{error: "systool_missing", message, hint}` — chromium print of the served artifact (§23.4); output written to the files store with a git commit. A `source` naming a missing store path → `{error: "not_found", message, did_you_mean?: [path]}` (F.8, X3) |
 
 `docs.read` paths resolve under the files store only (same normalization
 rules as F.8). Parsers (`pdfjs-dist`, `docx2js`) are lazy-imported
@@ -6176,6 +6901,72 @@ nothing said why" is the failure this whole namespace is trying not to have.
 `setup.request_access` is how a run gets it, which is also where the user
 chooses *ask me each time* for a tool that consumes paper.
 
+### F.20 `handler` (§5.1, §19.4)
+
+| tool | tier | args | returns |
+|---|---|---|---|
+| `handler.create` | se | `{name: string (kebab-case; the file is handlers/<name>.md), description: string, body: string, event_types?: [glob], sources?: [glob], watch?: [glob], embed?: string, requested_tools: [string] (names or globs, ≥1), requested_confirm?: [string] (names or globs — offered as *ask me each time*), reason: string (shown to the user verbatim), catch_all?: bool}` | `{name, path, committed, tools: [...], confirm: [...], routing: {…F.6 routing result}}`; `{approved: false, reason: "cancelled"\|"timeout"\|"no_channel"\|"abandoned"}`; `{error: "unknown_tools", unmatched: [...]}`, `{error: "catch_all"}`, `{error: "exists"}`, `{error: "bad_name"}`, `{error: "form_pending", form_id, message}`, `{error: "no_conversation"\|"no_run"}`, `{error: "invalid_content", …}` — **nothing is written in any of them** |
+| `handler.update` | se | `{name: string, description?: string, body?: string, event_types?: [glob], sources?: [glob], watch?: [glob], embed?: string, requested_tools?: [string], requested_confirm?: [string], reason?: string, catch_all?: bool}` | `{name, path, committed, tools, confirm, approval: "asked"\|"unchanged"}`; the `handler.create` refusals, plus `{error: "not_found"}`, `{error: "reason_required"}` (a change that needs the form, with nothing to show the user as why) and `{error: "invalid_arguments"}` (a file with no readable frontmatter, updated without the description, body and `requested_tools` a rewrite needs). Both tools return `{error: "not_ready"}` before the tool layer is up |
+
+The model never writes a handler's YAML: the server renders the
+frontmatter from these arguments with `matter.stringify` and validates it
+with the same `validateWrite` `config.write` uses (G.7), so a colon in a
+description is a quoting problem that cannot happen.
+
+**The approved half.** `match` (`event_types` → `match.types`, `sources` →
+`match.sources`), `watch`, `embed`, `tools` and `confirm` are what a
+handler may do and when it may do it while nobody is watching. They are
+decided by a human, once, on a form, and are then out of the model's
+reach (§19.4): `config.write` keeps them as approved (F.6), and only
+another approval — or a human editing the file — changes them.
+
+1. **Grants are checked against the live catalog** with the matcher
+   `setup.request_access` uses. A name or glob that matches no tool in this
+   process → `{error: "unknown_tools", unmatched}`. Globs are **expanded
+   and pinned as concrete names**: `calendar.*` approved today does not
+   grow to cover a tool that ships next month, and the file reads as exactly
+   what the user saw.
+2. **A catch-all is a decision, not an accident** (§5.2). A handler with no
+   `event_types`, no `sources` and no `embed` is offered every event; it is
+   refused with `{error: "catch_all"}` unless `catch_all: true`. `watch`
+   alone does not count: it subscribes the watcher to file changes (§18.4)
+   but does not restrict what the handler is offered — the refusal says to
+   add `event_types: ["file.changed"]`.
+3. **The form** (D.5, template `handler_grants`) is raised on the run's
+   conversation: the description carries the model's `reason` and, written
+   by the server, when the handler runs (its triggers, or "every event" for
+   a catch-all); one `select` per concrete tool, labelled with the tool's
+   name and the first sentence of its **catalog description** (§11.3 —
+   never the model's words about its own request), with the options
+   *On its own* and *Ask me each time* (`tools` and `confirm`, F.7),
+   prefilled from `requested_confirm`. Cancel is the decline. It awaits a
+   human (App. A — `handler.create` declares twice `form_timeout_s`, because
+   the routing form may follow the grant form) and passes the call's abandonment signal to the broker; an
+   answer that arrives after the call was abandoned writes nothing (§19.1).
+   `form_pending` (§19.3) is returned as the error above.
+4. **Routing** is `config.write`'s (F.6), unchanged: after the grant form is
+   approved, `handler.create` decides `model_class`/`endpoint`/`effort`
+   the same way, which raises the routing form only when a real choice
+   exists (§19.3's one-more-form rule). `handler.update` keeps whatever
+   routing the file has; `config.write` with `rechoose_routing` is how it
+   is re-asked.
+5. **`handler.update`** changes `description` and `body` freely, with no
+   form (`approval: "unchanged"`). Any argument that changes the approved
+   half — a different tool set or confirm set, different triggers, a
+   different embed — raises the form again over the **whole** resulting
+   set, prefilled with the levels already approved, and the file is
+   byte-identical until the user submits. Arguments that restate what is
+   already approved change nothing and ask nothing. Budgets, `enabled` and
+   routing keys are carried over untouched.
+6. **Every write commits** and invalidates the handler loader's cache in the
+   same call (F.6), so `schedule.create`'s `consumers` names a handler the
+   run just created.
+
+Both tools are `se` and in the F.7 default chat grant: authoring a handler
+is something the user asks for in chat, and the form — not the tier — is
+the gate. A handler run has no conversation, so a handler granted
+`handler.*` can only ever get `no_conversation`.
+
 All YAML files are validated with zod schemas at load; validation errors
 name the file, key, and expected shape. All markdown frontmatter is YAML
 parsed with gray-matter.
@@ -6193,6 +6984,7 @@ data_defaults:            # Appendix A overrides, same key names
   max_depth: 5
   retry_attempts: 3
   conversation_idle_min: 30
+  conversation_archive_days: 7     # §9 — 0 never archives
 search:
   searxng_url: http://127.0.0.1:8080
 web:                      # §11.2, §23.6 — the two web readers share this block
@@ -6352,9 +7144,26 @@ servers:
     description: …                # optional; the §21.2.2 catalog line
     command: ["npx", "-y", "some-mcp"]   # stdio
     url: …                        # http
-    env:
+    env:                          # stdio
       API_KEY: ${secret:SOME_KEY}
+    headers:                      # http; sent on every request
+      Authorization: ${secret:SOME_SERVICE_CREDENTIAL}
+    auth:                         # http only; browser sign-in (§19.6)
+      type: oauth
+      client_id: …                # optional — a hand-registered app (no DCR)
+      client_secret: ${secret:SOME_SERVICE_OAUTH_CLIENT_SECRET}   # optional; needs client_id
+    read_only_tools: ["some.list_*"]   # tier `ro` for these; the rest `se`
 ```
+
+`auth` on a stdio server, or `client_secret` without `client_id`, is a load
+error. With `auth.type: oauth` the SDK client does discovery (RFC 9728 /
+RFC 8414), dynamic client registration (RFC 7591) when no `client_id` is
+given — a configured `client_id` always wins over registration — PKCE and
+refresh. **PKCE (S256) and `state` are mandatory**: a provider whose
+metadata offers no S256 is refused, and every authorization carries a fresh
+32-byte `state`. Tokens, a registered client and the pending
+verifier/`state` never appear in this file: they are one secret-store blob
+per server, `MCP_OAUTH_<NAME>` (§27).
 
 ### G.6 The secret store (§27)
 
@@ -6408,12 +7217,27 @@ sends is stripped and decided by the form (or kept from what was already
 there). This paragraph describes the *shape* the keys take once written;
 who is allowed to write them is F.6's rule.
 
+**`match`, `watch`, `embed`, `tools` and `confirm` — the approved half — are
+written by `handler.create`/`handler.update` after the user approves them
+on a form (F.20), or by a human editing the file directly — never by the
+model through `config.write`**, which keeps the file's current values
+(F.6). The server writes `tools`/`confirm` as concrete tool names; a glob
+in a file is a human's (or a pre-F.20 file's) and loads exactly as it always
+did. The schema is unchanged: who may write a key is not a shape.
+
 ### G.8 Skill files — `skills/<name>.md`
 
 Frontmatter: `name`, `description` (both required). Body = usage guidance.
 Resolution (§11.1): all descriptions are listed in the system prompt; the
 agent fetches a body via the always-granted `ro` tool
 `skills.fetch {name} → {content}`.
+
+**A skill arrives whole and stays.** The tool takes a name and nothing else,
+so it declares `maxResultChars: 20_000` (§20.3) — a cap it cannot be asked
+to work around — and `neverElide` (§20.4), because a skill body is the run's
+instructions rather than data it can re-fetch for free. A skill that does
+not fit 20k is a skill to split, and it says so in the result like any other
+truncation.
 
 ### G.9 Memory files — `memory/<name>.md`
 
@@ -6684,10 +7508,11 @@ src/
                   #   (the request log's live fan-out, §10.8), wav.ts (the one RIFF
                   #   header reader, §10.9), fixtures/ (the stt probe's checked-in
                   #   stimulus — copied beside the build like prompts/library/)
-  tools/          # dispatcher, grants, run-grant registry (§23.2), mcp-client,
+  tools/          # dispatcher, grants, run-grant registry (§23.2), mcp-client
+                  #   (+ mcp/oauth: the store-backed OAuthClientProvider, §19.6),
                   #   registry, integrations/{memory,schedule,deliver,events,web,config,
                   #   skills,asana,google,files,setup,time,weather,embeds,docs,
-                  #   history,usage,watch,project,print}
+                  #   history,usage,watch,project,print,handler}
                   #   print/ is IPP + eSCL by hand over a pinned-certificate
                   #   transport (§34); setup/records.ts is the one writer of
                   #   config/integrations.yaml, shared by activation and §34.6
@@ -6706,7 +7531,8 @@ src/
   chat/           # chat executor, onboarding flow, form lifecycle (§19)
   egress/         # outbox, channel router, spoken forms of deliveries (§33.3)
   voice/          # §33.2: the /api/voice adapter — transcript in, sentence-chunked speech out
-  net/            # http server, ws server, openai-compat, setup api, voice api (§33)
+  net/            # http server, ws server, openai-compat, setup api, voice api (§33),
+                  #   the MCP OAuth callback page (§19.6)
   scheduler/      # timer loop, rrule advance
   watchers/       # §30 engine: frozen-call poll, extract, diff, state file,
                   #   watch.changed/failed emission; consumes watch.due

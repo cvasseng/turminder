@@ -1,0 +1,155 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Quick note</title>
+<!--
+  The tray's quick note (§28.7): a line typed and left alone, filed as a
+  `note.captured` event with no page attached.
+
+  Shell chrome, built like the overlay — undecorated, always on top, hidden
+  until the tray item needs it. Nothing is fetched from the service: the
+  field, the cap and the keys below are the whole of it, and the box works
+  identically in both modes.
+
+  The core mints the idempotency key and holds the vault token; this page
+  never sees either. Hiding never destroys the window, so the draft — typed
+  and then clicked away from — is still here the next time the tray opens it,
+  for the life of the process, with no code in this file needed to keep it.
+-->
+<style>
+  :root {
+    color-scheme: dark;
+    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  }
+  html,
+  body {
+    margin: 0;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+  }
+  body {
+    display: flex;
+    align-items: stretch;
+    padding: 10px;
+    box-sizing: border-box;
+  }
+  .card {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 10px 12px;
+    border-radius: 14px;
+    background: rgba(22, 24, 28, 0.94);
+    color: #e9ecf1;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  textarea {
+    resize: none;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 14px;
+    line-height: 1.4;
+    padding: 0;
+    /* Four lines' worth; the box grows into this and then scrolls (§28.7:
+       "a single text field that grows to four lines"). */
+    max-height: calc(1.4em * 4);
+    min-height: 1.4em;
+    overflow-y: auto;
+  }
+  textarea::placeholder {
+    color: #7c8494;
+  }
+  .status {
+    min-height: 1.2em;
+    font-size: 12px;
+    line-height: 1.2;
+  }
+  .status.sent {
+    color: #3bc95a;
+  }
+  .status.problem {
+    color: #ffb4a2;
+  }
+</style>
+<div class="card">
+  <textarea
+    id="text"
+    maxlength="2000"
+    placeholder="Add to todo: renew the passport…"
+    rows="1"
+  ></textarea>
+  <div class="status" id="status"></div>
+</div>
+<script>
+  const bridge = window.__TAURI__;
+  const invoke = bridge.core.invoke;
+  const win = bridge.window.getCurrentWindow();
+  const field = document.getElementById('text');
+  const status = document.getElementById('status');
+  let sending = false;
+
+  function say(text, kind) {
+    status.textContent = text;
+    status.className = kind ? `status ${kind}` : 'status';
+  }
+
+  function grow() {
+    field.style.height = 'auto';
+    field.style.height = `${field.scrollHeight}px`;
+  }
+  field.addEventListener('input', grow);
+
+  function hide() {
+    win.hide().catch(() => {});
+  }
+
+  async function send() {
+    const text = field.value.trim();
+    if (!text || sending) return;
+    sending = true;
+    say('Sending…');
+    try {
+      await invoke('quicknote_send', { text });
+      // A brief tick, then gone — the outcome itself arrives as a
+      // notification, not here (§28.7: "the window is not a chat").
+      field.value = '';
+      grow();
+      say('Sent', 'sent');
+      setTimeout(hide, 700);
+    } catch (e) {
+      // The text stays exactly as typed — a failure must not lose it.
+      say(String(e && e.message ? e.message : e), 'problem');
+    } finally {
+      sending = false;
+    }
+  }
+
+  field.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      send();
+    } else if (event.key === 'Escape') {
+      hide();
+    }
+  });
+  field.addEventListener('blur', hide);
+
+  // The window is shown and hidden, never reloaded (that is how the draft
+  // survives, §28.7), so a fresh page load only happens once. Refocusing the
+  // field on every re-show is what makes it ready to type into each time,
+  // rather than only the first.
+  win.onFocusChanged(({ payload: focused }) => {
+    if (focused) {
+      grow();
+      field.focus();
+    }
+  });
+  grow();
+  field.focus();
+</script>

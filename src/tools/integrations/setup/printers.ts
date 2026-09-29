@@ -216,7 +216,11 @@ export async function runPrinterWizard(
       message: 'adding a printer needs a form, and forms are rendered in a chat conversation',
     };
   }
-  const form = { runId: ctx.runId, conversationId: ctx.conversationId };
+  const form = {
+    runId: ctx.runId,
+    conversationId: ctx.conversationId,
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
+  };
   const devices = devicesOf(deps);
 
   /* Which device? A menu of one choice is furniture, so it is skipped. */
@@ -239,6 +243,9 @@ export async function runPrinterWizard(
       ],
     });
     if (!chosen.submitted) return { submitted: false, reason: chosen.reason };
+    // Answered in the instant the call was given up on: nobody is left to
+    // hear which device this was, so nothing further happens (§19.1).
+    if (ctx.signal?.aborted) return { submitted: false, reason: 'abandoned' };
     const picked = String(chosen.values.device ?? ADD).replace(/ \(off\)$/, '');
     target = devices.find((d) => d.name === picked) ?? null;
   }
@@ -248,7 +255,7 @@ export async function runPrinterWizard(
 
 async function addDevice(
   deps: PrinterSetupDeps,
-  form: { runId: string; conversationId: string },
+  form: { runId: string; conversationId: string; signal?: AbortSignal },
   devices: Device[],
 ): Promise<WizardOutcome> {
   // Discovery before the form, not after: the whole point is that the user
@@ -273,6 +280,9 @@ async function addDevice(
     fields: addFields(found),
   });
   if (!submission.submitted) return { submitted: false, reason: submission.reason };
+  // Answered in the instant the call was given up on: nobody is left to hear
+  // whether the probe found anything, so nothing is written (§19.1).
+  if (form.signal?.aborted) return { submitted: false, reason: 'abandoned' };
 
   const typed = String(submission.values.address ?? '').trim();
   const chosen = String(submission.values.found ?? '');
@@ -340,7 +350,7 @@ async function addDevice(
 
 async function editDevice(
   deps: PrinterSetupDeps,
-  form: { runId: string; conversationId: string },
+  form: { runId: string; conversationId: string; signal?: AbortSignal },
   device: Device,
 ): Promise<WizardOutcome> {
   const SAVE = 'save changes';
@@ -370,6 +380,9 @@ async function editDevice(
     ],
   });
   if (!submission.submitted) return { submitted: false, reason: submission.reason };
+  // Answered in the instant the call was given up on: nobody is left to hear
+  // what changed, so nothing is written (§19.1).
+  if (form.signal?.aborted) return { submitted: false, reason: 'abandoned' };
 
   const action = String(submission.values.action ?? SAVE);
   if (action === 'remove it') {

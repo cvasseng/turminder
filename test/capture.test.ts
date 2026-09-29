@@ -134,8 +134,11 @@ describe('capture ingress (§29.3, App. E)', () => {
 });
 
 describe('the App. B trust map (H.2)', () => {
-  it('declares exactly one user field in v1', () => {
-    expect(USER_FIELDS).toEqual({ 'page.captured': ['note'] });
+  it('declares exactly two user fields in v1', () => {
+    expect(USER_FIELDS).toEqual({
+      'page.captured': ['note'],
+      'note.captured': ['text'],
+    });
   });
 
   it('renders the note outside the fence and removes it from the payload', () => {

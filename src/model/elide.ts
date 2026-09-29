@@ -107,10 +107,12 @@ export function storedMarker(chars: number): string {
  *
  * Only tool *results* are touched. Tool calls are cheap and removing one would
  * orphan its result; assistant text and user messages are the conversation.
+ * `neverElide` names the tools that opted out entirely (§20.4).
  */
 export function elideStaleResults(
   messages: ModelMessage[],
   settings: ElisionSettings,
+  neverElide: ReadonlySet<string> = new Set(),
 ): string[] {
   // How many assistant turns come after each position, counted from the end.
   let assistantsAfter = 0;
@@ -127,6 +129,10 @@ export function elideStaleResults(
 
     for (const part of message.content) {
       if (part.type !== 'tool-result') continue;
+      // Declared instructions rather than data (§20.4): a skill body the run
+      // is following. Eliding one buys a few hundred tokens and costs a turn
+      // spent re-fetching the brief, which is the opposite of the trade.
+      if (neverElide.has(part.toolName)) continue;
       const output = part.output;
       // Only the JSON-valued results this system produces; a media result has
       // no comparable size and nothing sensible to put in a marker.

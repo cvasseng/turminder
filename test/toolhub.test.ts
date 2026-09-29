@@ -73,6 +73,7 @@ describe('tool hub (§11.1)', () => {
       'schedule.cancel',
       'schedule.create',
       'schedule.list',
+      'schedule.trigger',
       'skills.fetch',
       'time.now',
       'usage.summary',

@@ -10,7 +10,9 @@ import type { MemoryAgent } from '../memory/agent.js';
 import type { ModelRouter } from '../model/router.js';
 import { budgeted } from './budget.js';
 import { placeholderGuarded } from './placeholder.js';
+import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import { McpConnection } from './mcp/connect.js';
+import { McpOAuth } from './mcp/oauth.js';
 import { configTools } from './integrations/config.js';
 import { eventsTools } from './integrations/events.js';
 import { memoryTools } from './integrations/memory.js';
@@ -57,6 +59,12 @@ export interface ToolHubDeps {
    * layer at all, where nothing consumes a schedule by definition.
    */
   handlers?: () => LoadedHandler[];
+  /**
+   * Drop that loader's cache — `config.write` calls it after writing a
+   * `handlers/*.md`, so the handler a run just authored counts in the very
+   * next `schedule.list` of that same run (§6.2).
+   */
+  onHandlersChanged?: () => void;
   /** Injected in tests so web.search never touches the network. */
   fetch?: typeof globalThis.fetch;
   /**
@@ -64,6 +72,12 @@ export interface ToolHubDeps {
    * can pin the schedule without sleeping through it (constitution rule 4).
    */
   clock?: HubClock;
+  /**
+   * The address the HTTP server really bound (§23.4), for the OAuth redirect
+   * when `gateway.public_url` is unset (§19.6). Late-bound: the hub is built
+   * before the server listens.
+   */
+  origin?: () => string | null;
 }
 
 export interface HubClock {
@@ -97,7 +111,16 @@ export interface McpServerStatus {
   error?: string;
   /** ISO time of the next automatic reconnect attempt, while one is pending. */
   next_retry_at?: string;
+  /**
+   * Down because only a person can fix it — a sign-in to give or renew
+   * (§11.6). Never retried on the backoff loop, and distinct from dropped.
+   */
+  needs_auth?: true;
 }
+
+/** What finishing a sign-in came to (§19.6) — a value, as every expected failure is. */
+export type AuthorizationOutcome =
+  { ok: true; server: string; tools: string[] } | { ok: false; error: string; message: string };
 
 /** Per-server reconnect state (§11.6, App. A `mcp_reconnect_backoff`). */
 interface RetryState {
@@ -118,6 +141,13 @@ export class ToolHub {
   private readonly connections = new Map<string, McpConnection>();
   private readonly external = new Map<string, McpServerStatus>();
   private readonly retries = new Map<string, RetryState>();
+  /** Servers waiting on a person to sign in (§11.6) — off the retry loop. */
+  private readonly needsAuth = new Set<string>();
+  /** Whoever is waiting in a conversation for a sign-in to finish (§19.6). */
+  private readonly authorizedListeners = new Set<
+    (server: string, tools: string[]) => boolean
+  >();
+  private readonly oauth: McpOAuth;
   private tools: ToolHandle[] = [];
   private closed = false;
 
@@ -125,15 +155,29 @@ export class ToolHub {
     readonly skills: SkillLoader,
     private readonly config: Config,
     private readonly clock: HubClock,
-  ) {}
+    private readonly intake: EventIntake,
+    origin?: () => string | null,
+  ) {
+    this.oauth = new McpOAuth({ config, ...(origin ? { origin } : {}) });
+  }
 
   static async create(deps: ToolHubDeps): Promise<ToolHub> {
-    const hub = new ToolHub(deps.skills, deps.config, deps.clock ?? REAL_CLOCK);
+    const hub = new ToolHub(
+      deps.skills,
+      deps.config,
+      deps.clock ?? REAL_CLOCK,
+      deps.intake,
+      deps.origin,
+    );
     // One cache behind both page readers (App. F.5): query, look at
     // match_count, narrow the selector, query again — one download.
     const pages = new PageCache();
     const integrations: Record<string, ToolDefinition[]> = {
-      config: configTools(deps.home, { forms: deps.forms, router: deps.router }),
+      config: configTools(deps.home, {
+        forms: deps.forms,
+        router: deps.router,
+        ...(deps.onHandlersChanged ? { onHandlersChanged: deps.onHandlersChanged } : {}),
+      }),
       events: eventsTools(deps.intake),
       web: [
         ...webTools({
@@ -159,10 +203,14 @@ export class ToolHub {
       schedule: scheduleTools({
         repos: deps.repos,
         graceS: deps.config.settings.scheduleGraceS,
+        intake: deps.intake,
         // Live, and never a snapshot: `consumers` is a fact about the files on
         // disk right now (§6.2), so a handler written during the conversation
         // counts in the very next `schedule.list`.
         handlers: () => deps.handlers?.() ?? [],
+        // The identity's own zone (§6.1) is the one clock this install has;
+        // `when` (§6.2 S2) is rendered in it, the same source `time.now` uses.
+        config: deps.config,
       }),
       time: timeTools({ config: deps.config }),
       weather: weatherTools({
@@ -296,7 +344,11 @@ export class ToolHub {
     await this.openExternal(cfg);
     await this.refresh();
     const status = this.external.get(name)!;
-    return { ...status, tools: this.toolsFrom(name) };
+    return {
+      ...status,
+      tools: this.toolsFrom(name),
+      ...(this.needsAuth.has(name) ? { needs_auth: true as const } : {}),
+    };
   }
 
   /**
@@ -321,8 +373,144 @@ export class ToolHub {
         tools: this.toolsFrom(cfg.name),
         ...(error ? { error } : {}),
         ...(nextAt ? { next_retry_at: new Date(nextAt).toISOString() } : {}),
+        ...(this.needsAuth.has(cfg.name) ? { needs_auth: true as const } : {}),
       };
     });
+  }
+
+  /** The one redirect every sign-in uses (§19.6) — what a hand-registered app must list. */
+  oauthRedirectUri(): string {
+    return this.oauth.redirectUri();
+  }
+
+  /** Is a sign-in link out for this server that nobody has come back from? */
+  hasPendingAuthorization(name: string): boolean {
+    return this.oauth.hasPending(name);
+  }
+
+  /**
+   * Start a sign-in for a person to finish (§19.6): a link, or — when a
+   * refresh still works — a reconnect with nothing to approve. The link is
+   * handed back, never logged; the caller puts it in front of the human.
+   */
+  async beginAuthorization(
+    name: string,
+  ): Promise<
+    | { authorized: true; tools: string[] }
+    | { auth_url: string; redirect_uri: string }
+    | { error: string; message: string }
+  > {
+    const cfg = this.config.mcp().servers.find((s) => s.name === name);
+    if (!cfg)
+      return { error: 'unknown_server', message: `no server named "${name}" in mcp.yaml` };
+    const begun = await this.oauth.begin(cfg);
+    if (!('authorized' in begun)) return begun;
+    this.needsAuth.delete(name);
+    await this.openExternal(cfg);
+    await this.refresh();
+    if (!this.connections.get(name)?.alive) {
+      return { error: 'connect_failed', message: this.unreachable(name) };
+    }
+    return { authorized: true, tools: this.toolsFrom(name) };
+  }
+
+  /**
+   * Finish a sign-in from what the browser came back with (§19.6) — the
+   * callback route, or an address pasted into the D.5 fallback form. `state`
+   * is the gate: unguessable, single-use, matched against the store. Then the
+   * §11.6 path: reconnect, re-list, and announce with
+   * `system.integration_activated` — unless a conversation is waiting on this
+   * very sign-in, which then hears it as its own tool result instead of as a
+   * second notification.
+   */
+  async completeAuthorization(
+    params: { code: string; state: string },
+    opts: { announce?: boolean } = {},
+  ): Promise<AuthorizationOutcome> {
+    const cfg = this.oauth.serverForState(params.state, this.config.mcp().servers);
+    if (!cfg) {
+      return {
+        ok: false,
+        error: 'unknown_state',
+        message: 'this sign-in link was already used, or was not issued by this assistant',
+      };
+    }
+    const finished = await this.oauth.finish(cfg, params.code);
+    if ('error' in finished) return { ok: false, ...finished };
+    this.needsAuth.delete(cfg.name);
+    await this.openExternal(cfg);
+    await this.refresh();
+    if (!this.connections.get(cfg.name)?.alive) {
+      return {
+        ok: false,
+        error: 'connect_failed',
+        message: `signed in, but ${this.unreachable(cfg.name)}`,
+      };
+    }
+    const tools = this.toolsFrom(cfg.name);
+    let claimed = false;
+    for (const listener of [...this.authorizedListeners]) {
+      if (listener(cfg.name, tools)) claimed = true;
+    }
+    if (opts.announce !== false && !claimed) {
+      this.intake.submit({
+        type: 'system.integration_activated',
+        source: 'system',
+        payload: { integration: cfg.name, tools },
+        idempotency_key: `mcp:${cfg.name}:${new Date(this.clock.now()).toISOString()}`,
+      });
+    }
+    l.info({ server: cfg.name, tools: tools.length }, 'external mcp server signed in');
+    return { ok: true, server: cfg.name, tools };
+  }
+
+  /**
+   * Hear about a finished sign-in. Return true to claim it — "a conversation
+   * is showing this person a form about exactly this" — which suppresses the
+   * `system.integration_activated` notice (§19.6).
+   */
+  onAuthorized(listener: (server: string, tools: string[]) => boolean): () => void {
+    this.authorizedListeners.add(listener);
+    return () => this.authorizedListeners.delete(listener);
+  }
+
+  /** The one wording for "sign in again", naming the tool that does it. */
+  private signInAgain(name: string): string {
+    return (
+      `the ${name} server needs the user to sign in` +
+      (this.oauth.everAuthorized(name)
+        ? ' again (the last sign-in expired or was withdrawn)'
+        : '') +
+      `. Call setup.activate {integration: "${name}"} to get them a sign-in link.`
+    );
+  }
+
+  /**
+   * A server moved to `needs_auth` (§11.6). Off the retry loop — no backoff
+   * cures a missing sign-in, and each attempt would mint a link nobody sees.
+   * A server that *had* worked gets one notice on the failure rail
+   * (App. B `system.integration_needs_auth`), so a refresh that dies at 3am
+   * is not a silent absence at 9. The link is not in it: it is minted when
+   * someone asks, so a notice is never a stale or leaked sign-in.
+   */
+  private markNeedsAuth(name: string): string {
+    this.stopRetrying(name);
+    if (!this.needsAuth.has(name)) {
+      this.needsAuth.add(name);
+      if (this.oauth.everAuthorized(name)) {
+        this.intake.submit({
+          type: 'system.integration_needs_auth',
+          source: 'system',
+          payload: {
+            integration: name,
+            message: `The sign-in to ${name} has expired or was withdrawn, so its tools are unavailable until you sign in again — ask to sign in to ${name}.`,
+          },
+          idempotency_key: `mcp-auth:${name}:${new Date(this.clock.now()).toISOString()}`,
+        });
+      }
+      l.warn({ server: name }, 'external mcp server needs a sign-in');
+    }
+    return this.signInAgain(name);
   }
 
   /**
@@ -338,11 +526,15 @@ export class ToolHub {
    */
   private async reviveServer(
     name: string,
-  ): Promise<{ ok: true } | { ok: false; message: string }> {
+  ): Promise<{ ok: true } | { ok: false; message: string; error?: 'needs_auth' }> {
     const cfg = this.config.mcp().servers.find((s) => s.name === name);
     if (!cfg) {
       this.stopRetrying(name);
       return { ok: false, message: `${name} is no longer configured in mcp.yaml` };
+    }
+    // Reconnecting cannot give a sign-in; only the person can (§11.6).
+    if (this.needsAuth.has(name)) {
+      return { ok: false, error: 'needs_auth', message: this.signInAgain(name) };
     }
     const conn = this.connections.get(name);
     // No connection object at all is the "never came up" case — a server whose
@@ -350,14 +542,27 @@ export class ToolHub {
     // because from the user's side they are the same fault (§11.6).
     if (!conn) {
       await this.openExternal(cfg);
+      if (this.needsAuth.has(name)) {
+        return { ok: false, error: 'needs_auth', message: this.signInAgain(name) };
+      }
       if (!this.connections.has(name)) return { ok: false, message: this.unreachable(name) };
       await this.refresh();
       return { ok: true };
     }
     if (conn.alive) return { ok: true };
     try {
-      await conn.reconnect(cfg);
+      await conn.reconnect(cfg, this.oauth.providerFor(cfg));
     } catch (e) {
+      if (e instanceof UnauthorizedError && cfg.auth?.type === 'oauth') {
+        this.external.set(name, {
+          name,
+          transport: cfg.transport,
+          connected: false,
+          tools: [],
+          error: 'sign-in required',
+        });
+        return { ok: false, error: 'needs_auth', message: this.markNeedsAuth(name) };
+      }
       const message = errMessage(e);
       this.external.set(name, {
         name,
@@ -436,6 +641,7 @@ export class ToolHub {
   async close(): Promise<void> {
     this.closed = true;
     for (const name of [...this.retries.keys()]) this.stopRetrying(name);
+    this.authorizedListeners.clear();
     for (const conn of this.connections.values()) await conn.close();
     this.connections.clear();
     this.external.clear();
@@ -452,13 +658,16 @@ export class ToolHub {
   private async openExternal(cfg: McpYaml['servers'][number]): Promise<void> {
     await this.drop(cfg.name);
     try {
-      const conn = await McpConnection.external(cfg);
+      const authProvider = this.oauth.providerFor(cfg);
+      const conn = await McpConnection.external(cfg, authProvider);
       // The connection asks the hub to revive it when a call finds it dead:
       // re-reading `mcp.yaml` and re-listing the catalog are hub concerns, and
       // the connection has no business knowing about either.
       conn.revive = () => this.reviveServer(cfg.name);
+      if (authProvider) conn.onUnauthorized = () => this.markNeedsAuth(cfg.name);
       this.connections.set(cfg.name, conn);
       this.stopRetrying(cfg.name);
+      this.needsAuth.delete(cfg.name);
       this.external.set(cfg.name, {
         name: cfg.name,
         transport: cfg.transport,
@@ -467,6 +676,19 @@ export class ToolHub {
       });
       l.info({ server: cfg.name, transport: cfg.transport }, 'connected external mcp server');
     } catch (e) {
+      // Not reachable-but-broken: reachable and asking for a person (§11.6).
+      // A value, never a crash, and never on the backoff loop.
+      if (e instanceof UnauthorizedError && cfg.auth?.type === 'oauth') {
+        this.external.set(cfg.name, {
+          name: cfg.name,
+          transport: cfg.transport,
+          connected: false,
+          tools: [],
+          error: 'sign-in required',
+        });
+        this.markNeedsAuth(cfg.name);
+        return;
+      }
       // A broken MCP server is a degraded assistant, not a dead one.
       this.external.set(cfg.name, {
         name: cfg.name,

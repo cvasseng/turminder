@@ -68,10 +68,22 @@ export interface ProbeResult {
   error?: string;
 }
 
-/** Accepts `http://host:8080` or `http://host:8080/v1` and derives both forms. */
+/**
+ * Accepts `http://host:8080` or `http://host:8080/v1` and derives both forms.
+ *
+ * Also strips a pasted-in route (§10.2, K3): the speech-setup replay that
+ * prompted this submitted `.../v1/audio/speech` as the "base URL" — the exact
+ * address a curl test just used, rather than the root the form asked for —
+ * and the probe then 404'd against `.../v1/audio/speech/chat/completions`.
+ * `/audio/*`, `/chat/completions` and `/models` are the three routes this
+ * ecosystem serves at a fixed path off the root, so trimming them off is safe
+ * for every caller of this function, not only the one that meant to type less.
+ */
 export function normaliseEndpointUrl(raw: string): { api: string; root: string } {
   let url = raw.trim();
   if (!/^https?:\/\//i.test(url)) url = `http://${url}`;
+  url = url.replace(/\/+$/, '');
+  url = url.replace(/\/(audio\/[^/]+|chat\/completions|models)$/i, '');
   url = url.replace(/\/+$/, '');
   const root = url.replace(/\/v\d+$/i, '');
   const api = /\/v\d+$/i.test(url) ? url : `${root}/v1`;

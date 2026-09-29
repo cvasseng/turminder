@@ -28,7 +28,9 @@ const ICONS = {
   check: '<path d="M20 6 9 17l-5-5"/>',
   'arrow-left': '<path d="M19 12H5"/><path d="m12 19-7-7 7-7"/>',
   send: '<path d="M22 2 11 13"/><path d="M22 2l-7 20-4-9-9-4Z"/>',
-  stop: '<rect x="7" y="7" width="10" height="10" rx="1.5"/>',
+  // Filled rather than outlined, and most of the 24px box: a stop control
+  // reads at a glance or it has failed at its one job (§9.1).
+  stop: '<rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/>',
   trash:
     '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M18.5 6 17.6 20a1 1 0 0 1-1 1H7.4a1 1 0 0 1-1-1L5.5 6"/><path d="M10 11v6M14 11v6"/>',
   chevron: '<path d="m9 18 6-6-6-6"/>',
@@ -45,6 +47,14 @@ const ICONS = {
     '<path d="M21.4 11.05 12.25 20.2a5.5 5.5 0 0 1-7.78-7.78l9.2-9.2a3.67 3.67 0 1 1 5.18 5.19l-9.2 9.19a1.83 1.83 0 1 1-2.6-2.6l8.5-8.48"/>',
   logout:
     '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
+  // The strip's account overflow at phone width (§9.1) — three filled dots
+  // read as "more" without a label the strip has no room for.
+  more: '<circle cx="5" cy="12" r="1.8" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.8" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.8" fill="currentColor" stroke="none"/>',
+  focus: '<circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/>',
+  'external-link':
+    '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/>',
+  // Not a delete (§22.1) — a minus, not the trash can already in the map.
+  unkeep: '<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/>',
 };
 
 function iconSvg(name) {
@@ -77,6 +87,8 @@ const DRAWER_KEY = 'turminder.drawer';
 const FOLDERS_KEY = 'turminder.foldersClosed';
 /** The two draggable column widths (§9.1). */
 const WIDTH_KEYS = { sidebar: 'turminder.sidebarWidth', drawer: 'turminder.drawerWidth' };
+/** Focus mode (§9.1), persisted the same way the sidebar's own collapse is. */
+const FOCUS_KEY = 'turminder.focus';
 
 /** App. A `pair_poll_interval_s` — the waiting gate's claim poll (§24.4). */
 const PAIR_POLL_MS = 2000;
@@ -102,6 +114,7 @@ const REQUIRED_FRAMES = [
 
 /** Frames this page renders and would quietly miss if the server were older. */
 const EXPECTED_FROM_SERVER = [
+  'delivery.missed',
   'event.list.result',
   'event.status',
   'calls.list.result',
@@ -208,8 +221,12 @@ const state = {
    * The activity panel (§4.2.1). `rows` is a live window over the event
    * lifecycle keyed by event id, filled by `event.list` and kept true by
    * `event.status` pushes — never the source of truth, always re-derivable.
+   * `missed` is the "while you were away" list (§7.1): notifies nobody was
+   * connected to see, replaced wholesale by each `delivery.missed` on hello.
+   * An entry is `{frame, read}`; reading one acks it, which is what keeps it
+   * out of the next hello's list.
    */
-  activity: { rows: new Map(), deliveries: [] },
+  activity: { rows: new Map(), deliveries: [], missed: [] },
   /**
    * The request log (§10.8): a live window over `llm_call` rows, newest
    * first. `rows` is replaced wholesale by `calls.list.result` and kept true
@@ -232,6 +249,10 @@ const state = {
   devices: [],
   /** Uploads waiting to be sent with the next message (§26.2). */
   pending: [],
+  /** The mic button's own state (§33.6): the live `MediaRecorder` and its
+   *  chunks while recording, null otherwise — never both null and mid-request,
+   *  which is what `busy` is for. */
+  voice: { recorder: null, chunks: [], busy: false },
   /** Endpoints and this conversation's override (§10.6). */
   models: { endpoints: [], override: null, effort: null, pending: null },
   retryMs: 500,
@@ -246,6 +267,16 @@ const state = {
 function token() {
   const t = localStorage.getItem(TOKEN_KEY);
   return t && t.trim();
+}
+
+// Ask the browser to keep this origin's storage rather than evict it under
+// storage pressure, which is one way a phone quietly loses the token and asks
+// to be paired again (§24.4). Best effort: browsers may decline, and older ones
+// have no such call at all.
+try {
+  navigator.storage?.persist?.().catch(() => {});
+} catch {
+  /* no storage manager: nothing to ask */
 }
 
 /**
@@ -1603,6 +1634,15 @@ function handle(frame) {
       showDelivery(p);
       break;
 
+    // Never toasted and never put in the transcript: these are notifications
+    // whose moment passed while nobody was connected, so they wait in the
+    // drawer to be read, quietly (§7.1). The list is the truth on arrival.
+    case 'delivery.missed':
+      state.activity.missed = (p.deliveries || []).map((frame) => ({ frame, read: false }));
+      refreshActivityTab();
+      if (state.drawer === 'activity') renderActivity();
+      break;
+
     case 'form.request':
       if (p.conversation_id && p.conversation_id !== state.conversationId) break;
       showForm(p);
@@ -1715,6 +1755,25 @@ function handle(frame) {
     case 'form.accepted': {
       const entry = state.forms.get(p.form_id);
       if (entry) entry.settle('sent');
+      break;
+    }
+
+    // The server gave up waiting (App. D `form.closed`, src/chat/forms.ts):
+    // an unknown id is a form this tab never rendered — a reconnect on
+    // another device, or one already settled here — and gets ignored rather
+    // than conjuring a card for it. `settle` is also what a normal accept
+    // does: it wipes the fields and buttons so there is nothing left to
+    // resubmit, which is what "never re-send it" means for a form already
+    // closed server-side.
+    case 'form.closed': {
+      const entry = state.forms.get(p.form_id);
+      if (entry) {
+        entry.settle(
+          p.reason === 'timeout'
+            ? 'This form was closed — the request timed out.'
+            : 'This form was closed — the request was abandoned.',
+        );
+      }
       break;
     }
 
@@ -1977,50 +2036,92 @@ function shortTime(iso) {
 }
 
 /**
- * One row: the title, what kind of view it is, and a link to the standalone
- * page. Rows for views in this conversation also scroll the transcript to them,
- * which is what the panel is for — long conversations bury a chart fast.
+ * "3h ago", not a timestamp — the panel already reads left to right as
+ * newest-first within a group, so what a reader wants here is how stale
+ * something is, not what o'clock it happened at (that is still the tooltip).
+ */
+function relativeTime(iso) {
+  const at = new Date(iso).getTime();
+  if (Number.isNaN(at)) return '';
+  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+  const steps = [
+    [60, 'second'],
+    [60, 'minute'],
+    [24, 'hour'],
+    [7, 'day'],
+    [4.345, 'week'],
+    [12, 'month'],
+    [Number.POSITIVE_INFINITY, 'year'],
+  ];
+  let duration = (at - Date.now()) / 1000;
+  for (const [amount, unit] of steps) {
+    if (Math.abs(duration) < amount) return rtf.format(Math.round(duration), unit);
+    duration /= amount;
+  }
+  return rtf.format(Math.round(duration), 'year');
+}
+
+/**
+ * One row: the title, and — for the kept shelf, the only place `updated_at`
+ * exists (`embed.list.result`, App. D) — a relative time. A view still in
+ * this conversation has nothing in the protocol to date it by, so it gets no
+ * time rather than a made-up one; adding that field is a spec change this
+ * task does not make. Rows for views in this conversation also scroll the
+ * transcript to them, which is what the panel is for.
  */
 function embedRow(info, jumpable) {
   const entry = document.createElement('div');
-  entry.className = jumpable ? 'file-entry embed-entry jumpable' : 'file-entry embed-entry';
+  entry.className = jumpable ? 'embed-row jumpable' : 'embed-row';
+
   const name = document.createElement('span');
-  name.className = 'file-path';
+  name.className = 'embed-row-title';
   name.textContent = info.title || 'untitled view';
-  const kind = document.createElement('span');
-  kind.className = 'embed-kind';
-  kind.textContent = info.kind === 'persistent' ? 'kept' : '';
-  const link = document.createElement('a');
-  link.className = 'embed-open';
-  const openHref = embedUrl(info.url);
-  if (openHref) link.href = openHref;
-  link.target = '_blank';
-  link.rel = 'noopener noreferrer';
-  link.textContent = 'open';
-  // The link is inside a clickable row; without this, opening it also jumps.
-  link.onclick = (e) => e.stopPropagation();
-  if (jumpable) {
-    entry.title = 'Scroll to it in the conversation';
-    entry.onclick = () => jumpToEmbed(info.embed_id);
+  entry.append(name);
+
+  if (info.updated_at) {
+    const time = document.createElement('span');
+    time.className = 'embed-row-time';
+    time.textContent = relativeTime(info.updated_at);
+    time.title = shortTime(info.updated_at);
+    entry.append(time);
   }
-  entry.append(name, kind, link);
+
+  const open = document.createElement('a');
+  open.className = 'embed-row-btn';
+  const openHref = embedUrl(info.url);
+  if (openHref) open.href = openHref;
+  open.target = '_blank';
+  open.rel = 'noopener noreferrer';
+  open.title = 'Open in its own tab';
+  open.setAttribute('aria-label', 'Open in its own tab');
+  open.innerHTML = iconSvg('external-link');
+  // The link is inside a clickable row; without this, opening it also jumps.
+  open.onclick = (e) => e.stopPropagation();
+  entry.append(open);
   // Unkeeping belongs here rather than on the embed's own toolbar (§22.6):
   // the panel is where you decide what is worth keeping, the toolbar is where
   // you act on a view you are looking at.
   if (info.kind === 'persistent') entry.append(unkeepButton(info));
+
+  if (jumpable) {
+    entry.title = 'Scroll to it in the conversation';
+    entry.onclick = () => jumpToEmbed(info.embed_id);
+  }
   return entry;
 }
 
 /**
- * The mirror of the toolbar's "Keep" (§22.1). Not a delete, and the wording has
- * to earn that distinction — the view and its link survive; what it loses is
- * permanence, and with it a place in the data repo's history.
+ * The mirror of the toolbar's "Keep" (§22.1). Not a delete, and the icon has
+ * to earn that distinction as much as the old wording did — a minus, not the
+ * trash can already in this panel's action list.
  */
 function unkeepButton(info) {
   const unkeep = document.createElement('button');
-  unkeep.className = 'embed-unkeep';
-  unkeep.textContent = 'unkeep';
+  unkeep.type = 'button';
+  unkeep.className = 'embed-row-btn embed-row-unkeep';
+  unkeep.innerHTML = iconSvg('unkeep');
   unkeep.title = 'Stop keeping this view permanently';
+  unkeep.setAttribute('aria-label', 'Stop keeping this view permanently');
   unkeep.onclick = async (e) => {
     // Inside a row that may itself be clickable.
     e.stopPropagation();
@@ -2038,17 +2139,19 @@ function unkeepButton(info) {
   return unkeep;
 }
 
-function embedGroup(label) {
+function embedGroup(label, count) {
   const head = document.createElement('div');
   head.className = 'embed-group';
-  head.textContent = label;
+  head.textContent = `${label} · ${count}`;
   return head;
 }
 
 /**
  * The views panel (§22.6): what this conversation shows, then the kept shelf.
  * The first group is the point of the panel — a reference list for the chat you
- * are reading; the second is the small set of views that outlive it.
+ * are reading; the second is the small set of views that outlive it. Every
+ * row in the "kept" group is already a kept one, so a label repeating that
+ * inside the group would say nothing the heading did not.
  */
 function renderEmbedList() {
   const box = $('embed-list');
@@ -2059,18 +2162,18 @@ function renderEmbedList() {
   const kept = state.embeds.entries.filter((row) => !here.has(row.id));
 
   if (inChat.length) {
-    box.append(embedGroup('in this conversation'));
+    box.append(embedGroup('in this conversation', inChat.length));
     for (const info of inChat) box.append(embedRow(info, true));
   }
   if (kept.length) {
-    box.append(embedGroup('kept'));
+    box.append(embedGroup('kept', kept.length));
     for (const row of kept) {
       box.append(embedRow({ ...row, embed_id: row.id }, false));
     }
   }
   if (!inChat.length && !kept.length) {
     const empty = document.createElement('div');
-    empty.className = 'file-empty';
+    empty.className = 'embed-empty';
     empty.textContent = 'no views yet';
     box.append(empty);
   }
@@ -2095,12 +2198,6 @@ function embedsAvailable() {
   return state.embeds.inChat.size > 0 || state.embeds.entries.length > 0;
 }
 
-/**
- * On screen only when the user wants it *and* there is something in it. Two
- * conditions rather than one, because a conversation switch empties the panel
- * before the new transcript's markers have resolved: turning the preference off
- * there would mean the panel shuts on every switch and never comes back.
- */
 /**
  * The tab is only reachable when there is something behind it. Nothing to show
  * is a disabled tab rather than an empty panel.
@@ -2147,7 +2244,8 @@ const ACTIVITY_STATES = {
  */
 function refreshActivityTab() {
   const rows = [...state.activity.rows.values()];
-  const owed = state.activity.deliveries.length;
+  const unread = state.activity.missed.filter((entry) => !entry.read).length;
+  const owed = state.activity.deliveries.length + unread;
   const count = rows.length + owed;
   const button = $('tab-activity');
   if (!count) {
@@ -2247,17 +2345,83 @@ function deliveryRow(delivery) {
   return el;
 }
 
+/** Settles a missed notification: reading or dismissing it is its ack (§7.1). */
+function readMissed(entry) {
+  if (entry.read) return;
+  entry.read = true;
+  send('ack', { delivery_id: entry.frame.delivery_id });
+  refreshActivityTab();
+}
+
+/**
+ * One notification from while you were away (§7.1). Collapsed to its title;
+ * opening it shows the body and acks it. Its actions are not offered — a
+ * button whose moment has passed would answer a question nobody is asking.
+ */
+function missedRow(entry) {
+  const payload = entry.frame.payload || {};
+  const el = document.createElement('div');
+  el.className = `act-row missed${entry.read ? ' read' : ''}`;
+
+  const what = document.createElement('button');
+  what.type = 'button';
+  what.className = 'what missed-open';
+  what.textContent = payload.title || '(untitled)';
+  what.setAttribute('aria-expanded', 'false');
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const badge = document.createElement('span');
+  badge.className = 'state';
+  badge.textContent = entry.read ? 'read' : 'missed';
+  const when = document.createElement('span');
+  when.textContent = whenText(entry.frame.created_at);
+  const dismiss = document.createElement('button');
+  dismiss.type = 'button';
+  dismiss.className = 'link';
+  dismiss.textContent = 'dismiss';
+  dismiss.onclick = () => {
+    readMissed(entry);
+    state.activity.missed = state.activity.missed.filter((e) => e !== entry);
+    renderActivity();
+  };
+  meta.append(badge, when, dismiss);
+
+  const body = document.createElement('div');
+  body.className = 'missed-body';
+  body.textContent = payload.body || '';
+  body.hidden = true;
+
+  what.onclick = () => {
+    body.hidden = !body.hidden;
+    what.setAttribute('aria-expanded', String(!body.hidden));
+    readMissed(entry);
+    el.classList.add('read');
+    badge.textContent = 'read';
+  };
+  el.append(what, meta, body);
+  return el;
+}
+
 /**
  * Newest first, with what owes *you* something at the top: an approval waiting
- * on a click outranks a handler quietly getting on with its work.
+ * on a click outranks a handler quietly getting on with its work, and both
+ * outrank what arrived while you were away, which is only owed a reading.
  */
 function renderActivity() {
   const list = $('activity-list');
   list.textContent = '';
   const rows = [...state.activity.rows.values()].sort((a, b) => (a.id < b.id ? 1 : -1));
   for (const delivery of state.activity.deliveries) list.append(deliveryRow(delivery));
+  if (state.activity.missed.length) {
+    const heading = document.createElement('div');
+    heading.className = 'act-heading';
+    heading.textContent = 'While you were away';
+    list.append(heading);
+    for (const entry of state.activity.missed) list.append(missedRow(entry));
+  }
   for (const row of rows) list.append(activityRow(row));
-  if (!rows.length && !state.activity.deliveries.length) {
+  if (!rows.length && !state.activity.deliveries.length && !state.activity.missed.length) {
     const empty = document.createElement('div');
     empty.className = 'empty';
     empty.textContent = 'Nothing in flight.';
@@ -2775,6 +2939,224 @@ for (const type of ['dragover', 'drop']) {
   });
 }
 
+/* ── the chat UI as a voice client (§33.6) ───────────────────────────────
+ * A click records with `MediaRecorder`; a click stops it and posts the
+ * result to `/api/voice`. `MediaRecorder` never produces `audio/wav` —
+ * Chrome/Firefox record `audio/webm` (opus), Safari `audio/mp4` — and
+ * `/api/voice` accepts only `audio/wav` (§33.2), so the clip is decoded and
+ * re-encoded here rather than widening the route to sniff a browser's
+ * container.
+ */
+
+/** Every status `/api/voice` can answer (App. E), in the reader's terms. */
+function voiceErrorMessage(status, body) {
+  switch (body?.error) {
+    case 'too_long':
+      return body.message || 'that recording was too long';
+    case 'unsupported_media_type':
+      return "the server didn't accept that recording";
+    case 'nothing_heard':
+      return "didn't catch that — try again";
+    case 'speech_failed':
+      return 'the speech service failed — try again in a moment';
+    case 'no_speech_endpoint':
+      return 'no speech endpoint is configured yet';
+    default:
+      return body?.message || `voice request failed: HTTP ${status}`;
+  }
+}
+
+/** RFC 8187 (App. E): `UTF-8''<percent-encoded>`, the same encoding
+ *  `x-turminder-transcript` uses for the user's own words in their own
+ *  language. */
+function decodeRfc8187(value) {
+  if (!value) return '';
+  const match = /^UTF-8''(.*)$/i.exec(value.trim());
+  try {
+    return decodeURIComponent(match ? match[1] : value);
+  } catch {
+    return match ? match[1] : value;
+  }
+}
+
+/** Every channel averaged into one — a mix rather than just the first track. */
+function downmixToMono(buffer) {
+  const { numberOfChannels: channels, length } = buffer;
+  const out = new Float32Array(length);
+  for (let c = 0; c < channels; c++) {
+    const data = buffer.getChannelData(c);
+    for (let i = 0; i < length; i++) out[i] += data[i] / channels;
+  }
+  return out;
+}
+
+/** Linear interpolation — plenty for speech, and there is no dependency here
+ *  to resample better with (App. J). */
+function resampleLinear(samples, fromRate, toRate) {
+  if (fromRate === toRate) return samples;
+  const ratio = fromRate / toRate;
+  const out = new Float32Array(Math.round(samples.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const pos = i * ratio;
+    const i0 = Math.floor(pos);
+    const i1 = Math.min(i0 + 1, samples.length - 1);
+    const frac = pos - i0;
+    out[i] = samples[i0] * (1 - frac) + samples[i1] * frac;
+  }
+  return out;
+}
+
+/** A plain RIFF/WAVE header around 16-bit PCM — the one format `/api/voice`
+ *  accepts (§33.2, §33.6). */
+function encodeWav(samples, sampleRate) {
+  const dataSize = samples.length * 2;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  const str = (offset, s) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+  };
+  str(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  str(8, 'WAVE');
+  str(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byte rate (mono, 16-bit)
+  view.setUint16(32, 2, true); // block align
+  view.setUint16(34, 16, true); // bits per sample
+  str(36, 'data');
+  view.setUint32(40, dataSize, true);
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++, offset += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+/** Whatever `MediaRecorder` produced, decoded and re-encoded as 16 kHz mono
+ *  WAV (§33.6). */
+async function toVoiceWav(blob) {
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AudioCtx();
+  let audioBuffer;
+  try {
+    audioBuffer = await ctx.decodeAudioData(await blob.arrayBuffer());
+  } finally {
+    void ctx.close();
+  }
+  const mono = downmixToMono(audioBuffer);
+  return encodeWav(resampleLinear(mono, audioBuffer.sampleRate, 16000), 16000);
+}
+
+/** The first container `MediaRecorder` actually supports here, so the
+ *  recording (not just the eventual WAV) is something `decodeAudioData` can
+ *  read back. */
+function recorderMimeType() {
+  for (const type of ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']) {
+    if (window.MediaRecorder?.isTypeSupported?.(type)) return type;
+  }
+  return '';
+}
+
+function setMicRecording(on) {
+  const mic = $('mic');
+  mic.setAttribute('aria-pressed', String(on));
+  mic.title = on ? 'Stop recording' : 'Record a voice message';
+  mic.setAttribute('aria-label', mic.title);
+  paintIcon(mic, on ? 'stop' : 'mic');
+}
+
+async function startRecording() {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    addMessage('error', `couldn't reach the microphone: ${e.message}`, 'error');
+    return;
+  }
+  const type = recorderMimeType();
+  const recorder = type
+    ? new MediaRecorder(stream, { mimeType: type })
+    : new MediaRecorder(stream);
+  state.voice.recorder = recorder;
+  state.voice.chunks = [];
+  recorder.ondataavailable = (e) => {
+    if (e.data.size) state.voice.chunks.push(e.data);
+  };
+  recorder.onstop = () => {
+    for (const track of stream.getTracks()) track.stop();
+    void sendRecording(new Blob(state.voice.chunks, { type: recorder.mimeType }));
+  };
+  recorder.start();
+  setMicRecording(true);
+}
+
+function stopRecording() {
+  state.voice.recorder?.stop();
+  state.voice.recorder = null;
+  setMicRecording(false);
+}
+
+/**
+ * One utterance in, one reply out (§33.2, §33.6). The reply plays the same
+ * way the voice-field preview already does (§33.5); the headers name what
+ * was heard and where it landed. Already viewing that conversation: echo the
+ * transcript the way a typed message is echoed before the server confirms it
+ * (`$('composer').onsubmit`) — the reply itself is already streaming in live,
+ * because `chat.delta` for this conversation id is not new to this session.
+ * Anywhere else: switch to it, the same way `chat.accepted` moving a turn
+ * elsewhere already does.
+ */
+async function sendRecording(rawBlob) {
+  state.voice.busy = true;
+  $('mic').disabled = true;
+  try {
+    const wav = await toVoiceWav(rawBlob);
+    const res = await fetch('/api/voice', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token()}`, 'content-type': 'audio/wav' },
+      body: wav,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      addMessage('error', voiceErrorMessage(res.status, body), 'error');
+      return;
+    }
+    const conversationId = res.headers.get('x-turminder-conversation');
+    const transcript = decodeRfc8187(res.headers.get('x-turminder-transcript'));
+    if (conversationId && conversationId === state.conversationId) {
+      if (transcript) addMessage('user', transcript);
+    } else if (conversationId) {
+      selectConversation(conversationId);
+      refreshConversations();
+    }
+    const url = URL.createObjectURL(await res.blob());
+    const audio = new Audio(url);
+    audio.addEventListener('ended', () => URL.revokeObjectURL(url), { once: true });
+    audio.addEventListener('error', () => URL.revokeObjectURL(url), { once: true });
+    await audio.play();
+  } catch (e) {
+    addMessage('error', `voice request failed: ${e.message}`, 'error');
+  } finally {
+    state.voice.busy = false;
+    $('mic').disabled = false;
+  }
+}
+
+// Hidden, not disabled, wherever this cannot work (§24.4, §33.6): a plain
+// HTTP LAN install never grows a control with nothing behind it.
+if (isSecureContext && navigator.mediaDevices && window.MediaRecorder) {
+  $('mic').hidden = false;
+  $('mic').onclick = () => {
+    if (state.voice.busy) return;
+    if (state.voice.recorder) stopRecording();
+    else void startRecording();
+  };
+}
+
 /** The stop button exists exactly while this conversation has a run in flight. */
 function refreshStop() {
   $('stop').hidden = !(state.conversationId && state.running.has(state.conversationId));
@@ -3144,7 +3526,12 @@ function dismissSheets() {
 }
 
 function restorePanes() {
-  setCollapsed(localStorage.getItem(COLLAPSED_KEY) === '1', false);
+  // Focus mode forces the sidebar shut regardless of the wide-layout
+  // preference (§9.1); a resize back into column mode must not undo that.
+  setCollapsed(
+    document.body.classList.contains('focus') || localStorage.getItem(COLLAPSED_KEY) === '1',
+    false,
+  );
   // An unknown key — a stale preference, a hand-edited store — reads as closed
   // rather than putting the drawer in a state with no tab to leave it by.
   setDrawer(localStorage.getItem(DRAWER_KEY), false);
@@ -3182,6 +3569,13 @@ document.addEventListener('keydown', (e) => {
   // A <dialog> handles its own Escape; closing the sheets underneath it too
   // would dismiss two things for one keypress.
   if (document.querySelector('dialog[open]')) return;
+  // The strip that would otherwise carry the way out is exactly what focus
+  // mode hides (§9.1) — this and the floating corner control are the only
+  // two ways back, so Esc has to work from anywhere, not just the composer.
+  if (document.body.classList.contains('focus')) {
+    setFocus(false);
+    return;
+  }
   if (!document.body.classList.contains('sheet-open')) return;
   closeAllPanes();
 });
@@ -3258,6 +3652,51 @@ $('expand').onclick = () => {
   setCollapsed(false);
   soloPane('sidebar');
 };
+
+/**
+ * Focus mode's own store (§9.1), read and written the way `readFoldersClosed`
+ * is: a blocked or full store should cost the rest of the page nothing, not
+ * throw out of a click handler.
+ */
+function readFocusMode() {
+  try {
+    return localStorage.getItem(FOCUS_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function persistFocusMode(on) {
+  try {
+    localStorage.setItem(FOCUS_KEY, on ? '1' : '0');
+  } catch {
+    // Best-effort only — focus mode still works for the rest of the session.
+  }
+}
+
+/**
+ * Focus mode (§9.1): the status strip goes with it, so the sidebar is forced
+ * shut for as long as it is on rather than left to whatever the wide layout
+ * is set to — the same `persist: false` sheet mode already uses to move a
+ * pane without overwriting the reader's preference underneath it.
+ */
+function setFocus(on, persist = true) {
+  document.body.classList.toggle('focus', on);
+  const toggle = $('focus-toggle');
+  toggle.setAttribute('aria-pressed', String(on));
+  toggle.title = on
+    ? 'Leave focus mode (Esc)'
+    : 'Focus mode — centre the transcript and hide the chrome';
+  toggle.setAttribute('aria-label', on ? 'Leave focus mode' : 'Enter focus mode');
+  if (persist) persistFocusMode(on);
+  setCollapsed(on || localStorage.getItem(COLLAPSED_KEY) === '1', false);
+}
+
+$('focus-toggle').onclick = () => setFocus(!document.body.classList.contains('focus'));
+// The strip that carries this button is exactly what focus mode hides, so
+// leaving cannot depend on it (§9.1) — the floating corner control and Esc
+// (below) are the only ways back.
+$('focus-exit').onclick = () => setFocus(false);
 
 $('gate-pair-start').onclick = () => void startPairing();
 
@@ -4003,6 +4442,9 @@ $('file-save').onclick = () => {
 };
 
 paintIcons();
+// Before `applyLayout`, whose `restorePanes` checks `body.focus` to decide
+// whether the sidebar's forced shut (§9.1).
+setFocus(readFocusMode(), false);
 applyLayout();
 trackVisibleViewport();
 applyPlaceholder();
@@ -4011,3 +4453,23 @@ setFileViewing(false);
 renderFileActions(false);
 renderArchivedToggle();
 connect();
+
+/**
+ * Installable shell (§9, U5). `navigator.serviceWorker` — like
+ * `getUserMedia` (§24.4) — exists only in a secure context, so plain-HTTP LAN
+ * never reaches this and there is no "install" affordance nobody could ever
+ * use. `x-turminder-ui-version` (`net/static.ts`) is a hash of the shell's
+ * own bytes computed server-side; reading it off any static response and
+ * registering the worker at `/sw.js?v=<hash>` is what replaces the cached
+ * shell the moment app.js, style.css or an icon actually changes, with
+ * nobody bumping a version number by hand.
+ */
+if ('serviceWorker' in navigator && isSecureContext) {
+  fetch('/style.css', { cache: 'no-store' })
+    .then((res) => res.headers.get('x-turminder-ui-version') || '')
+    .catch(() => '')
+    .then((version) =>
+      navigator.serviceWorker.register(`/sw.js?v=${encodeURIComponent(version)}`),
+    )
+    .catch(() => {});
+}

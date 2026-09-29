@@ -29,6 +29,8 @@ export const DataDefaultsSchema = z.strictObject({
   memory_top_k: z.number().int().positive().optional(),
   chat_context_turns: z.number().int().positive().optional(),
   conversation_idle_min: z.number().int().positive().optional(),
+  /** 0 disables auto-archiving entirely (§9), so it is nonnegative. */
+  conversation_archive_days: z.number().int().nonnegative().optional(),
   notify_ttl_s: z.number().int().positive().optional(),
   confirm_ttl_s: z.number().int().positive().optional(),
   confirm_timeout_s: z.number().int().positive().optional(),
@@ -536,6 +538,22 @@ export const PageCapturedPayload = z.strictObject({
 });
 export type PageCaptured = z.infer<typeof PageCapturedPayload>;
 
+/** App. A quick-note cap (§28.7). Same contract as the capture caps above. */
+export const QUICK_NOTE_MAX_CHARS = 2000;
+
+/**
+ * `note.captured` (§28.7, App. B) — the shell's tray quick-note box.
+ *
+ * `text` is the only field and is the one user-authored field for this type
+ * (App. B trust map), so it renders outside the fence. There is no page
+ * content to fence alongside it — a quick note is a capture with nothing
+ * attached.
+ */
+export const NoteCapturedPayload = z.strictObject({
+  text: z.string().min(1).max(QUICK_NOTE_MAX_CHARS),
+});
+export type NoteCaptured = z.infer<typeof NoteCapturedPayload>;
+
 /* ── config/mcp.yaml (G.5) ───────────────────────────────────────────────── */
 
 export const McpServerSchema = z
@@ -557,11 +575,32 @@ export const McpServerSchema = z
      * one appearing in a committed file (§19.3).
      */
     headers: z.record(z.string(), z.string()).optional(),
+    /**
+     * http servers only: sign in with a browser (§19.6, G.5). The SDK does
+     * discovery, dynamic registration, PKCE and refresh; these two are for the
+     * providers with no dynamic registration (Asana), whose app is registered
+     * by hand. `client_secret` is a `${secret:KEY}` reference like any other
+     * credential in a committed file. Tokens never live here — they are a
+     * secret-store blob (`MCP_OAUTH_<NAME>`, §27).
+     */
+    auth: z
+      .strictObject({
+        type: z.literal('oauth'),
+        client_id: z.string().min(1).optional(),
+        client_secret: z.string().min(1).optional(),
+      })
+      .refine((a) => !a.client_secret || a.client_id, {
+        message: '`client_secret` needs the `client_id` it belongs to',
+      })
+      .optional(),
     /** Tools from this server are side-effecting unless listed here. */
     read_only_tools: z.array(z.string()).optional(),
   })
   .refine((s) => (s.transport === 'stdio' ? Boolean(s.command?.length) : Boolean(s.url)), {
     message: 'stdio servers need `command`, http servers need `url`',
+  })
+  .refine((s) => !s.auth || s.transport === 'http', {
+    message: '`auth` is for http servers — a stdio server takes its credential in `env`',
   });
 
 export const McpYamlSchema = z.strictObject({

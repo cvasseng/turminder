@@ -56,6 +56,7 @@ export function fenceMemoryRecall(
  */
 export const USER_FIELDS: Record<string, readonly string[]> = {
   'page.captured': ['note'],
+  'note.captured': ['text'],
 };
 
 /**

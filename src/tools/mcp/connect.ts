@@ -2,6 +2,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import {
+  UnauthorizedError,
+  type OAuthClientProvider,
+} from '@modelcontextprotocol/sdk/client/auth.js';
 import { globMatchAny } from '../../core/glob.js';
 import { errMessage } from '../../core/errors.js';
 import { log } from '../../core/logger.js';
@@ -13,7 +17,7 @@ import {
   type ToolDefinition,
   type ToolHandle,
 } from '../types.js';
-import { TOOL_CALL_TIMEOUT_MS } from '../timeouts.js';
+import { TOOL_CALL_TIMEOUT_MS, humanCallTimeoutMs } from '../timeouts.js';
 import { buildIntegrationServer } from './serve.js';
 
 const l = log('mcp');
@@ -27,7 +31,17 @@ type McpServerConfig = McpYaml['servers'][number];
  * message it returns on failure names the server and when it will next be
  * retried, because an error that teaches beats an absence that does not.
  */
-export type Revive = () => Promise<{ ok: true } | { ok: false; message: string }>;
+export type Revive = () => Promise<
+  { ok: true } | { ok: false; message: string; error?: 'needs_auth' }
+>;
+
+/**
+ * What a live connection does when its server stops accepting its sign-in and
+ * a refresh cannot fix that (§11.6 `needs_auth`). The hub owns it for the same
+ * reason it owns `Revive`: the status, the notice, and the wording that names
+ * the tool to sign in again with are all hub concerns. Returns that wording.
+ */
+export type OnUnauthorized = () => string;
 
 /** One connected MCP server — bundled in-process or external. */
 export class McpConnection {
@@ -40,6 +54,8 @@ export class McpConnection {
   private failure: string | null = null;
   /** Installed by the hub on external connections only. */
   revive: Revive | null = null;
+  /** Installed by the hub on OAuth-signed external connections only. */
+  onUnauthorized: OnUnauthorized | null = null;
 
   private constructor(
     readonly name: string,
@@ -50,6 +66,12 @@ export class McpConnection {
     private readonly budgets: ReadonlyMap<string, number> = new Map(),
     /** Per-tool bulk-content arg fields, from the definitions (§20.6). */
     private readonly bulkArgs: ReadonlyMap<string, readonly string[]> = new Map(),
+    /**
+     * Tools whose results the elision pass leaves alone (§20.4). Bundled
+     * integrations only: an external server's results are data by definition —
+     * nothing out there is authoring this run's instructions.
+     */
+    private readonly neverElide: ReadonlySet<string> = new Set(),
     /**
      * Per-tool emptiness predicates (§20.9). Bundled integrations only: an
      * external server's results are shaped by somebody else, so the fallback
@@ -65,6 +87,13 @@ export class McpConnection {
       string,
       (args: unknown) => ConfirmLines
     > = new Map(),
+    /**
+     * Tools that wait on a person, and how long that wait may take in seconds
+     * (App. A). Bundled integrations only: a form is raised by this process,
+     * and an external server cannot suspend on one — nor be trusted to name
+     * its own hour-long timeout.
+     */
+    private readonly awaitsHuman: ReadonlyMap<string, () => number> = new Map(),
     /**
      * In-process connections are trivially alive and must stay that way: a
      * bundled integration is the same process, and it cannot drop.
@@ -102,13 +131,13 @@ export class McpConnection {
    * §11.6 exists to fix. Re-reads nothing itself: the caller hands in the
    * server's own definition, freshly read from `mcp.yaml`.
    */
-  async reconnect(cfg: McpServerConfig): Promise<void> {
+  async reconnect(cfg: McpServerConfig, authProvider?: OAuthClientProvider): Promise<void> {
     try {
       await this.client.close();
     } catch {
       /* already gone */
     }
-    this.client = await connectClient(cfg);
+    this.client = await connectClient(cfg, authProvider);
     this.failure = null;
     this.live = true;
     this.watch(this.client);
@@ -129,6 +158,7 @@ export class McpConnection {
     const bulkArgs = new Map(
       defs.filter((d) => d.bulkArgs?.length).map((d) => [d.name, d.bulkArgs!] as const),
     );
+    const neverElide = new Set(defs.filter((d) => d.neverElide).map((d) => d.name));
     const emptiness = new Map(
       defs
         .filter((d) => d.isEmpty)
@@ -142,12 +172,31 @@ export class McpConnection {
             [d.name, d.confirmSummary!.bind(d) as (args: unknown) => ConfirmLines] as const,
         ),
     );
-    return new McpConnection(name, client, [], 'se', budgets, bulkArgs, emptiness, summaries);
+    const awaitsHuman = new Map(
+      defs
+        .filter((d) => d.awaitsHuman)
+        .map((d) => [d.name, d.awaitsHuman!.bind(d) as () => number] as const),
+    );
+    return new McpConnection(
+      name,
+      client,
+      [],
+      'se',
+      budgets,
+      bulkArgs,
+      neverElide,
+      emptiness,
+      summaries,
+      awaitsHuman,
+    );
   }
 
   /** An external MCP server from config/mcp.yaml (App. G.5). */
-  static async external(cfg: McpServerConfig): Promise<McpConnection> {
-    const client = await connectClient(cfg);
+  static async external(
+    cfg: McpServerConfig,
+    authProvider?: OAuthClientProvider,
+  ): Promise<McpConnection> {
+    const client = await connectClient(cfg, authProvider);
     // External tools are side-effecting unless the operator says otherwise, or
     // the server declares readOnlyHint itself.
     const conn = new McpConnection(
@@ -156,6 +205,8 @@ export class McpConnection {
       cfg.read_only_tools ?? [],
       'se',
       new Map(),
+      new Map(),
+      new Set(),
       new Map(),
       new Map(),
       new Map(),
@@ -186,6 +237,7 @@ export class McpConnection {
         source: this.name,
         ...(this.budgets.has(t.name) ? { maxResultChars: this.budgets.get(t.name)! } : {}),
         ...(this.bulkArgs.has(t.name) ? { bulkArgs: this.bulkArgs.get(t.name)! } : {}),
+        ...(this.neverElide.has(t.name) ? { neverElide: true } : {}),
         ...(this.emptiness.has(t.name) ? { isEmpty: this.emptiness.get(t.name)! } : {}),
         ...(this.summaries.has(t.name) ? { confirmSummary: this.summaries.get(t.name)! } : {}),
         call: (args: unknown, ctx: ToolContext) => this.call(t.name, args, ctx),
@@ -208,9 +260,19 @@ export class McpConnection {
         ? await this.revive()
         : { ok: false as const, message: `${this.name} is not connected` };
       if (!revived.ok) {
-        return { ok: false, output: { error: 'server_unavailable', message: revived.message } };
+        return {
+          ok: false,
+          output: { error: revived.error ?? 'server_unavailable', message: revived.message },
+        };
       }
     }
+    // One signal per call, linked to the run's. The SDK never removes the
+    // listener it puts on the signal it is handed, so passing the run's own
+    // would leave one behind per tool call — past ten, Node warns of a leak.
+    const abandon = new AbortController();
+    const onAbort = () => abandon.abort(ctx.signal?.reason);
+    if (ctx.signal?.aborted) onAbort();
+    else ctx.signal?.addEventListener('abort', onAbort, { once: true });
     try {
       const result = await this.client.callTool(
         {
@@ -228,7 +290,15 @@ export class McpConnection {
           },
         },
         undefined,
-        { timeout: TOOL_CALL_TIMEOUT_MS },
+        {
+          timeout: this.awaitsHuman.has(tool)
+            ? humanCallTimeoutMs(this.awaitsHuman.get(tool)!())
+            : TOOL_CALL_TIMEOUT_MS,
+          // The run giving up is the call giving up (§19.1). The SDK turns an
+          // abort — this one or its own timeout — into `notifications/cancelled`,
+          // which is what reaches the serving side as its `ctx.signal`.
+          signal: abandon.signal,
+        },
       );
       const content = (result.content ?? []) as { type: string; text?: string }[];
       const text = content
@@ -256,8 +326,18 @@ export class McpConnection {
       }
       return { ok, output };
     } catch (e) {
+      // The server stopped accepting the sign-in and a refresh could not fix
+      // it (§11.6): not a drop, and nothing a reconnect loop can cure — only a
+      // person signing in again can. Down, and saying so.
+      if (e instanceof UnauthorizedError && this.onUnauthorized) {
+        this.live = false;
+        this.failure = 'sign-in required';
+        return { ok: false, output: { error: 'needs_auth', message: this.onUnauthorized() } };
+      }
       l.warn({ tool, err: errMessage(e) }, 'mcp call failed');
       return { ok: false, output: { error: 'tool_failed', message: errMessage(e) } };
+    } finally {
+      ctx.signal?.removeEventListener('abort', onAbort);
     }
   }
 
@@ -274,7 +354,10 @@ export class McpConnection {
 }
 
 /** One transport, one place (App. G.5) — connect and reconnect share it. */
-async function connectClient(cfg: McpServerConfig): Promise<Client> {
+async function connectClient(
+  cfg: McpServerConfig,
+  authProvider?: OAuthClientProvider,
+): Promise<Client> {
   const client = new Client({ name: 'turminder', version: '0.1.0' });
   if (cfg.transport === 'stdio') {
     const [command, ...args] = cfg.command ?? [];
@@ -291,6 +374,10 @@ async function connectClient(cfg: McpServerConfig): Promise<Client> {
     await client.connect(
       new StreamableHTTPClientTransport(new URL(cfg.url), {
         ...(cfg.headers ? { requestInit: { headers: cfg.headers } } : {}),
+        // Sign-in (§19.6): the SDK attaches the token, refreshes it on a 401,
+        // and throws `UnauthorizedError` when only a person can fix it — which
+        // the hub turns into `needs_auth`, never a crash.
+        ...(authProvider ? { authProvider } : {}),
       }),
     );
   }

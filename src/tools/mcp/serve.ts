@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { errMessage } from '../../core/errors.js';
 import { META_KEY, type ToolContext, type ToolDefinition } from '../types.js';
 
-function contextFromMeta(meta: unknown): ToolContext {
+function contextFromMeta(meta: unknown, signal?: AbortSignal): ToolContext {
   const raw = (meta as Record<string, unknown> | undefined)?.[META_KEY] as
     Record<string, unknown> | undefined;
   return {
@@ -11,6 +11,9 @@ function contextFromMeta(meta: unknown): ToolContext {
     eventId: typeof raw?.event_id === 'string' ? raw.event_id : null,
     conversationId: typeof raw?.conversation_id === 'string' ? raw.conversation_id : null,
     handlerName: typeof raw?.handler_name === 'string' ? raw.handler_name : null,
+    // The request's own signal, aborted when the caller cancels or times out
+    // the call (§19.1) — never something a caller can put in `_meta`.
+    ...(signal ? { signal } : {}),
   };
 }
 
@@ -37,8 +40,8 @@ export function buildIntegrationServer(name: string, defs: ToolDefinition[]): Mc
         ...(shape ? { inputSchema: shape } : {}),
         annotations: { readOnlyHint: def.tier === 'ro', destructiveHint: def.tier === 'se' },
       },
-      async (args: unknown, extra: { _meta?: unknown }) => {
-        const ctx = contextFromMeta(extra?._meta);
+      async (args: unknown, extra: { _meta?: unknown; signal?: AbortSignal }) => {
+        const ctx = contextFromMeta(extra?._meta, extra?.signal);
         try {
           const parsed = def.args.safeParse(args ?? {});
           if (!parsed.success) {

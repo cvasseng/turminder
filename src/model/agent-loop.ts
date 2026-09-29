@@ -2,7 +2,7 @@ import type { ModelMessage } from 'ai';
 import { log } from '../core/logger.js';
 import { errMessage } from '../core/errors.js';
 import { reservedMarkers, stripReservedMarkers } from '../core/markers.js';
-import type { JsonSchemaSpec, ModelGateway } from './gateway.js';
+import { ModelCallError, type JsonSchemaSpec, type ModelGateway } from './gateway.js';
 import { emptyDispatcher, type DispatchResult, type ToolDispatcher } from './dispatcher.js';
 import { elideStaleResults, stubBulkArgs, type ElisionSettings } from './elide.js';
 import {
@@ -213,6 +213,13 @@ export async function runAgent(
   // Consecutive empty results per tool namespace (§20.9), reset by any
   // non-empty result from that namespace.
   const futile = new Map<string, number>();
+  /**
+   * Tools whose results the elision pass must leave alone (§20.4), learned
+   * from the calls this run actually made. Declared statically by the tool and
+   * reported per call, exactly as `bulkArgs` is: the transcript is the loop's,
+   * and only the dispatcher can see the handle behind a name.
+   */
+  const neverElide = new Set<string>();
   const futileThreshold = req.futileThreshold ?? FUTILE_STREAK_THRESHOLD;
   let reasoningChars = 0;
   let text = '';
@@ -248,7 +255,7 @@ export async function runAgent(
       turns += 1;
       // Before the call, not after: the point is to shrink what this turn sends.
       if (req.elision) {
-        const dropped = elideStaleResults(messages, req.elision);
+        const dropped = elideStaleResults(messages, req.elision, neverElide);
         if (dropped.length) l.debug({ tools: dropped, turn: turns }, 'elided stale results');
       }
       req.onActivity?.({ kind: 'thinking', turn: turns });
@@ -422,6 +429,10 @@ export async function runAgent(
                 toolCallId: call.toolCallId,
                 name: call.toolName,
                 args: call.input,
+                // Stop and timeout reach a call in flight, not just the next
+                // turn: a form still waiting when the run ends is closed
+                // rather than left on screen to write for nobody (§19.1).
+                signal: controller.signal,
               });
             } catch (e) {
               // A dispatcher that throws is a bug, but the run should survive it.
@@ -503,6 +514,9 @@ export async function runAgent(
           }
           toolCallCount += 1;
           toolsUsed.add(call.toolName);
+          // Learned once and remembered for the run: every later elision pass
+          // walks the whole transcript, including this result (§20.4).
+          if (outcome.neverElide) neverElide.add(call.toolName);
           // The trace and the activity line show what the tool returned; only
           // the transcript sees the capped form (§20.3).
           const reported =
@@ -514,6 +528,14 @@ export async function runAgent(
             ok: outcome.ok,
             result_excerpt: excerptResult(reported),
             duration_ms: Date.now() - startedAt,
+            // What the model was handed instead of the answer (§20.3). Without
+            // it, a capped result and a tool that summarises by nature look
+            // identical in the trace, and "how often does the cap bite, and on
+            // what" stays a guess — which is how three shipped skills spent
+            // weeks coming back cut in half unnoticed.
+            ...(outcome.truncatedFrom !== undefined
+              ? { truncated_from: outcome.truncatedFrom }
+              : {}),
             // Tuning data for §17.11: how often streaks happen, and where.
             ...(streak >= futileThreshold ? { futile_streak: streak } : {}),
             ...(outcome.denied ? { denied: outcome.denied } : {}),
@@ -590,6 +612,10 @@ export async function runAgent(
     } else {
       stopReason = 'error';
       error = errMessage(e);
+      // Named even when the very first turn never got far enough to set
+      // `endpoint` above (X1b) — a caller reporting this failure to a person
+      // needs to say which endpoint it was.
+      if (e instanceof ModelCallError) endpoint = e.endpoint;
       trace.append('error', { message: error });
     }
     l.warn({ stopReason, error }, 'agent run ended abnormally');

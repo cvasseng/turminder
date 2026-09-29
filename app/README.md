@@ -25,6 +25,7 @@ nix-shell                  # rust, the tauri CLI, node, webkitgtk, gtk, dbus…
 node stage-service.mjs     # assemble the sidecar, and smoke-test it
 cargo tauri dev            # a window, either mode
 cargo tauri build          # a .deb in src-tauri/target/release/bundle
+node appimage.mjs          # an AppImage beside it, for this machine only
 cd src-tauri && cargo test # the pure logic: URLs, layout, supervision
 ```
 
@@ -53,10 +54,37 @@ To drive bundled mode without building a `.deb`, point the shell at the
 staging tree directly: `TURMINDER_APP_SERVICE_DIR=$PWD/src-tauri/service`.
 Nothing in a shipped app sets that variable.
 
-**No AppImage.** Tauri builds one by shelling out to `linuxdeploy`, which
-downloads its own binaries and expects an FHS system; on nix it chokes on the
-store paths in the linker flags before it starts. The `.deb` is the artifact,
-and a nix user runs `nix-shell` + `cargo tauri dev` anyway.
+**The AppImage is a pre-flight, not an artifact.** `appimage.mjs` is what makes
+`cargo tauri build --bundles appimage` work here at all: Tauri shells out to
+`linuxdeploy`, which downloads its own binaries and assumes an FHS system in
+ten separate places, and the script supplies what each of them is missing —
+a `pkg-config` that answers differently, a tools directory this build owns, two
+environment variables, and a config fragment. Its header names all ten.
+
+It needs no nix-shell and no `LD_LIBRARY_PATH` to run: the tenth correction
+puts the sixteen libraries AppImage leaves to the host into the bundle, because
+a nix box is not a host that has them. That set is discovered from the AppDir
+rather than copied from linuxdeploy's excludelist — whatever the loader still
+cannot find gets bundled and the build repeats, so a new dependency cannot
+quietly go missing. The answer is remembered in
+`target/appimage-nix/host-libraries.json`, which makes the steady state one
+build.
+
+What it cannot escape is the ELF interpreter — linuxdeploy rewrites rpaths and
+never that — so the bundle keeps the `/nix/store/…-glibc` loader it was linked
+against and starts on **this machine only**. That is the same trap `shell.nix`
+records for the bundled Node runtime. It is worth having because it proves the
+AppImage packaging works before CI does it for real — the way a cross-staged
+sidecar proves its own packaging and reports itself unverified. The AppImage
+people download is still built on a runner (§32.3), and `bundle.targets` still
+leaves `appimage` off so a plain `cargo tauri build` keeps working.
+
+**Running it on NixOS needs FUSE, once.** That is true of every AppImage, not
+of this one: the runtime at the head of the file mounts itself and `dlopen`s
+`libfuse.so.2`, which NixOS puts on no loader path. Either
+`programs.appimage = { enable = true; binfmt = true; };` in your system
+configuration, which makes every AppImage run by being executed, or
+`APPIMAGE_EXTRACT_AND_RUN=1` in front of it for one run.
 
 ## Modes
 

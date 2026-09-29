@@ -395,6 +395,47 @@ describe('memory in chat (§5.4, §8.2)', () => {
     expect(messages.at(-2)!.content).toContain('<memory-recall>');
   });
 
+  it('reports an endpoint outage as endpoint_error, never a JSON error (X1c)', async () => {
+    h = await bootService({ onboarded: true });
+    h.fake.always({ text: 'Understood.' });
+    const first = h.service.chat.send({ text: 'I only drink espresso' });
+    await drain(h);
+
+    // The endpoint is gone by the time distillation runs — refused
+    // connections, not a bad answer: the model call itself fails, so there
+    // is no text to misread as JSON.
+    await h.fake.stop();
+    h.service.chat.close(first.conversationId);
+    await drain(h);
+
+    // Nothing was learned — the model never answered.
+    expect(h.service.memoryStore.list()).toHaveLength(0);
+
+    const closedEvent = h.service.repos.events
+      .recent({ limit: 10 })
+      .find((e) => e.type === 'system.conversation_closed')!;
+    const distillRun = h.service.repos.runs
+      .forEvent(closedEvent.id)
+      .find((r) => r.kind === 'distill')!;
+    expect(distillRun.status).toBe('failed');
+    // The classification a retry and a dashboard can group on — never the
+    // AI SDK's "Unexpected end of JSON input", which is what this call used
+    // to report before X1c (a model call failure has no text to parse).
+    expect(distillRun.error).toBe('endpoint_error');
+
+    // The cause itself rides the llm_call trace row (X1a), unwrapped and
+    // scrubbed rather than the AI SDK's own wrapper text.
+    const llmCall = h.service.repos.trace
+      .forRun(distillRun.id)
+      .find((t) => t.kind === 'llm_call')!;
+    const data = llmCall.data as {
+      stop_reason: string;
+      error?: { class: string; message: string };
+    };
+    expect(data.stop_reason).toBe('error');
+    expect(data.error?.message).toMatch(/ECONNREFUSED|fetch failed/i);
+  });
+
   it('distils an idle conversation without archiving or renaming it', async () => {
     h = await bootService({ onboarded: true });
     h.fake.always({ text: 'Understood.' });

@@ -1,6 +1,8 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import {
+  APICallError,
   NoSuchToolError,
+  RetryError,
   generateText,
   streamText,
   stepCountIs,
@@ -34,6 +36,67 @@ const l = log('model');
 export interface JsonSchemaSpec {
   name: string;
   schema: Record<string, unknown>;
+}
+
+export interface UnwrappedModelError {
+  class: string;
+  message: string;
+}
+
+/**
+ * The AI SDK wraps a transport failure for developers, not for a trace meant
+ * to answer "why did this fail" (§28.2, X1a): `RetryError.lastError` is the
+ * attempt that actually failed (its own `.message` is "Failed after N
+ * attempts...", a duplicate of the thing it wraps), and an `APICallError`
+ * born from a fetch that never reached a server carries the real cause in
+ * `.cause` — a raw `getaddrinfo ENOTFOUND`/`connect ECONNREFUSED` whose
+ * message is the whole story. This walks to that root and stops the moment a
+ * real HTTP response came back (the status is the story then, not whatever
+ * rides behind it). Never touches a header or a response body — nothing from
+ * the secret store reaches a trace this way (§27).
+ */
+export function unwrapModelError(e: unknown): UnwrappedModelError {
+  let cur: unknown = RetryError.isInstance(e) ? e.lastError : e;
+  const seen = new Set<unknown>();
+  while (
+    cur instanceof Error &&
+    cur.cause !== undefined &&
+    !seen.has(cur) &&
+    !(APICallError.isInstance(cur) && cur.statusCode !== undefined)
+  ) {
+    seen.add(cur);
+    cur = cur.cause;
+  }
+  const cls = cur instanceof Error ? cur.name : typeof cur;
+  let message = cur instanceof Error ? cur.message : String(cur);
+  if (APICallError.isInstance(cur) && cur.statusCode !== undefined) {
+    message = `HTTP ${cur.statusCode}: ${message}`;
+  }
+  return { class: cls, message: scrubUrlCredentials(message) };
+}
+
+/** No credential ever reaches a trace, including one riding in a URL a
+ *  transport error happened to quote (§27). */
+function scrubUrlCredentials(message: string): string {
+  return message.replace(/:\/\/[^/\s@]+@/g, '://');
+}
+
+/**
+ * What `turn()` throws on `stop_reason: "error"` (X1a/b): the endpoint that
+ * failed, and the unwrapped, scrubbed cause — so a caller can name the
+ * endpoint and say what happened without re-deriving it from a raw AI SDK
+ * exception it should never have to parse itself.
+ */
+export class ModelCallError extends Error {
+  constructor(
+    readonly endpoint: string,
+    readonly errorClass: string,
+    message: string,
+    cause?: unknown,
+  ) {
+    super(message, cause !== undefined ? { cause } : undefined);
+    this.name = 'ModelCallError';
+  }
 }
 
 export interface TurnRequest {
@@ -274,6 +337,16 @@ export class ModelGateway {
               let acc = '';
               let reasoning = 0;
               for await (const part of r.fullStream) {
+                if (part.type === 'error') {
+                  // Once the stream flushes, ai-sdk replaces a mid-stream
+                  // failure with a generic NoOutputGeneratedError ("No output
+                  // generated. Check the stream for errors.") on `usage`/
+                  // `finishReason` — the real cause is only ever seen here,
+                  // on the part itself (X1a/b). Throwing it now is what lets
+                  // the catch below trace and report the actual endpoint
+                  // error instead of that placeholder text.
+                  throw part.error;
+                }
                 if (part.type === 'reasoning-delta') {
                   reasoning += part.text.length;
                   req.onReasoning?.(part.text);
@@ -318,6 +391,7 @@ export class ModelGateway {
           });
           ({ text, reasoningChars, rawToolCalls, usageIn, usageOut, finishReason } = settled);
         } catch (e) {
+          const cause = unwrapModelError(e);
           const rec: LlmCallTrace = {
             model: ep.name,
             priority: req.priority,
@@ -330,9 +404,10 @@ export class ModelGateway {
             endpoint: ep.name,
             resolved_by,
             ...(requested_class ? { requested_class } : {}),
+            error: cause,
           };
           trace.append('llm_call', rec);
-          throw e;
+          throw new ModelCallError(ep.name, cause.class, cause.message, e);
         }
 
         const durationMs = Date.now() - started;
@@ -559,8 +634,9 @@ export class ModelGateway {
           l.debug(rec, 'speech call');
           return out;
         } catch (e) {
-          trace.append('llm_call', row('error'));
-          throw e;
+          const cause = unwrapModelError(e);
+          trace.append('llm_call', { ...row('error'), error: cause });
+          throw new ModelCallError(ep.name, cause.class, cause.message, e);
         }
       },
     });
