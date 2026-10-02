@@ -3394,6 +3394,49 @@ state-pouch writes: an embed's own `setState` would then reload the page under
 the user's finger on every click. The serve-time `on_serve` pass is silent for
 the same reason — that page is already being fetched.
 
+### 22.7 Templates: a document made more than once
+
+**Encouraged behavior.** When the user wants a document that should look
+designed (a digest, a report, a cover sheet, anything printed), or any
+output that will be produced again, the assistant builds an **embed
+template** rather than writing markdown for `docs.to_pdf` to convert.
+Christer, 2026-10-02, on a markdown-converted digest: "the format is pretty
+meh… I'm wondering if you could create a pretty template (maybe as an
+embed?) and use that instead." Nothing here is a new mechanism. A template
+is an ordinary embed used in a particular way, and the `embeds` skill
+teaches the way (§22.2).
+
+- **Layout is the HTML.** Styled with the house tokens (§23.3), with
+  print in mind: `@page` size and margins, `break-inside: avoid` on
+  blocks, no interactive-only affordances. Print colours come from the
+  theme's print tokens (§23.3), so a template needs no palette of its own.
+- **Data is bindings** (§23.2) with `refresh: "on_serve"`, whose args mean
+  *now*. Dates are omitted wherever the tool defaults to today, never
+  frozen. A binding with a literal date is a template that prints the same
+  day forever. `args_from: true` copies the args of the run's own call,
+  dates included, so for a template the call it copies from must itself
+  have been made without them.
+- **Prose is the state pouch** (§22.4). What the assistant writes fresh
+  for each issue (the summary, the commentary, the "today you should")
+  goes in with `embeds.write_state`, and the page's script renders it from
+  `turminder.getState()`. The template's HTML never changes to make a new
+  issue. Values a tool returned never travel through the pouch; they are
+  bindings, so the §23.2 rule holds.
+- **An issue** is `embeds.write_state` → `docs.to_pdf {source: <embed
+  id>}` (bindings refreshed, served page printed, §23.4) → optionally
+  `print.document` (§34). Three calls, no authoring.
+- **A template outlives its conversation.** One that a handler or a
+  recurring request depends on is promoted (`embeds.promote`, which asks the
+  user) so that it never meets the ephemeral TTL (§22.1).
+- **Wiring a recurring issue** is an ordinary handler change: the handler
+  that produces the content (a digest, say) gets `embeds.write_state`,
+  `docs.to_pdf` and, if it prints, `print.document` through
+  `handler.update`, and the user approves those tools on its form (F.20).
+  Its body names the template by id.
+- **Few rounds.** A template is authored in one `embeds.create` that
+  carries its `bindings` (F.13), not create-then-bind. On a slow
+  reasoning model every round is minutes (§9, chat budgets).
+
 ---
 
 ## 23. Documents and data trust
@@ -3466,49 +3509,6 @@ data goes *where*; deterministic code moves it.
   data marked stale** (`fetched_at` visible, `ok:false` recorded) —
   never a blocked page, never silently-fresh-looking data.
 - **The manifest is the trust story**: per binding — tool, args,
-### 22.7 Templates: a document made more than once
-
-**Encouraged behavior.** When the user wants a document that should look
-designed (a digest, a report, a cover sheet, anything printed), or any
-output that will be produced again, the assistant builds an **embed
-template** rather than writing markdown for `docs.to_pdf` to convert.
-Christer, 2026-10-02, on a markdown-converted digest: "the format is pretty
-meh… I'm wondering if you could create a pretty template (maybe as an
-embed?) and use that instead." Nothing here is a new mechanism. A template
-is an ordinary embed used in a particular way, and the `embeds` skill
-teaches the way (§22.2).
-
-- **Layout is the HTML.** Styled with the house tokens (§23.3), with
-  print in mind: `@page` size and margins, `break-inside: avoid` on
-  blocks, no interactive-only affordances. Print colours come from the
-  theme's print tokens (§23.3), so a template needs no palette of its own.
-- **Data is bindings** (§23.2) with `refresh: "on_serve"`, whose args mean
-  *now*. Dates are omitted wherever the tool defaults to today, never
-  frozen. A binding with a literal date is a template that prints the same
-  day forever. `args_from: true` copies the args of the run's own call,
-  dates included, so for a template the call it copies from must itself
-  have been made without them.
-- **Prose is the state pouch** (§22.4). What the assistant writes fresh
-  for each issue (the summary, the commentary, the "today you should")
-  goes in with `embeds.write_state`, and the page's script renders it from
-  `turminder.getState()`. The template's HTML never changes to make a new
-  issue. Values a tool returned never travel through the pouch; they are
-  bindings, so the §23.2 rule holds.
-- **An issue** is `embeds.write_state` → `docs.to_pdf {source: <embed
-  id>}` (bindings refreshed, served page printed, §23.4) → optionally
-  `print.document` (§34). Three calls, no authoring.
-- **A template outlives its conversation.** One that a handler or a
-  recurring request depends on is promoted (`embeds.promote`, which asks the
-  user) so that it never meets the ephemeral TTL (§22.1).
-- **Wiring a recurring issue** is an ordinary handler change: the handler
-  that produces the content (a digest, say) gets `embeds.write_state`,
-  `docs.to_pdf` and, if it prints, `print.document` through
-  `handler.update`, and the user approves those tools on its form (F.20).
-  Its body names the template by id.
-- **Few rounds.** A template is authored in one `embeds.create` that
-  carries its `bindings` (F.13), not create-then-bind. On a slow
-  reasoning model every round is minutes (§9, chat budgets).
-
   fetched_at, result hash (derived from the stored value, not a column), ok
   — readable via `embed.manifest` (App. D)
   and surfaced in the UI ("where is this number from"). Honest scope:
@@ -3558,6 +3558,19 @@ Enforced behaviors, all outside the authored HTML:
   set (font stack, spacing, surface/text/border/grid colors, the chart
   palette as `--t-chart-N`) with a `prefers-color-scheme: dark` override —
   dark mode is a token swap and nothing else.
+- **Print is light, and prints its colours.** After the dark override and
+  the base `body` rule (so that print's `body { margin: 0 }` wins), the
+  block carries `@media print { :root { …the light token values, with
+  --t-bg and --t-surface both #ffffff… } }`, so a page printed from a dark
+  browser tab, or by `docs.to_pdf`, comes out on white whatever the
+  viewer's scheme. `:root` sets `print-color-adjust: exact` and
+  `-webkit-print-color-adjust: exact`, so an accent rule, a shaded header
+  or a chart series prints in the colour it was given instead of being
+  dropped as a background. A default `@page { margin: 14mm }` and
+  `body { margin: 0 }` under print come before the authored HTML, so a
+  template's own `@page` wins. The chart restyle listener also listens to
+  `matchMedia('print')`, so charts follow the swap. This applies to
+  `renderEmbed` and `renderPrintDoc` alike: one theme block.
 - **Token-derived charts**: the Highcharts theme is *built from the
   computed tokens at apply time* (never hardcoded hex in the theme
   script), applied via the `window.Highcharts` setter trap, and a scheme-
@@ -3630,19 +3643,6 @@ LibreOffice lost: they render *differently* than the preview).
   down and exiting 0, so Node reports no error and the caller reads a missing
   file as "chromium exited without writing a PDF" — a description of a
   browser that ran to completion and declined, when what happened is that it
-- **Print is light, and prints its colours.** After the dark override and
-  the base `body` rule (so that print's `body { margin: 0 }` wins), the
-  block carries `@media print { :root { …the light token values, with
-  --t-bg and --t-surface both #ffffff… } }`, so a page printed from a dark
-  browser tab, or by `docs.to_pdf`, comes out on white whatever the
-  viewer's scheme. `:root` sets `print-color-adjust: exact` and
-  `-webkit-print-color-adjust: exact`, so an accent rule, a shaded header
-  or a chart series prints in the colour it was given instead of being
-  dropped as a background. A default `@page { margin: 14mm }` and
-  `body { margin: 0 }` under print come before the authored HTML, so a
-  template's own `@page` wins. The chart restyle listener also listens to
-  `matchMedia('print')`, so charts follow the swap. This applies to
-  `renderEmbed` and `renderPrintDoc` alike: one theme block.
   never finished.
 - **No print stamps.** Chromium's default header and footer put the date,
   the source URL and a page counter on every page. None of that is part of
