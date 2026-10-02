@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { EmbedBinder } from '../../embeds/binder.js';
+import type { BindRequest, EmbedBinder } from '../../embeds/binder.js';
 import type { EmbedStore } from '../../embeds/store.js';
 import type { RunGrants } from '../run-grants.js';
 import type { ToolContext, ToolDefinition } from '../types.js';
@@ -11,6 +11,30 @@ export interface EmbedsDeps {
   /** Grant sets of runs in flight — what `embeds.bind` validates against. */
   runGrants: RunGrants;
 }
+
+const bindingEntry = z.object({
+  name: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]+$/)
+    .describe('what the page calls this value, e.g. revenue'),
+  tool: z.string().min(1).describe('a read-only tool you are allowed to call'),
+  args: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe(
+      'the exact args a direct call takes — flat values, no extra nesting; prefer args_from',
+    ),
+  args_from: z
+    .boolean()
+    .optional()
+    .describe(
+      'true = freeze the args of your most recent successful call to this tool in this run — the server copies them; preferred over re-writing args',
+    ),
+  refresh: z
+    .enum(['manual', 'on_serve'])
+    .optional()
+    .describe('on_serve re-fetches every time the page is opened'),
+});
 
 const idArg = z.string().min(1).describe('the embed id');
 
@@ -26,7 +50,7 @@ export function embedsTools(deps: EmbedsDeps): ToolDefinition[] {
     {
       name: 'embeds.create',
       description:
-        'Author a small self-contained HTML page — a chart, a dashboard, a mini-app — and get back a marker to put in your reply so it renders in the chat. One file: inline the CSS and JS; no external fonts or images (data: URIs for pictures). Exactly two script sources ARE allowed and encouraged: the Highcharts CDN (https://code.highcharts.com/…) for charts, and /embed-vendor/… for reveal.js decks. Any value that came out of a tool goes in as a {{data:name}} placeholder (or turminder.data in scripts), attached with embeds.bind in the same turn — never typed into the html from a tool result. Read the `embeds` skill before your first one. Check embeds.list first if the user is asking to see something that may already exist.',
+        'Author a small self-contained HTML page — a chart, a dashboard, a mini-app — and get back a marker to put in your reply so it renders in the chat. One file: inline the CSS and JS; no external fonts or images (data: URIs for pictures). Exactly two script sources ARE allowed and encouraged: the Highcharts CDN (https://code.highcharts.com/…) for charts, and /embed-vendor/… for reveal.js decks. Any value that came out of a tool goes in as a {{data:name}} placeholder (or turminder.data in scripts), attached with embeds.bind in the same turn — never typed into the html from a tool result. Read the `embeds` skill before your first one. bindings may ride the same call (same shape as embeds.bind, args_from included) so a data-bound page is one call; if they are rejected the page is still created and bind_error says why — fix them with embeds.bind, do not create the page again. Check embeds.list first if the user is asking to see something that may already exist.',
       tier: 'se',
       // §20.6: the artifact is paid for once as output; embeds.read is the way
       // back to it.
@@ -49,6 +73,12 @@ export function embedsTools(deps: EmbedsDeps): ToolDefinition[] {
           .describe(
             'only after the user chose "start fresh" over continuing a similar existing embed',
           ),
+        bindings: z
+          .array(bindingEntry)
+          .optional()
+          .describe(
+            'data bindings to attach in the same call — exactly the embeds.bind entries',
+          ),
       }),
       async execute(
         args: {
@@ -56,6 +86,7 @@ export function embedsTools(deps: EmbedsDeps): ToolDefinition[] {
           html: string;
           kind?: 'ephemeral' | 'persistent';
           allow_duplicate?: boolean;
+          bindings?: BindRequest[];
         },
         ctx: ToolContext,
       ) {
@@ -68,6 +99,28 @@ export function embedsTools(deps: EmbedsDeps): ToolDefinition[] {
           runId: ctx.runId,
         });
         if ('error' in created) return created;
+        if (args.bindings?.length) {
+          const bound = await binder.bind(
+            created.embed_id,
+            args.bindings,
+            runGrants.get(ctx.runId),
+            ctx.runId,
+          );
+          if ('error' in bound) {
+            return {
+              ...created,
+              bindings: [],
+              bind_error: bound,
+              note: 'the page was created but its bindings were rejected — fix them with embeds.bind {embed_id, bindings}; do not create the page again',
+            };
+          }
+          return {
+            ...created,
+            bindings: bound.bound,
+            results: bound.results,
+            note: `bound: ${bound.bound.join(', ')}`,
+          };
+        }
         // A deterministic nudge beats a rule the model has to remember: every
         // create starts with zero bindings, and forgetting embeds.bind is the
         // most common authoring mistake — a page whose numbers were typed in
@@ -170,31 +223,7 @@ export function embedsTools(deps: EmbedsDeps): ToolDefinition[] {
       args: z.object({
         embed_id: idArg,
         bindings: z
-          .array(
-            z.object({
-              name: z
-                .string()
-                .regex(/^[A-Za-z0-9_-]+$/)
-                .describe('what the page calls this value, e.g. revenue'),
-              tool: z.string().min(1).describe('a read-only tool you are allowed to call'),
-              args: z
-                .record(z.string(), z.unknown())
-                .optional()
-                .describe(
-                  'the exact args a direct call takes — flat values, no extra nesting; prefer args_from',
-                ),
-              args_from: z
-                .boolean()
-                .optional()
-                .describe(
-                  'true = freeze the args of your most recent successful call to this tool in this run — the server copies them; preferred over re-writing args',
-                ),
-              refresh: z
-                .enum(['manual', 'on_serve'])
-                .optional()
-                .describe('on_serve re-fetches every time the page is opened'),
-            }),
-          )
+          .array(bindingEntry)
           .describe('the complete list; anything left out is unbound'),
       }),
       async execute(

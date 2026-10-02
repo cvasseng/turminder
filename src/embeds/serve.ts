@@ -129,6 +129,25 @@ body {
   color: var(--t-fg);
   margin: var(--t-gap);
 }
+/* Print is light, and prints its colours (§23.3): a page printed from a dark
+   tab, or by docs.to_pdf, comes out on white. Before the authored HTML, so a
+   template's own @page wins. */
+@media print {
+  :root {
+    --t-bg: #ffffff;
+    --t-surface: #ffffff;
+    --t-fg: #1c2330;
+    --t-muted: #5c6675;
+    --t-border: #dde2ea;
+    --t-grid: #eef1f5;
+    --t-accent: ${LIGHT_PALETTE[0]};
+${chartTokens(LIGHT_PALETTE)}
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  body { margin: 0; }
+}
+@page { margin: 14mm; }
 /* A deck is an embed (§23.3), and reveal.js is served without one of its own
    themes on purpose: its variables are wired to the house tokens here, so a
    presentation looks like the dashboard it was cut from. A deck also owns the
@@ -217,6 +236,7 @@ html:has(.reveal), body:has(.reveal) {
   }
   try {
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', restyle);
+    window.matchMedia('print').addEventListener('change', restyle);
   } catch (e) { /* older matchMedia — theme still correct at load */ }
 
   /* Decks (§23.3): house behavior enforced around Reveal, not requested from
