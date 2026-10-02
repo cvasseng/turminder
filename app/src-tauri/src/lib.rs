@@ -22,6 +22,7 @@
 pub mod audio;
 pub mod connect;
 pub mod device;
+pub mod filesync;
 pub mod http;
 pub mod mode;
 pub mod platform;
@@ -114,13 +115,20 @@ fn boot_state(app: tauri::AppHandle) -> Option<sidecar::State> {
 /// The `connect_to` case is the one that bites: a freshly connected shell that
 /// only becomes a device on the *next* launch is a shell that silently misses
 /// every notification until you restart it.
+///
+/// The files folder rides along in connect mode (§28.8) — bundled mode's store
+/// is already on this disk — and stops with the socket it belongs to.
 fn set_device(app: &tauri::AppHandle, connection: Option<&Connection>) {
     let devices = app.state::<Devices>();
     let mut slot = devices.0.lock().expect("device slot poisoned");
     if let Some(previous) = slot.take() {
         previous.stop();
     }
-    *slot = connection.map(|c| device::spawn(app.clone(), c.clone()));
+    let connect_mode = mode::load(app) == Some(Mode::Connect);
+    *slot = connection.map(|c| {
+        let files = connect_mode.then(|| filesync::start(c.clone())).flatten();
+        device::spawn(app.clone(), c.clone(), files)
+    });
 }
 
 #[tauri::command]
@@ -337,7 +345,14 @@ fn announce_voice(app: &tauri::AppHandle, note: Option<&str>) {
         .as_ref()
         .map(|m| m.state())
         .unwrap_or(voice::State::Idle);
-    tray::refresh(app, state, &settings, connected, note);
+    tray::refresh(
+        app,
+        state,
+        &settings,
+        connected,
+        mode::load(app).is_some(),
+        note,
+    );
     let _ = app.emit(
         voice::STATE_EVENT,
         serde_json::json!({ "state": format!("{state:?}").to_lowercase(), "quiet": settings.quiet }),
@@ -921,6 +936,7 @@ fn on_tray_click(app: &tauri::AppHandle, id: &str) {
         // Greyed with no connection (§28.7), so a real click here always has
         // somewhere to send the note.
         tray::ID_QUICKNOTE => open_quicknote(app),
+        tray::ID_FILES => open_files_folder(app),
         tray::ID_SHOW => {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
@@ -1019,6 +1035,34 @@ fn on_tray_click(app: &tauri::AppHandle, id: &str) {
             sync_wake_word(app);
             announce_voice(app, None);
         }
+    }
+}
+
+/// *Open files folder* (§28.8): `~/Turminder` in connect mode — created if it is
+/// not there yet, so the file manager has something to open, and the next sync
+/// cycle fills it — and the store itself, `<data dir>/files`, in bundled mode.
+fn open_files_folder(app: &tauri::AppHandle) {
+    let folder = match mode::load(app) {
+        Some(Mode::Connect) => filesync::folder().and_then(|folder| {
+            std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+            Ok(folder)
+        }),
+        Some(Mode::Bundled) => platform::data_dir().map(|dir| dir.join("files")),
+        None => return,
+    };
+    let opened = folder.and_then(|folder| {
+        platform::open_in_file_manager(&folder)
+            .map_err(|problem| format!("{problem}; the folder is {}", folder.display()))
+    });
+    if let Err(problem) = opened {
+        // On the tray tooltip, where the menu's other failures already go:
+        // there is no window this belongs in, and the shell raises no
+        // notification about the files folder (§28.8). What happened, then
+        // where the folder is, so it can be opened by hand (§28.2).
+        announce_voice(
+            app,
+            Some(&format!("Couldn't open the files folder: {problem}")),
+        );
     }
 }
 
@@ -1380,7 +1424,13 @@ pub fn run() {
             // can reach (§28.2).
             let settings = voice_settings::load(&handle);
             let connected = current_connection(&handle).is_some();
-            let menu = tray::build(&handle, &settings, voice::State::Idle, connected)?;
+            let menu = tray::build(
+                &handle,
+                &settings,
+                voice::State::Idle,
+                connected,
+                mode::load(&handle).is_some(),
+            )?;
             TrayIconBuilder::with_id(tray::TRAY_ID)
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Turminder")

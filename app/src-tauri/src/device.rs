@@ -9,6 +9,11 @@
 //!
 //! Same frames as every other transport (App. D.4): there is no shell-specific
 //! protocol, and the service never learns it is talking to a desktop app.
+//!
+//! In connect mode the socket also drives the files folder (§28.8): it says
+//! `files` in `hello`, and `welcome` and `files.changed` each ask the syncer
+//! for a cycle. The syncer lives and dies with this client, so changing or
+//! dropping the connection stops it.
 
 use std::sync::{Arc, Mutex};
 
@@ -20,6 +25,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::connect::Connection;
+use crate::filesync;
 use crate::voice_settings;
 
 /// One outbound frame, from a notification click back to the service.
@@ -48,6 +54,8 @@ pub struct DeviceClient {
     instance_name: Arc<Mutex<Option<String>>>,
     app: AppHandle,
     task: tauri::async_runtime::JoinHandle<()>,
+    /// The files folder's sync, in connect mode (§28.8).
+    files: Option<filesync::Syncer>,
 }
 
 impl DeviceClient {
@@ -60,6 +68,11 @@ impl DeviceClient {
     /// old one is aborted before the new one exists.
     pub fn stop(&self) {
         self.task.abort();
+        // The sync belongs to this connection: a folder synced against the
+        // service the shell just left is a folder merged into the wrong store.
+        if let Some(files) = &self.files {
+            files.stop();
+        }
     }
 
     /// Quiet mode ended: show everything that was held and has not expired,
@@ -161,8 +174,31 @@ fn urlencode(value: &str) -> String {
         .collect()
 }
 
-/// Connect, greet, and keep reconnecting. Runs until the process exits.
-pub fn spawn(app: AppHandle, connection: Connection) -> DeviceClient {
+/// What this device says it can do in `hello` (D.1).
+///
+/// `notify.actions` always — the window does chat, and a second chat consumer
+/// would double every delta. `voice` when the microphone is on (§28.6), and
+/// `files` when this client drives the files folder (§28.8): neither changes
+/// what the service sends except `files.changed`, which is the sync trigger.
+pub fn capabilities(voice: bool, files: bool) -> Vec<&'static str> {
+    let mut out = vec!["notify.actions"];
+    if voice {
+        out.push("voice");
+    }
+    if files {
+        out.push("files");
+    }
+    out
+}
+
+/// Connect, greet, and keep reconnecting, until `stop`. `files` is the
+/// connect-mode syncer, or `None` in bundled mode, where there is nothing to
+/// sync (§28.8).
+pub fn spawn(
+    app: AppHandle,
+    connection: Connection,
+    files: Option<filesync::Syncer>,
+) -> DeviceClient {
     let (tx, mut rx) = mpsc::unbounded_channel::<Outbound>();
     let sender = tx.clone();
     let held: Arc<Mutex<Vec<Held>>> = Arc::new(Mutex::new(Vec::new()));
@@ -173,6 +209,8 @@ pub fn spawn(app: AppHandle, connection: Connection) -> DeviceClient {
     // Read once, at connect: the capability set travels in `hello`, so
     // toggling voice reconnects rather than lying about what this device does.
     let voice_on = voice_settings::load(&app).enabled;
+    let sync = files.as_ref().map(filesync::Syncer::trigger);
+    let capabilities = capabilities(voice_on, sync.is_some());
     let task = tauri::async_runtime::spawn(async move {
         let connection = Arc::new(connection);
         let mut backoff = 1u64;
@@ -186,17 +224,7 @@ pub fn spawn(app: AppHandle, connection: Connection) -> DeviceClient {
                         "type": "hello",
                         "payload": {
                             "device": connection.device,
-                            // Notifications only: the window does chat, and a
-                            // second chat consumer would double every delta.
-                            // `voice` joins it when the microphone is on
-                            // (§28.6, D.1) — it changes nothing about what the
-                            // service sends, only what this device says it can
-                            // do with it.
-                            "capabilities": if voice_on {
-                                json!(["notify.actions", "voice"])
-                            } else {
-                                json!(["notify.actions"])
-                            },
+                            "capabilities": capabilities,
                             "last_seen": 0,
                         }
                     });
@@ -218,7 +246,7 @@ pub fn spawn(app: AppHandle, connection: Connection) -> DeviceClient {
                             incoming = read.next() => {
                                 match incoming {
                                     Some(Ok(Message::Text(text))) => {
-                                        handle_frame(&app, &tx, &held_for_task, &name_for_task, &text);
+                                        handle_frame(&app, &tx, &held_for_task, &name_for_task, sync.as_ref(), &text);
                                     }
                                     Some(Ok(_)) => {}
                                     _ => break,
@@ -242,6 +270,7 @@ pub fn spawn(app: AppHandle, connection: Connection) -> DeviceClient {
         instance_name,
         app: app_for_client,
         task,
+        files,
     }
 }
 
@@ -251,6 +280,7 @@ fn handle_frame(
     tx: &mpsc::UnboundedSender<Outbound>,
     held: &Arc<Mutex<Vec<Held>>>,
     instance_name: &Arc<Mutex<Option<String>>>,
+    sync: Option<&filesync::Trigger>,
     text: &str,
 ) {
     let frame: Value = match serde_json::from_str(text) {
@@ -267,6 +297,19 @@ fn handle_frame(
                 .and_then(Value::as_str)
                 .map(str::to_string);
             *instance_name.lock().expect("name poisoned") = name;
+            // Connected, or reconnected after a gap: whatever changed on
+            // either side meanwhile is reconciled now (§28.8).
+            if let Some(sync) = sync {
+                sync.fire();
+            }
+            return;
+        }
+        Some("files.changed") => {
+            // Only a nudge: the cycle reads the manifest rather than trusting
+            // the frame's path, so a missed frame costs a delay, not a file.
+            if let Some(sync) = sync {
+                sync.fire();
+            }
             return;
         }
         Some("delivery") => {}
@@ -408,6 +451,21 @@ mod tests {
         assert_eq!(civil_from_days(19_782), (2024, 2, 29)); // and its extra day
         assert_eq!(civil_from_days(20_696), (2026, 8, 31));
         assert_eq!(civil_from_days(20_697), (2026, 9, 1)); // and over the month boundary
+    }
+
+    #[test]
+    fn hello_says_files_only_when_this_client_syncs() {
+        // `files` is what makes the service send `files.changed` here (D.2),
+        // which is the sync trigger in connect mode and noise in bundled mode.
+        assert_eq!(capabilities(false, false), vec!["notify.actions"]);
+        assert_eq!(capabilities(true, false), vec!["notify.actions", "voice"]);
+        assert_eq!(capabilities(false, true), vec!["notify.actions", "files"]);
+        assert_eq!(
+            capabilities(true, true),
+            vec!["notify.actions", "voice", "files"]
+        );
+        // Never `chat`: the window is the chat consumer (§28.2).
+        assert!(!capabilities(true, true).contains(&"chat"));
     }
 
     #[test]

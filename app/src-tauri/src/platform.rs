@@ -4,8 +4,9 @@
 //! supervision *policy* (`supervisor.rs`), the health probe, the bundle layout
 //! and the device socket are the same code everywhere, and they are the parts
 //! with tests. What is left here is small on purpose — where a bundled install
-//! keeps its data, what the pinned runtime is called, and how a child process
-//! is made to die with its parent.
+//! keeps its data, what the pinned runtime is called, how a child process is
+//! made to die with its parent, and where home is and how to show a folder in
+//! the file manager (§28.8).
 //!
 //! **Only the Linux path has been run.** The macOS and Windows paths are
 //! written from each platform's documented behaviour and have never been
@@ -57,8 +58,9 @@ pub fn data_dir() -> Result<PathBuf, String> {
 ///
 /// Deliberately not `data_dir()`: that directory is the service's, git-managed
 /// and portable (§12.1), and a file the shell dropped in it would show up in
-/// `git status` forever. This holds one number — the port the sidecar landed
-/// on last time (§28.2) — and nothing that matters if it is lost.
+/// `git status` forever. This holds the port the sidecar landed on last time
+/// (§28.2) and the files folder's sync state (§28.8) — neither matters if it
+/// is lost: a lost sync state re-downloads rather than deletes.
 pub fn state_dir() -> Result<PathBuf, String> {
     #[cfg(target_os = "linux")]
     {
@@ -92,6 +94,43 @@ fn home() -> Result<PathBuf, String> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| "no HOME in the environment".to_string())
+}
+
+#[cfg(windows)]
+fn home() -> Result<PathBuf, String> {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .ok_or_else(|| "no USERPROFILE in the environment".to_string())
+}
+
+/// The user's home directory — where the files folder lives (§28.8), which
+/// is a place a person looks, not one an app hides things in.
+pub fn home_dir() -> Result<PathBuf, String> {
+    home()
+}
+
+/// Show `path` in the platform's file manager (§28.8): the opener every
+/// desktop already has, through `std::process::Command` rather than a plugin.
+///
+/// The child is reaped on a thread of its own: `xdg-open` returns quickly but
+/// not instantly, a tray click is on the main thread, and a child nobody waits
+/// for is a zombie for the life of the shell.
+pub fn open_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    let mut child = Command::new(opener)
+        .arg(path)
+        .spawn()
+        .map_err(|e| format!("could not run {opener}: {e}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 /// Whatever this platform needs to hold, for as long as the sidecar runs.

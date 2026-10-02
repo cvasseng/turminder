@@ -19,6 +19,7 @@ pub const TRAY_ID: &str = "turminder";
 /// Menu ids. Device submenus carry the device name after a prefix, because a
 /// menu id is the only thing a click hands back.
 pub const ID_QUICKNOTE: &str = "quick-note";
+pub const ID_FILES: &str = "files-folder";
 pub const ID_VOICE: &str = "voice";
 pub const ID_TALK: &str = "talk";
 pub const ID_WAKE: &str = "wake";
@@ -43,12 +44,17 @@ pub fn build(
     settings: &VoiceSettings,
     state: State,
     connected: bool,
+    has_mode: bool,
 ) -> tauri::Result<Menu<tauri::Wry>> {
     // Heads the menu, above *Talk to it* (§28.7): a box that accepts text it
     // cannot send would lose that text, so it is greyed rather than opened
     // whenever this shell has nothing to send it to — the tray tooltip says
     // why.
     let quick_note = MenuItem::with_id(app, ID_QUICKNOTE, "Quick note…", connected, None::<&str>)?;
+    // Under *Quick note…*, in both modes (§28.8): `~/Turminder` when connected
+    // elsewhere, the store itself when it is on this disk. Greyed only before
+    // a mode is chosen, when there is no folder to name.
+    let files = MenuItem::with_id(app, ID_FILES, "Open files folder", has_mode, None::<&str>)?;
     let voice =
         CheckMenuItem::with_id(app, ID_VOICE, "Voice", true, settings.enabled, None::<&str>)?;
     // Straight into a turn, no key and no name (§28.6) — and the way out of
@@ -149,6 +155,7 @@ pub fn build(
         app,
         &[
             &quick_note,
+            &files,
             &voice,
             &talk,
             &wake,
@@ -228,12 +235,13 @@ pub fn refresh(
     state: State,
     settings: &VoiceSettings,
     connected: bool,
+    has_mode: bool,
     note: Option<&str>,
 ) {
     let Some(tray) = app.tray_by_id(&TrayIconId::new(TRAY_ID)) else {
         return;
     };
-    if let Ok(menu) = build(app, settings, state, connected) {
+    if let Ok(menu) = build(app, settings, state, connected, has_mode) {
         let _ = tray.set_menu(Some(menu));
     }
     if let Some(icon) = state_icon(app, state, settings.quiet) {

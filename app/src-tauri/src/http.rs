@@ -1,10 +1,12 @@
 //! The shell's hand-written HTTP (§28.2).
 //!
-//! The shell makes four kinds of request: prove a device token against
-//! `/api/whoami`, ask a just-spawned sidecar whether it is up yet, and — since
-//! voice (§28.6) — push an utterance to `POST /api/voice` and pull a spoken
-//! delivery from `POST /api/speak`. An HTTP client crate for four requests
-//! would be a dependency, a TLS story and a supply chain, so this is a
+//! The shell makes a handful of kinds of request: prove a device token against
+//! `/api/whoami`, ask a just-spawned sidecar whether it is up yet, push an
+//! utterance to `POST /api/voice` and pull a spoken delivery from
+//! `POST /api/speak` (§28.6), and — since the files folder (§28.8) — read the
+//! manifest, upload with `PUT` and delete with `DELETE`, each carrying the
+//! `X-Turminder-Base` the server compares against. An HTTP client crate for
+//! these would be a dependency, a TLS story and a supply chain, so this is a
 //! TcpStream and a format string instead.
 //!
 //! Plaintext only, deliberately and visibly: `https` means TLS means a client
@@ -50,7 +52,32 @@ impl Response {
 /// the URL for its host and then hardcoded the path, which worked only because
 /// it had exactly one caller.
 pub fn get(url: &str, token: Option<&str>, timeout: Duration) -> Result<Response, String> {
-    request("GET", url, token, None, timeout, None, None)
+    request("GET", url, token, &[], None, timeout, None, None)
+}
+
+/// One extra request header, name and value. Only the files folder sends any
+/// (`X-Turminder-Base`, §18.6), so they are a slice rather than a builder.
+pub type Header<'a> = (&'a str, &'a str);
+
+/// `PUT url` with a body and extra headers — a §28.8 upload.
+pub fn put(
+    url: &str,
+    token: Option<&str>,
+    headers: &[Header<'_>],
+    body: Body<'_>,
+    timeout: Duration,
+) -> Result<Response, String> {
+    request("PUT", url, token, headers, Some(body), timeout, None, None)
+}
+
+/// `DELETE url` with extra headers and no body — a §28.8 delete.
+pub fn delete(
+    url: &str,
+    token: Option<&str>,
+    headers: &[Header<'_>],
+    timeout: Duration,
+) -> Result<Response, String> {
+    request("DELETE", url, token, headers, None, timeout, None, None)
 }
 
 /// What a request body is: bytes and what they are.
@@ -85,7 +112,7 @@ pub fn post(
     timeout: Duration,
     sink: Option<Sink<'_>>,
 ) -> Result<Response, String> {
-    request("POST", url, token, Some(body), timeout, sink, None)
+    request("POST", url, token, &[], Some(body), timeout, sink, None)
 }
 
 /// `post`, and told the headers as soon as they arrive rather than at the end.
@@ -97,13 +124,24 @@ pub fn post_watching_head(
     sink: Option<Sink<'_>>,
     on_head: OnHead<'_>,
 ) -> Result<Response, String> {
-    request("POST", url, token, Some(body), timeout, sink, Some(on_head))
+    request(
+        "POST",
+        url,
+        token,
+        &[],
+        Some(body),
+        timeout,
+        sink,
+        Some(on_head),
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn request(
     method: &str,
     url: &str,
     token: Option<&str>,
+    headers: &[Header<'_>],
     body: Option<Body<'_>>,
     timeout: Duration,
     mut sink: Option<Sink<'_>>,
@@ -119,6 +157,20 @@ fn request(
         Some(q) => format!("{}?{q}", parsed.path()),
         None => parsed.path().to_string(),
     };
+
+    // A header is a line, so a CR or LF inside one would be a second header
+    // — or a second request — of somebody else's choosing. Every value here is
+    // a hash the server handed out, but "the server said so" is not a reason
+    // to let it write the request line.
+    let mut extra = String::new();
+    for (name, value) in headers {
+        if [name, value].iter().any(|s| s.contains(['\r', '\n'])) {
+            return Err(format!(
+                "refusing a header with a line break in it ({name})"
+            ));
+        }
+        extra.push_str(&format!("{name}: {value}\r\n"));
+    }
 
     let stream = TcpStream::connect((host, port)).map_err(|e| explain_connect(host, port, &e))?;
     stream
@@ -139,7 +191,7 @@ fn request(
         None => String::new(),
     };
     let head = format!(
-        "{method} {target} HTTP/1.1\r\nHost: {host}:{port}\r\n{auth}{framing}\
+        "{method} {target} HTTP/1.1\r\nHost: {host}:{port}\r\n{auth}{extra}{framing}\
          Connection: close\r\nAccept: */*\r\n\r\n"
     );
 
@@ -526,6 +578,75 @@ mod tests {
             response.text()
         );
         assert_eq!(played, 0, "an error must not reach the speaker");
+    }
+
+    #[test]
+    fn a_sync_upload_carries_its_base_and_its_bytes() {
+        // §18.6 is compare-and-swap: a PUT without the base it was made
+        // against is a PUT the server cannot judge, so the header is the
+        // request, not decoration.
+        let (port, seen) = one_shot(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+        );
+        let response = put(
+            &format!("http://127.0.0.1:{port}/api/files/sync?path=notes%2Ftodo.md"),
+            Some("tok"),
+            &[("X-Turminder-Base", "abc123")],
+            Body {
+                content_type: "application/octet-stream",
+                bytes: b"- milk\n",
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(response.status, 200);
+        let request = seen.join().unwrap();
+        let text = String::from_utf8_lossy(&request).into_owned();
+        assert!(
+            text.starts_with("PUT /api/files/sync?path=notes%2Ftodo.md HTTP/1.1"),
+            "{text}"
+        );
+        assert!(text.contains("X-Turminder-Base: abc123\r\n"), "{text}");
+        assert!(text.contains("Authorization: Bearer tok"), "{text}");
+        assert!(text.contains("Content-Length: 7"), "{text}");
+        assert!(request.ends_with(b"- milk\n"), "body missing: {text}");
+    }
+
+    #[test]
+    fn a_sync_delete_carries_its_base_and_no_body() {
+        let (port, seen) = one_shot(
+            b"HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 20\r\n\r\n{\"error\":\"conflict\"}",
+        );
+        let response = delete(
+            &format!("http://127.0.0.1:{port}/api/files/sync?path=a.md"),
+            Some("tok"),
+            &[("X-Turminder-Base", "none")],
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        // A refusal is a status the caller acts on (§28.8: 409 → download).
+        assert_eq!(response.status, 409);
+        let text = String::from_utf8_lossy(&seen.join().unwrap()).into_owned();
+        assert!(
+            text.starts_with("DELETE /api/files/sync?path=a.md HTTP/1.1"),
+            "{text}"
+        );
+        assert!(text.contains("X-Turminder-Base: none\r\n"), "{text}");
+        assert!(!text.contains("Content-Length"), "{text}");
+    }
+
+    #[test]
+    fn a_header_with_a_line_break_is_refused_before_anything_is_sent() {
+        // Nothing listens here: the refusal has to come before the connect,
+        // or a smuggled header would already be on the wire.
+        let e = delete(
+            "http://127.0.0.1:9/api/files/sync?path=a.md",
+            None,
+            &[("X-Turminder-Base", "abc\r\nX-Evil: 1")],
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(e.contains("line break"), "{e}");
     }
 
     #[test]

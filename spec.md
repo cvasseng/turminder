@@ -1787,6 +1787,11 @@ under their own grants.
   corpus); v1 stores binaries but never reads them. (§18.2)
 - **Richer file UI** (side-by-side editing, media preview); v1 is list +
   rendered markdown + plaintext edit. (§18.5)
+- **Desktop sync choices** — a user-chosen folder instead of `~/Turminder`,
+  syncing a subfolder only, sync status in the tray, and empty directories;
+  v1 syncs the whole store into one fixed folder with zero settings.
+  Committing edits other programs make directly on the server's disk stays
+  out too: those are indexed, not committed. (§18.6, §28.8)
 - **Forms on the daemon channel** (native dialog rendering); v1 forms render
   only in the chat UI. (§19.1)
 - **Conversation compaction** (rolling distillation of turns older than the
@@ -2101,11 +2106,6 @@ function in `ui/preview.js`, kept in agreement with the route's inline set
 by a contract test: a type served inline that the panel cannot render is a
 preview that silently does nothing.
 
----
-
-## 19. Interactive forms and chat-driven setup
-
-### 19.1 The form primitive
 ### 18.6 Desktop sync: the store on another machine (normative)
 
 When the service runs on a server and the desktop app connects to it
@@ -2211,6 +2211,11 @@ by this section. There is no sync of `files.dir` stores other than through
 the store itself; a `files.dir` pointing elsewhere syncs exactly the same
 way, because the routes speak to the store, not to `data/files/`.
 
+---
+
+## 19. Interactive forms and chat-driven setup
+
+### 19.1 The form primitive
 
 An agent can summon a structured form to be rendered inline in the current
 chat conversation: the `setup.form` tool (App. F.9) sends a `form.request`
@@ -4715,6 +4720,118 @@ handler. A quick note is that capture with no page attached.
   clipboard or a screenshot; a history of sent notes in the box. Past
   notes are events and are already in the event log.
 
+### 28.8 The files folder (normative)
+
+The client half of §18.6. In **connect mode** the shell keeps
+**`~/Turminder`** (the user's home directory + `Turminder`, fixed, no
+setting) in two-way sync with the service's file store. There is nothing
+to configure: connecting is the setup. In **bundled mode** there is
+nothing to sync — the store is already on this disk — and the folder item
+opens `<data dir>/files` instead.
+
+- **Tray:** one item, **Open files folder**, under *Quick note…*; it
+  opens the folder in the platform file manager (`xdg-open` on Linux,
+  `open` on macOS, `explorer` on Windows — `std::process::Command`, no
+  crate). Enabled in both modes.
+- **State:** `filesync.json` in `platform::state_dir()`:
+  `{server: <base url>, files: {<path>: {sha256, mtime_ms, size}}}` — per
+  synced path, the server hash of the version last synced and the local
+  `(mtime, size)` it was written or read as. A `server` different from the
+  current connection's base URL, or a `~/Turminder` that is missing at the
+  start of a cycle or whose walk finds no file at all, **resets the state to
+  empty** (the folder is created if missing). This is the mass-delete guard:
+  an unmounted or deleted folder — and an empty one, which is what an
+  unmounted disk usually leaves behind — re-downloads; it never reads as "the
+  user deleted everything". (The price: deleting the *last* file in the
+  folder does not propagate; it comes back.) **The mirror guard holds on
+  the server side:** a manifest with no files while the state has entries
+  resets the state too, and deletes nothing locally — a server whose store
+  came up empty (an unmounted disk, a wrong `files.dir`) must not empty the
+  laptop. The local files are then re-uploaded with base `none`, which is
+  the recovery. (Same price, mirrored: the server deleting its last file
+  does not propagate.)
+- **Triggers:** a sync *cycle* runs on connect (`welcome`), on a
+  `files.changed` frame (the shell's `hello` declares the `files`
+  capability for this), when the local walk — every `files_sync_walk_s`
+  (App. A) — finds any path whose `(mtime, size)` differs from its state
+  entry or that is new or gone — once per distinct walk result, so a
+  difference no cycle could settle (a server that is down, a file over the
+  limit) waits for the next trigger instead of firing every walk — and every
+  `files_sync_manifest_s` as a fallback. Cycles never overlap; a trigger
+  during a cycle runs one more cycle after it.
+- **A cycle** first removes anything named `.turminder-sync-*` (file or
+  symlink, never a directory) left by an interrupted download, then fetches the manifest, walks `~/Turminder`
+  (regular files only, symlinks skipped; paths `/`-separated, relative),
+  and reconciles each path in the union. **One predicate decides which
+  paths sync, applied to both sides:** a path is *syncable* when it is a
+  plain relative path (no empty, `.` or `..` segment, no leading `/`, no
+  backslash anywhere in a name), has no segment beginning
+  `.turminder-sync-`, has **no `.git` segment at any depth**, and — on
+  Windows — has no `:` anywhere and no segment ending in `.` or a space
+  (a drive prefix escapes the folder; a trailing dot or space is silently
+  stripped, which renames the file). Locally, a path is also unsyncable
+  when **it or any directory above it inside the folder is a symlink**:
+  a synced folder replaced by a link (the "move it and link it back"
+  move) must not read as every file in it deleted. A
+  non-syncable path is invisible: the walk does not see it locally, a
+  manifest entry for it is dropped, and so it is never uploaded,
+  downloaded, or deleted on either side. (An asymmetric filter is a data
+  loss bug: a path one side can see and the other cannot reads as a
+  deletion.)
+  `L` = local file, `S` = state entry, `M` = manifest entry; *local
+  changed* = `L` present and (`S` absent or `L`'s `(mtime, size)` ≠ `S`'s):
+
+  | case | action |
+  |---|---|
+  | local changed | `PUT` with base `S.sha256` (or `none` without `S`) |
+  | `L` present, unchanged, `M` present, `M.sha256` ≠ `S.sha256` | download |
+  | `L` absent, `S` absent, `M` present | download |
+  | `L` present, unchanged, `S` present, `M` absent | the server deleted it: delete local, drop `S` |
+  | `L` absent, `S` present, `M` present, `M.sha256` = `S.sha256` | `DELETE` with base `S.sha256` |
+  | `L` absent, `S` present, `M` present, `M.sha256` ≠ `S.sha256` | download (an edit beats a delete) |
+  | `L` absent, `S` present, `M` absent | drop `S` |
+  | otherwise | nothing |
+
+  Outcomes: `PUT` 200 → `S = {sha256 from the reply, L's mtime/size}`;
+  409 → download the original (`M` is stale; the conflict copy arrives next
+  cycle); 403/413/422 → record `S` with `sha256: null` so the file is not
+  retried until it changes again, and never deleted remotely because of it;
+  `DELETE` 200 or 404 → drop `S`; 409 or 422 → download (the server kept
+  the file; bring the local copy back rather than retry the delete). A
+  state entry with
+  `sha256: null` (a refused file) bypasses the table: `L` unchanged →
+  nothing; `L` changed → `PUT` with base `none`; `L` absent → drop `S`. A
+  refused file is neither re-sent nor deleted anywhere until it changes. Files whose size exceeds
+  the manifest's `max_bytes`, on either side, are skipped entirely.
+- **Download** is `GET /api/files/raw`, written to
+  `<dir>/.turminder-sync-<name>` and renamed over the target; **before the
+  rename the target is re-statted**, and if it changed since the walk saw it
+  the download is abandoned for this cycle (the next cycle uploads it, and a
+  conflict copy results if the server moved too). `S = {X-Turminder-Sha256,
+  the renamed file's mtime/size}`. Parent directories are created as needed;
+  directories emptied by deletes are left alone. A manifest path that is
+  not syncable, or that would be written through a symlinked directory, is
+  ignored: the server's word is not a licence to write outside the folder.
+  Independently of the predicate, every target is checked by containment:
+  each component of the relative path is a plain name, and the joined path
+  starts with the folder.
+  Whatever already sits at the temp name — a file, a symlink — is removed
+  before the temp is created, and the temp is created fresh (never opened
+  through an existing entry). A `200` whose body is shorter than its
+  `Content-Length` is a network error, not a file.
+- **Failure:** any network error ends the cycle quietly; the next trigger
+  retries. So does **any walk error other than an entry vanishing
+  mid-walk** (an unreadable subfolder, a dropped nested mount): a walk that
+  could not see a directory must not read its files as deleted. A non-200
+  manifest ends the cycle; any other status this section does not name
+  (400, 401, 5xx) on a `PUT`, `DELETE` or download skips that one action,
+  retried on the next trigger. An upload re-stats the file after reading
+  it and skips it if it changed (a file still being saved); the next walk
+  brings it back. A sync problem is never a notification from the shell — the
+  conflict notification is the server's (§18.6).
+- **Deferred (§16):** choosing the folder, syncing a subfolder only,
+  status in the tray beyond *Open files folder*, and empty directories.
+
 ---
 
 ## 29. The browser extension: conscious capture
@@ -5764,7 +5881,6 @@ This is deliberate rather than lazy. eSCL has no push, and a panel-initiated
 scan does not appear in the device's own job list; a poller would therefore
 mostly discover scans we started ourselves. The drop folder is the mechanism
 the hardware actually offers.
-| Desktop sync per-file size limit (`files.sync_max_mb`) | 50 MB | §18.6 — over it, a file is listed but neither uploaded nor downloaded. MB = 2^20 bytes, a positive number (fractions allowed); `max_bytes` = floor(mb × 1048576) |
 
 What Turminder does **not** do is serve that folder. A printer scans to SMB,
 FTP or email, and standing up a file share is the operating system's job, not
@@ -5870,6 +5986,9 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Web page cache TTL (shared by fetch/query) | 60s per URL | App. F.5 |
 | File-watch quiescence (`files.quiescence_s`) | 30s | §18.4 |
 | `file.changed` per-file rate limit (`files.watch_rate_limit_s`) | 600s, coalescing | §18.4 |
+| Desktop sync per-file size limit (`files.sync_max_mb`) | 50 MB | §18.6 — over it, a file is listed but neither uploaded nor downloaded. MB = 2^20 bytes, a positive number (fractions allowed); `max_bytes` = floor(mb × 1048576) |
+| Desktop sync local walk interval (`files_sync_walk_s`) | 5s | §28.8 — stat only, no reads |
+| Desktop sync fallback manifest poll (`files_sync_manifest_s`) | 60s | §28.8 |
 | File markers (`files.markers`) | `["@turminder"]` | §18.4 |
 | Form round-trip timeout (`form_timeout_s`) | 1h → treated as **cancelled** | §19.1 |
 | Weather forecast cache TTL | 15 min per rounded (4-decimal) coordinate | App. F.11 |
@@ -6342,8 +6461,11 @@ server closes.
 | `calls.list` | `{limit?=100}` | `calls.list.result` (D.2) — the request log's read over `llm_call` rows (§10.8): last 100 within 24h (App. A), `limit` clamped to 200. `chat`-capable devices only, else `error(bad_frame)` |
 
 `capabilities` values (v1): `"notify.actions"`, `"chat"`, `"forms"`,
-`"voice"` — the last marks a device that reads deliveries aloud via
+`"voice"`, `"files"` — `voice` marks a device that reads deliveries aloud via
 `POST /api/speak` (§33.3, §28.6); it changes nothing about what it is sent.
+`files` subscribes the device to `files.changed` (D.2): the chat UI's files
+panel declares it, and so does the desktop shell in connect mode, as its
+sync trigger (§28.8).
 `last_seen` is the
 highest delivery `seq` the device has ever acked (0 for never). On
 `welcome`, the server replays all deliveries with `seq > last_seen`,
@@ -6384,6 +6506,7 @@ list when any device acks it.
 | `call.made` | one `row` (same shape as `calls.list.result`'s), pushed to `chat`-capable devices as each `llm_call` trace row is written (§10.8), exactly like `event.status`. Transient: a client that missed one re-derives with `calls.list` |
 | `token.list.result` / `token.revoked` | as in D.1 |
 | `files.list.result` / `files.read.result` / `files.saved` | as in D.1 |
+| `files.changed` | `{path, change: "created"\|"modified"\|"deleted"}` — a store file changed, by any writer (§18.4–18.6); sent to `files`-capable devices: the chat UI's panel, and the desktop shell in connect mode as a sync trigger (§28.8). Transient — the durable record is the git history. Catalogued retroactively with §18.6; it shipped with phase 12 |
 | `models.list.result` / `conversation.model.set` | as in D.1 |
 | `token.reveal` | `{device, label?, token, connect_url, qr_svg, base_url_guessed: bool}` — the one-time value from `setup.token_create` (§24.2) plus its connect QR (§24.3), sent to connected `chat`-capable devices on the run's conversation. **Transient like `chat.delta`**: never outboxed, never replayed, never persisted; the UI renders a copy widget + QR shown once. This frame is the only place the value ever exists — the config stores only `token_sha256` (§24) |
 | `error` | `{code, message, ref?}` — `ref` echoes the offending frame id |
@@ -6482,7 +6605,6 @@ completes the same sign-in first.
 Pending `form.request`s are re-sent after `welcome` to `forms`-capable
 devices. Forms are transient like `chat.delta` — never outboxed; the
 suspension row is the durable state.
-| `files.changed` | `{path, change: "created"\|"modified"\|"deleted"}` — a store file changed, by any writer (§18.4–18.6); sent to `files`-capable devices: the chat UI's panel, and the desktop shell in connect mode as a sync trigger (§28.8). Transient — the durable record is the git history. Catalogued retroactively with §18.6; it shipped with phase 12 |
 
 A run is not the only thing that may raise one. **Pairing (§24.4) raises a
 form with no run and no conversation**: `run_id` and `conversation_id` are
@@ -7117,6 +7239,7 @@ files:                    # §18
   quiescence_s: 30
   markers: ["@turminder"]
   watch_rate_limit_s: 600
+  sync_max_mb: 50         # §18.6 desktop sync, per file
 chat:
   core_namespaces: [memory, files, schedule, deliver, time, weather, web, skills]  # §21.2
 systools:                 # §23.1 — path overrides; default: probe $PATH
@@ -7215,7 +7338,6 @@ user_name: Alex
 timezone: Europe/Oslo
 locale: en
 onboarded_at: 2026-08-20T…Z
-  sync_max_mb: 50         # §18.6 desktop sync, per file
 ---
 ```
 
