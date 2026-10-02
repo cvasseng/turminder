@@ -64,6 +64,16 @@ Type `@turminder do X` in any file and the change becomes an event once the
 file has been quiet for 30 seconds. Images and PDFs preview in the side
 panel.
 
+When the service runs on another machine, the desktop app keeps a
+`~/Turminder` folder in two-way sync with the workspace, with nothing to set
+up: connecting is the setup. Edit a file in your own editor and the assistant
+sees it, `@turminder` lines included; its edits arrive back in the folder.
+Each of your edits is committed under your device's name. If you and the
+assistant change the same file while the laptop is offline, both versions
+are kept: the server's stays in place, yours lands beside it as a conflict
+copy, and you get a notification. Files over 50 MB (`files.sync_max_mb`) are
+left out. *Open files folder* in the tray opens it.
+
 ## Activity
 
 A panel of everything in flight. Whatever arrives — a page captured from the

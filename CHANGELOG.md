@@ -1,5 +1,15 @@
  # Next
 
+ * The workspace on your own machine. When the service runs on a server, the
+   desktop app keeps a `~/Turminder` folder in two-way sync with the
+   assistant's files over the connection it already has, with nothing to set
+   up. Edits you make there reach the assistant (an `@turminder` line still
+   works) and are committed under your device's name; the assistant's edits
+   come back. If you both change a file while you're offline, nothing is
+   lost: the server's version stays, yours is kept beside it as a conflict
+   copy, and you get a notification. Files over 50 MB are left out
+   (`files.sync_max_mb`). *Open files folder* in the tray opens it.
+
  * Fixed: a notification nobody was around to see was thrown away. A morning
    digest waited a day for a device to connect and then expired unread, so on
    a quiet week every digest was written and none was ever seen. A

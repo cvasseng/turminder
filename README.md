@@ -64,6 +64,7 @@ pairing](docs/running.md).
 - Handlers: markdown behaviors matched to events, each with a tool grant you approve once in a form.
 - Memory as markdown files with RAG retrieval, every change a git commit.
 - A file workspace, optionally your Obsidian vault, where `@turminder do X` becomes an event.
+- The workspace in a `~/Turminder` folder on your own machine when the service runs elsewhere: two-way sync over the desktop app's connection, no setup, conflicts kept as copies.
 - Schedules and reminders as desktop notifications, with approve/deny buttons on gated actions.
 - Booking a schedule says which handler will run it, and warns you when nothing will.
 - Any schedule runs on demand, exactly as its own time arriving would, without using up the booking.
