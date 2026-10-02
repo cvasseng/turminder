@@ -24,13 +24,13 @@ ws-activity.mjs
 # Bundled OAuth client (the ldflags equivalent) — never in git.
 google-client.json
 
-# Internal working ledgers and agent bootstraps — the delivery plan, the
-# out-of-spec decision log, the shipped-rough-edges list, and the upstream
-# to-dos. They are the author's working notes, not part of the release.
+# Internal working ledgers — the delivery plan, the out-of-spec decision
+# log, the shipped-rough-edges list, and the upstream to-dos. They are the
+# author's working notes, not part of the release. (The agents and the
+# coordinator loop that maintain them are tracked: .claude/agents/,
+# .claude/skills/coordinate/.)
 plan.md
 plan-v1.md
 JUDGMENT.md
 LIMITS.md
 DEP_TODO.md
-architect_agent.md
-implementor_agent.md

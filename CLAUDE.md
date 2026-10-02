@@ -32,6 +32,13 @@ ask. Never "a reasonable way I just invented".
 | a feature users would notice, or anything README.md claims | `readme-upkeep` |
 | any user-visible change (entry under `# Next`) | `changelog-upkeep` |
 | finishing any change | `self-review` (the exit ritual) |
+| planning a change and driving it to done | `coordinate` (spec → work order → implementor ⇄ reviewer) |
+
+Building is delegated to two subagents in `.claude/agents/`: `implementor`
+(builds one work package from the spec) and `reviewer` (read-only, checks
+it). The `coordinate` skill drives them and picks the smallest model tier
+that will succeed for each spawn; its `architect.md` is the coordinator's
+doctrine.
 
 ## The rules most often broken — do not be next
 
