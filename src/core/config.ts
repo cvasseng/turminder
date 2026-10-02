@@ -344,7 +344,7 @@ export const DEFAULT_SETTINGS: Settings = {
   memoryTopK: 5,
   chatContextTurns: 40,
   conversationIdleMin: 30,
-  conversationArchiveDays: 7,
+  conversationArchiveDays: 30,
   notifyTtlS: 24 * 3600,
   confirmTtlS: 3600,
   confirmTimeoutS: 3600,

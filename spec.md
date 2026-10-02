@@ -672,7 +672,11 @@ the server's (`POST /api/speak`, App. E), exactly as every word of a
   the 30-minute idle timeout also distils but leaves the conversation open and
   in the list.
 - **A conversation archives itself after `conversation_archive_days` of
-  silence** (App. A: 7 days; `0` turns the sweep off). The same sweep that
+  silence** (App. A: 30 days; `0` turns the sweep off). It was 7 until
+  2026-10-02, and a week proved too eager: conversations someone was still
+  coming back to were archived, and the embeds born in them started ageing
+  out (Christer: "way too aggressive, we should keep chats properly alive
+  for longer"). The same sweep that
   distils idle conversations closes week-old ones, through the same
   `close` path a user's archive button takes — one event
   (`system.conversation_closed`, carrying `auto: true`), one frame to every
@@ -5835,7 +5839,7 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | `ui_short_max` | 480px viewport height | §9.1 — landscape phone; the height-driven rules |
 | `ui_focus_max` | 90ch | §9.1 — focus mode's centred transcript/composer width |
 | Conversation idle timeout (distils; never archives) | 30 min | §9 |
-| Conversation auto-archive (`conversation_archive_days`) | 7 days quiet; `0` = never | §9 |
+| Conversation auto-archive (`conversation_archive_days`) | 30 days quiet; `0` = never | §9 |
 | Delivery default TTL | 24h (`notify`), 1h (`confirm`); a scheduler-origin `notify`: until the schedule's next occurrence, else 24h | §7.1 |
 | Missed-delivery list (`delivery.missed`) | newest 50 | §7.1, App. D |
 | Confirm round-trip timeout | 1h → treated as **deny** | §11.3 |
@@ -7094,7 +7098,7 @@ data_defaults:            # Appendix A overrides, same key names
   max_depth: 5
   retry_attempts: 3
   conversation_idle_min: 30
-  conversation_archive_days: 7     # §9 — 0 never archives
+  conversation_archive_days: 30    # §9 — 0 never archives
 search:
   searxng_url: http://127.0.0.1:8080
 web:                      # §11.2, §23.6 — the two web readers share this block

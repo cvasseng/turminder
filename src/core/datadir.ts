@@ -94,7 +94,7 @@ data_defaults:
   max_depth: 5
   retry_attempts: 3
   conversation_idle_min: 30
-  conversation_archive_days: 7 # §9 — 0 never archives
+  conversation_archive_days: 30 # §9 — 0 never archives
   futile_streak_threshold: 3   # §20.9
   spa_text_floor_chars: 500    # §20.9, App. F.5
 search:
