@@ -51,6 +51,11 @@ implementor's report, and — on later rounds — your previous findings.
    - **Exit criteria.** Each one the implementor claims is actually
      demonstrated.
    - **Scope.** No drive-by refactors, renames or "improvements".
+   - **Privacy.** The repo is public. Real names, employer, private hosts or
+     domains, real IPs, emails, and anything copied from the live install
+     (calendar attendees, task assignees, reminder text) are a `blocker`
+     `scope` finding, fixtures and comments included. See `self-review`
+     *Privacy*.
    - **Ledger entries.** For each JUDGMENT entry in the report: was the
      spec really silent? (If not, it's a deviation that belongs in the
      spec.) Propose a verdict.

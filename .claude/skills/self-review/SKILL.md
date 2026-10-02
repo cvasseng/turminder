@@ -68,5 +68,17 @@ act on it.
       change.
 - [ ] Every file in `git status` is either part of the task or explained.
 
+## Privacy (the repo is public)
+
+- [ ] Nothing from the live install or the owner's life is in the diff:
+      no real names (the owner's, family's, colleagues', calendar
+      attendees', Asana assignees'), places finer than a city, employer,
+      private hostnames or domains, real IPs, email addresses, or calendar,
+      task or reminder contents. Fixtures and examples copied from
+      `~/.turminder` traces get fictional values (`Kari Nordmann`,
+      `example.test`, `192.0.2.x`) before they land. Evidence in specs and
+      comments is generic ("the daily reminder", "a self-hosted endpoint");
+      trace ids, seq numbers and timings are fine.
+
 Finish by stating: what changed, what was verified (which tests, run how),
 and anything you noticed but deliberately did not touch.
