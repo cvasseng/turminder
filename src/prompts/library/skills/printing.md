@@ -31,6 +31,11 @@ moment's layout: a title, sensible margins, and no screenful of raw data where a
 table belongs. If the content deserves it, build an embed and `docs.to_pdf`
 that — the PDF is exactly the page that was previewed.
 
+**Should it look designed, or come around again?** A digest, a report or a
+cover sheet — or anything printed on a schedule — is an embed template, not
+markdown: fetch the `embeds` skill and read "Templates". Markdown →
+`docs.to_pdf` is for quick one-offs.
+
 ## Which machine
 
 `print.devices` lists what is set up and what each one can do. With one device

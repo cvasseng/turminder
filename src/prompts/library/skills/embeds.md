@@ -1,6 +1,6 @@
 ---
 name: embeds
-description: Building an embed — a small self-contained HTML page (a chart, a table, a dashboard, a little app with buttons) rendered inline in chat or on its own link. Use whenever showing something would beat describing it, or the user asks to see, open or build a view, chart, dashboard or tool.
+description: Building an embed — a small self-contained HTML page (a chart, a table, a dashboard, a little app with buttons) rendered inline in chat or on its own link. Also the way to make a designed, printable or recurring document (a digest, a report, a cover sheet) as a reusable template. Use whenever showing something would beat describing it, or the user asks to see, open or build a view, chart, dashboard, tool, or a document that should look good on paper or be produced again.
 ---
 
 # Embeds
@@ -42,17 +42,28 @@ read and write their own small state pouch — and nothing else. Anything that
 
 ## Creating
 
-The order is: placeholders in the markup → create → **bind in the same
-turn** → marker last in your reply. A create that references tool data and
-is not followed by `embeds.bind` is an unfinished job, and the create result
-will say so.
+The order is: placeholders in the markup → **one** `embeds.create` that carries
+the `bindings` → marker last in your reply. A data-bound page is one call, not
+create-then-bind.
 
-`embeds.create {title, html}` returns `{embed_id, url, marker, bindings,
-note}`. Put the marker — `{{embed:<id>}}` — on its own line at the *end* of
-your reply, after the prose about it: the chat renders the view where the
-marker sits, so a view above the words introducing it reads backwards.
-Without the marker nothing renders. `bindings` is empty at creation by
-definition — read the `note` and act on it before replying.
+`embeds.create {title, html, bindings?}` returns `{embed_id, url, marker,
+bindings, note}`. `bindings` takes exactly the entries `embeds.bind` takes
+(`args_from` included, see below). If they are rejected the page **is still
+created** and the result carries `bind_error` saying why: fix it with
+`embeds.bind {embed_id, bindings}` — never create the page again. A create with
+no bindings, on a page that shows tool data, is an unfinished job, and the
+`note` will say so.
+
+Put the marker — `{{embed:<id>}}` — on its own line at the *end* of your reply,
+after the prose about it: the chat renders the view where the marker sits, so a
+view above the words introducing it reads backwards. Without the marker nothing
+renders.
+
+**Few rounds.** Every round on a slow model is minutes. If you need to see a
+data shape first, make all the direct calls in parallel in one round, then
+write the page and create it with its bindings in the next. Do not probe one
+tool at a time, and do not search, create, bind and edit in separate rounds
+when the information was available at the start.
 
 The rules the file must obey, because the sandbox enforces them:
 
@@ -158,6 +169,89 @@ The pattern, in order:
 the handler fires only for `embed.action` from that embed, and it is deleted
 along with the embed. Its tools are the *entire* set of things the app can
 cause — ask for them as narrowly as the job allows.
+
+## Templates: documents made more than once
+
+When the user wants a document that should **look designed** — a digest, a
+report, a cover sheet, anything printed — or any output that will be produced
+again, build an embed template. This is the default; do not write markdown and
+hand it to `docs.to_pdf` for these (that is for quick one-offs). A template is
+an ordinary embed used in a particular way:
+
+- **Layout is the HTML.** House tokens only, with print in mind: an `@page`
+  rule for size and margins, `break-inside: avoid` on blocks, nothing that only
+  works interactively. Print comes out light with colours kept, from the theme's
+  own print tokens, so the template needs no palette.
+- **Data is bindings with `refresh: "on_serve"`, and their args mean *now*.**
+  Leave dates out wherever the tool defaults to today. A binding with a literal
+  date prints the same day forever. The trap: `args_from: true` copies the args
+  of your earlier call, dates included — so the direct call you copy from must
+  itself have been made without dates.
+- **Prose is the state pouch.** What you write fresh for each issue (the summary,
+  the commentary) goes in with `embeds.write_state {embed_id, state}`, and the
+  page's script renders it from `turminder.getState()`. The HTML never changes
+  to make a new issue. Numbers and values a tool returned never go through the
+  pouch — they are bindings.
+- **An issue is three calls, no authoring:** `embeds.write_state` →
+  `docs.to_pdf {source: <embed id>, out_path}` (bindings are refreshed, the
+  served page is printed) → optionally `print.document` on the PDF.
+- **A template outlives its conversation.** If a handler or a recurring request
+  depends on one, `embeds.promote` it first (ask — it is the user's call), or
+  the expiry rule will delete it.
+- **Wiring a recurring issue** is an ordinary `handler.update {name, ...}` on
+  the handler that produces the content (`name` is required): `requested_tools` is the *whole* new set, so keep
+  its existing tools and add `embeds.write_state`, `docs.to_pdf` and, if it
+  prints, `print.document`, with a `reason`. The change goes through an approval form the user
+  answers; the handler is untouched until they approve. Its `body` names the template by embed id.
+
+A small example — a digest with two bindings, a written summary, tokens only.
+Round 1: the direct calls, in parallel, with no date args — `weather.forecast
+{location: "Oslo", days: 3}` and `schedule.list {}`. Round 2: one create:
+
+```
+embeds.create {
+  title: "Daily digest",
+  html: "<style>
+    @page { size: A4; margin: 16mm }
+    body { font: 14px var(--t-font); color: var(--t-fg); background: var(--t-bg) }
+    section { break-inside: avoid; margin-bottom: var(--t-gap);
+              border: 1px solid var(--t-border); border-radius: var(--t-radius);
+              padding: var(--t-gap) }
+    h2 { color: var(--t-accent); margin: 0 0 .4em }
+  </style>
+  <h1>Daily digest</h1>
+  <section><h2>Summary</h2><p id=summary></p></section>
+  <section><h2>Weather</h2>
+    <p>{{data:weather.days.0.summary}}, up to {{data:weather.days.0.temp_max_c}} C</p></section>
+  <section><h2>Coming up</h2><ul id=upcoming></ul></section>
+  <script>
+    for (const s of turminder.data.upcoming.schedules) {
+      const li = document.createElement('li');
+      li.textContent = s.note;
+      document.getElementById('upcoming').append(li);
+    }
+    turminder.getState().then(s => {
+      document.getElementById('summary').textContent = s.summary || '';
+    });
+  </script>",
+  bindings: [
+    {name: "weather", tool: "weather.forecast", args_from: true, refresh: "on_serve"},
+    {name: "upcoming", tool: "schedule.list", args_from: true, refresh: "on_serve"}
+  ]
+}
+```
+
+The placeholder paths follow the result shape the direct call showed
+(`weather.forecast` returns `days:[{date, summary, temp_min_c, temp_max_c, …}]`;
+dotted segments, `0` indexes a list). Lists are iterated in script through
+`turminder.data.<name>`. An unresolved placeholder prints literally, so check
+paths against the result.
+
+Tools in one response run in order, so an issue is one response: round 3
+`embeds.write_state {embed_id, state: {summary: "..."}}`, then
+`docs.to_pdf {source: <embed id>, out_path: "digests/<date>.pdf"}`, then, if
+asked, `print.document` on that same `out_path`; round 4 the reply. A first
+issue is four rounds in all.
 
 ## Presentations
 
