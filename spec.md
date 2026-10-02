@@ -710,6 +710,19 @@ the server's (`POST /api/speak`, App. E), exactly as every word of a
   - an **OpenAI-compatible HTTP endpoint** (`/v1/chat/completions`,
     streaming supported) as a thin adapter for external tooling. It maps a
     request onto the same event path; it is ~an adapter, not a subsystem.
+- **A reopened conversation shows what its runs did.** `chat.history`
+  (App. D.1) carries, on each assistant turn that has a `run_id`, that
+  run's tool activity rebuilt from its `tool_call` trace rows in `seq`
+  order: `activity: [{tool, ok, summary}]`, where `summary` is the row's
+  `result_excerpt` cut to 200 chars, the same cut the live `tool_result`
+  activity uses. The panel renders it as one collapsed activity block above
+  that turn's text, the block the turn had live, minus the reasoning, the
+  timings and the mid-answer split (none of which are stored). It is
+  **display only**: history assembly for the model (§20.2) never reads it,
+  and `[[used tools: …]]` stays the model's only view of an earlier turn's
+  tools. Reasoning text is still not stored (§20.1.4; Christer chose tools
+  only, 2026-10-02). Past trace retention (App. A, 90 days) the rows are
+  gone, and a turn simply has no `activity`. Absence is not an error.
 - **The transcript reads in the order things happened.** The activity block
   for a stretch of work — thinking, reasoning, tool calls — sits *above* the
   text it produced, so a run that goes back to its tools mid-answer continues
@@ -6495,7 +6508,7 @@ server closes.
 | `ack` | `{delivery_id}` | none (idempotent; unknown id ignored) — settles a `queued`, `delivered` or `missed` row (§7.1); an `expired` one stays expired |
 | `event` | `{type, payload, occurred_at?, idempotency_key?}` | `event.accepted {event_id}` or `error` — the daemon-as-source path (§7.3); source is set server-side to the device id |
 | `chat.send` | `{conversation_id?, text, attachments?: [upload_id], pins?: {endpoint?: string, effort?: string}}` | `chat.accepted {conversation_id, event_id}` — omitted conversation_id creates one; an unknown or expired upload id → `error(not_found)` at send time, never silently dropped (§26.2). `pins` applies the §10.6 overrides to the conversation **before the run is dequeued** — it exists because a pick made while composing the first message must govern that very message, not the one after (the one-turn lag, found live 2026-08-22); validation identical to `conversation.model`, and an invalid pin fails the send rather than half-applying |
-| `chat.history` | `{conversation_id, before_seq?, limit?=50}` | `chat.history.result {turns: [{seq, role, text, created_at, attachments?: [{upload_id, name, mime}]}], more: bool}` — the UI re-renders thumbnails via `GET /api/uploads/<id>` (§26.2) |
+| `chat.history` | `{conversation_id, before_seq?, limit?=50}` | `chat.history.result {turns: [{seq, role, text, created_at, attachments?: [{upload_id, name, mime}], activity?: [{tool, ok, summary}]}], more: bool}` — the UI re-renders thumbnails via `GET /api/uploads/<id>` (§26.2). `activity` is present only on an assistant turn whose run still has `tool_call` trace rows: one entry per row in `seq` order, `summary` = `result_excerpt` cut to 200 chars. Display only, never model context (§9) |
 | `chat.stop` | `{conversation_id}` | `chat.stopped {conversation_id, run_id\|null}` — aborts the conversation's in-flight run: generation stops mid-token, what was already said persists as the turn (§20.2, no banner — the person who ended it knows), and the run settles with `error: "stopped_by_user"` (`done` when it had said something, `failed` when it had not). **The event is complete either way — a stop must never retry into a second answer.** Idempotent, the `ack` precedent: nothing running → `run_id: null`, still success, because a race with the run's own end is not an error anyone can act on |
 | `token.list` | `{}` | `token.list.result {devices: [{device, label?, created_at?, last_seen}]}` — metadata only, **never token values** (§24.1) |
 | `token.create` | `{device, label?}` | `token.reveal` (D.2) — the UI's "connect a device" (§24.3), driving the same create-blind machinery as `setup.token_create` rather than a second writer of G.4. The value is in the reveal and nowhere else; a duplicate name → `error(bad_frame)` naming the clash |

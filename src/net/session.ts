@@ -371,6 +371,8 @@ export class ChannelSession {
             role: t.role,
             text: t.text,
             created_at: t.created_at,
+            // Rebuilt from the run's trace rows; display only (§9, App. D.1).
+            ...(t.activity ? { activity: t.activity } : {}),
             // Metadata only (App. D.1): the panel re-renders thumbnails from
             // `GET /api/uploads/<id>`, so bytes never ride a frame.
             ...(t.attachments.length

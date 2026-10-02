@@ -910,6 +910,27 @@ function startGroup() {
 }
 
 /**
+ * A reopened conversation's tool activity (§9): the block the turn had live,
+ * collapsed, built from stored tool calls. No reasoning, clock or estimate —
+ * none of those are stored — so the header names the tools and nothing else.
+ */
+function addReplayedActivity(activity) {
+  const group = startGroup();
+  clearInterval(group.tick);
+  group.timer.hidden = true;
+  for (const a of activity) {
+    if (!group.tools.includes(a.tool)) group.tools.push(a.tool);
+    groupLine(
+      group,
+      activityLine({ kind: 'tool_result', tool: a.tool, ok: a.ok, summary: a.summary }),
+      a.ok === false ? 'bad' : '',
+    );
+  }
+  group.el.classList.replace('running', 'done');
+  group.summary.textContent = group.tools.join(', ');
+}
+
+/**
  * A block belongs *above* the text it produced. Whatever has streamed so far is
  * finished — the model stopped talking and went back to tools — so seal that
  * message and let the next delta open a new one below the block. Without this
@@ -1465,6 +1486,7 @@ function handle(frame) {
       if (p.conversation_id !== state.conversationId) break;
       clearMessages();
       for (const turn of p.turns || []) {
+        if (turn.activity?.length) addReplayedActivity(turn.activity);
         addMessage(turn.role, turn.text, undefined, turn.attachments);
       }
       // History is settled text, so its embeds can mount immediately.

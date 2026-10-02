@@ -175,6 +175,46 @@ export class TraceRepo {
   }
 
   /**
+   * What each run's tools did, for a reopened conversation (§9, App. D.1):
+   * `tool_call` rows in `seq` order, one batched query for the whole page.
+   * Runs with no rows (pruned, or no tools) are simply absent from the map.
+   * The `at` floor is the earliest run start, so the (kind, at) index narrows
+   * the scan instead of reading every tool call ever made.
+   */
+  toolActivityForRuns(
+    runIds: readonly string[],
+  ): Map<string, { tool: string; ok: boolean; summary: string }[]> {
+    const out = new Map<string, { tool: string; ok: boolean; summary: string }[]>();
+    if (!runIds.length) return out;
+    const holes = runIds.map(() => '?').join(',');
+    const rows = this.db
+      .prepare(
+        `SELECT run_id, data FROM trace
+          WHERE kind = 'tool_call' AND run_id IN (${holes})
+            AND at >= COALESCE((SELECT MIN(started_at) FROM runs WHERE id IN (${holes})), '')
+          ORDER BY seq ASC`,
+      )
+      .all(...runIds, ...runIds) as { run_id: string; data: string }[];
+    for (const row of rows) {
+      let d: { tool?: unknown; ok?: unknown; result_excerpt?: unknown };
+      try {
+        d = JSON.parse(row.data) as typeof d;
+      } catch {
+        continue; // a malformed row is not the reader's problem
+      }
+      if (typeof d.tool !== 'string') continue;
+      const list = out.get(row.run_id) ?? [];
+      list.push({
+        tool: d.tool,
+        ok: d.ok !== false,
+        summary: typeof d.result_excerpt === 'string' ? d.result_excerpt.slice(0, 200) : '',
+      });
+      out.set(row.run_id, list);
+    }
+    return out;
+  }
+
+  /**
    * What a set of runs cost, from the `llm_call` rows they wrote (§10.5). The
    * ledger is a query, never a table: rows are stamped at call time and kept
    * forever (C.2), so editing a price cannot reprice history.

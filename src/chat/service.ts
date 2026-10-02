@@ -7,6 +7,13 @@ import type { EventIntake } from '../ingress/intake.js';
 import type { ChatStreamHub } from './stream.js';
 import type { UploadStore } from '../uploads/store.js';
 
+/** One replayed tool call on a history turn (App. D.1). */
+export interface ToolActivity {
+  tool: string;
+  ok: boolean;
+  summary: string;
+}
+
 const l = log('chat');
 
 /** What a message says about its attachments (§26.2, App. B). */
@@ -179,14 +186,26 @@ export class ChatService {
   history(
     conversationId: string,
     opts: { limit?: number; beforeSeq?: number } = {},
-  ): { turns: Turn[]; more: boolean } {
+  ): { turns: (Turn & { activity?: ToolActivity[] })[]; more: boolean } {
     const limit = Math.min(opts.limit ?? 50, 200);
     const turns = this.repos.conversations.history(conversationId, {
       limit: limit + 1,
       ...(opts.beforeSeq ? { beforeSeq: opts.beforeSeq } : {}),
     });
     const more = turns.length > limit;
-    return { turns: more ? turns.slice(turns.length - limit) : turns, more };
+    const page = more ? turns.slice(turns.length - limit) : turns;
+    // Display only (§9): the model's history never goes through here.
+    const runIds = [
+      ...new Set(page.flatMap((t) => (t.role === 'assistant' && t.run_id ? [t.run_id] : []))),
+    ];
+    const activity = this.repos.trace.toolActivityForRuns(runIds);
+    return {
+      turns: page.map((t) => {
+        const a = t.role === 'assistant' && t.run_id ? activity.get(t.run_id) : undefined;
+        return a?.length ? { ...t, activity: a } : t;
+      }),
+      more,
+    };
   }
 
   list(opts: { includeArchived?: boolean } = {}): ConversationRow[] {
