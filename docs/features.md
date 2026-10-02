@@ -11,6 +11,11 @@ preferences. Drop an image in and a vision-capable model looks at it; a model
 that cannot will say so rather than guess. Attachments are capped at 20 MB
 and images stay in context for the last two user turns.
 
+A conversation is archived after 30 quiet days, and reopening one shows the
+tools each answer used, collapsed above it as they were live. A chat run is
+never cut off while it is still streaming: it stops only after 240 s with
+nothing arriving (`chat.stall_s`) or at 30 minutes (`chat.timeout_s`).
+
 Focus mode hides the top bar and the sidebar and sets the conversation in a
 narrower column with larger text, for reading or writing at length. Esc brings
 the rest back.
@@ -185,6 +190,13 @@ dashboards whose numbers come from live data bindings, reveal.js
 presentations, and mini-apps whose buttons fire events your handlers act on.
 They are iterated in chat and served standalone with scoped tokens. A binding
 is a frozen read-only tool call, so the numbers cannot be hallucinated.
+
+An embed can also be a template for a document you get more than once, such as
+a printed digest or a weekly report. The layout is written once, the data is
+bound live, and the assistant's commentary for each issue goes in alongside
+it. Each issue is then printed to PDF or sent straight to the printer.
+Printed pages come out light on white with their colours kept, whatever theme
+you were viewing in.
 
 ## Documents
 

@@ -1,5 +1,24 @@
  # Next
 
+ * Documents built from templates. Ask for a digest, a report or anything
+   you'll print more than once, and the assistant builds it as a reusable
+   embed template: the layout once, the numbers bound live, its own
+   commentary filled in per issue, then printed to PDF or straight to the
+   printer. It's one call to build a data-bound embed now, and printed pages
+   always come out light on white with their colours kept, even from a dark
+   tab.
+
+ * A chat on a slow model is no longer cut off at ten minutes while it's still
+   working. A run now ends only when nothing at all has streamed for 240 s
+   (`chat.stall_s`) or after 30 minutes (`chat.timeout_s`), and whatever it had
+   already written stays on screen.
+
+ * Fixed: a model that thought and then said nothing ended the chat with an
+   empty answer. It's now asked once to do what it was thinking about.
+
+ * Conversations stay in the list for 30 quiet days before archiving, not 7,
+   and reopening an older conversation shows the tools each answer used.
+
  * The workspace on your own machine. When the service runs on a server, the
    desktop app keeps a `~/Turminder` folder in two-way sync with the
    assistant's files over the connection it already has, with nothing to set
