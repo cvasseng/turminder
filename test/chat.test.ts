@@ -659,6 +659,9 @@ describe('transcript completeness', () => {
         text: 'Here is what I found.',
         toolCalls: [{ name: 'memory.query', args: { query: 'x' } }],
       },
+      // Two, because the first silent turn is nudged once (§20.10); the
+      // second gives up and the earlier text stands.
+      { text: '' },
       { text: '' },
     );
     const sent = h.service.chat.send({ text: 'anything?' });

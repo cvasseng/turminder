@@ -319,6 +319,9 @@ export interface Settings {
   chatCoreNamespaces: string[];
   chatMaxTurns: number;
   chatMaxTokens: number;
+  /** The stall clock (§9): seconds a model call may stream nothing. */
+  chatStallS: number;
+  /** The ceiling behind it (§9): wall clock per run. */
   chatTimeoutS: number;
   /** Voice (§33, App. A): the conversation window, the utterance cap, the
    *  floor below which audio is not a sentence, and the spoken-line cap. */
@@ -452,7 +455,12 @@ export const DEFAULT_SETTINGS: Settings = {
   // prompt (40 turns of history plus retrieved memories) with room to answer.
   chatMaxTurns: 16,
   chatMaxTokens: 120_000,
-  chatTimeoutS: 600,
+  // Two clocks, not one (§9): a hung call is caught by the stall clock in
+  // minutes, and the ceiling only has to stop a run that streams forever. A
+  // flat wall clock short enough to catch the first ended a thinking model
+  // that was four slow calls into honest work.
+  chatStallS: 240,
+  chatTimeoutS: 1800,
 };
 
 /**
@@ -582,6 +590,7 @@ export function resolveSettings(
   if (raw.chat?.core_namespaces) s.chatCoreNamespaces = raw.chat.core_namespaces;
   if (raw.chat?.max_turns !== undefined) s.chatMaxTurns = raw.chat.max_turns;
   if (raw.chat?.max_tokens !== undefined) s.chatMaxTokens = raw.chat.max_tokens;
+  if (raw.chat?.stall_s !== undefined) s.chatStallS = raw.chat.stall_s;
   if (raw.chat?.timeout_s !== undefined) s.chatTimeoutS = raw.chat.timeout_s;
   return s;
 }

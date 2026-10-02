@@ -710,6 +710,41 @@ the server's (`POST /api/speak`, App. E), exactly as every word of a
   - an **OpenAI-compatible HTTP endpoint** (`/v1/chat/completions`,
     streaming supported) as a thin adapter for external tooling. It maps a
     request onto the same event path; it is ~an adapter, not a subsystem.
+- **Chat budgets are attended budgets** (App. A: `chat.max_turns` 16,
+  `chat.max_tokens` 120000, `chat.stall_s` 240, `chat.timeout_s` 1800;
+  G.1 `chat:`). Someone is watching a chat run and can stop it
+  (`chat.stop`), so its time limit exists to catch a *hung* run, not to
+  ration a working one. Two clocks:
+  - **The stall clock** (`chat.stall_s`) runs only while a model call is
+    in flight and the request has left the inference queue (§10.4 queue
+    wait never counts). Every chunk the stream yields resets it — text,
+    reasoning, and tool-call argument deltas alike, because a model writing
+    a 15k-character embed into a tool argument is working, not stalled. It
+    is suspended while tools execute (their own budgets apply, App. A) and
+    while a form or confirmation awaits a human. When it fires, the run ends
+    with stop reason `stalled`, run error `stalled: nothing streamed for
+    <stall_s>s`, and the `llm_call` row's error message `agent run stalled:
+    nothing streamed for stall_s=<stall_s>`.
+  - **The ceiling** (`chat.timeout_s`) is wall clock from the start of the
+    run, a backstop. Stop reason `timeout`, run error `timeout after
+    <timeout_s>s`, unchanged.
+  - Either way, the answer so far is kept, **including the text the cut-off
+    call had already streamed**: the user watched it arrive, so it is
+    salvaged exactly as the `chat.stop` branch salvages it (reserved markers
+    stripped, §20.8). The first clock to fire names the stop: a later timer
+    never relabels a run that was already stopped, stalled or timed out.
+    The stall clock exists only on a streamed call. A caller that does not
+    stream gets no stall clock even if it passes `stall_s`. The cut-short
+    banner names the knob: `answer cut short (stalled) — nothing arrived from the model
+    for <stall_s>s; chat.stall_s in config/turminder.yaml sets the limit`,
+    or the existing `answer cut short (timeout) — raise chat.timeout_s in
+    config/turminder.yaml`.
+  - Why (2026-10-02, run `01M3Z5RJ0QNFY5428MPJK3TB51`): a thinking model on
+    a hosted endpoint spent 130–190 s reasoning per call. The run was making
+    steady progress through four calls when the flat 600 s wall clock ended
+    it, before it could write the embed it had been gathering data for.
+    Handler runs are unattended and keep their single `timeout_s` (§5.4),
+    with no stall clock.
 - **A reopened conversation shows what its runs did.** `chat.history`
   (App. D.1) carries, on each assistant turn that has a `run_id`, that
   run's tool activity rebuilt from its `tool_call` trace rows in `seq`
@@ -2928,6 +2963,39 @@ prompted into noticing this reliably; the loop can count.
   (C.1), so the pattern is measurable — how often streaks happen and
   where is a query, and the threshold gets tuned from data (§17.11), not
   anecdotes.
+
+### 20.10 The silent turn
+
+A model turn can end with reasoning and nothing else: no text, no tool
+call. The loop used to treat that as the end of the run, and the run
+failed `empty response`. Observed 2026-10-02 (run
+`01M3Z5A7G5BWX5KQR8BMRQA4AR`): 9,896 output tokens, 40k characters of
+reasoning, `stop`, and nothing for the user. The person had to ask "did it
+not work?".
+
+- **A silent turn** is a model turn that returns `stop` (the gateway's
+  normal finish), whose text is empty after reasoning stripping (§20.1),
+  and that carries no tool calls, valid or invalid. A turn rejected by the
+  §20.8 guard is not a silent turn: that branch has already asked again.
+- On a silent turn, when the run has both a turn left (`max_turns`) and
+  token budget left (`max_tokens`, the loop-top check of §5.4), the loop
+  appends **one** note in the system voice and calls the model again:
+  *"System note: your last turn ended without a reply or a tool call, so
+  nothing happened — reasoning is not seen by anyone. Do what you were
+  working toward now: call the tool, or answer."* The note holds whether
+  or not the turn reasoned; the condition does not require reasoning. This quote IS the
+  shipped note, as in §20.8. It is a `user`-role message appended at the
+  tail like the §20.8 correction, so the prefix is untouched, and like
+  that correction it lives only inside the run, never persisted.
+- **Once per run** (App. A, `silent_turn_retries` 1). A second silent turn,
+  or one with no turn or token budget left, ends the run exactly as before
+  and is traced `gave_up`. The retry costs what it costs, against
+  the same budgets.
+- **Trace:** an `error` row `{message: "silent_turn", outcome: "nudged"|
+  "gave_up", reasoning_chars}` (C.1) for each silent turn, so how often
+  models do this is a query.
+- It applies to every run of the agent loop, handlers included: an
+  unattended handler that reasons and stops has the same nothing to show.
 
 ---
 
@@ -6015,6 +6083,10 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Budget `max_turns` | 10 | agent loop (§5.4) |
 | Budget `max_tokens` | 30000 (in+out, per run) | agent loop |
 | Budget `timeout_s` | 180 | agent loop |
+| Chat budget `chat.max_turns` | 16 | §9 — chat budgets |
+| Chat budget `chat.max_tokens` | 120000 (largest prompt + all output, per run) | §9 — chat budgets |
+| Chat stall limit `chat.stall_s` | 240s with nothing streamed during a model call | §9 — chat budgets |
+| Chat ceiling `chat.timeout_s` | 1800s wall clock per run | §9 — chat budgets |
 | Ingress payload excerpt | 4000 chars | ingress prompt (App. H) |
 | Memory auto-retrieve top-k | 5 | §5.4, §8.3 |
 | Chat context window | last 40 turns | §9 |
@@ -6098,6 +6170,7 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Capture note cap (`capture_note_max_chars`) | 2000 chars | §29.3 |
 | Quick note cap (`quick_note_max_chars`) | 2000 chars | §28.7 |
 | Futility streak threshold (`futile_streak_threshold`) | 3 consecutive empty results per namespace | §20.9 |
+| Silent-turn retries (`silent_turn_retries`) | 1 per run | §20.10 |
 | Watcher minimum cadence (`watch_min_interval_s`) | 300s (create refuses tighter) | §30.3 |
 | Watcher default cadence | 1800s when `every_s` omitted | §30.3 |
 | Watcher failure threshold (`watch_failure_threshold`) | 5 consecutive poll failures → `watch.failed`, edge-triggered | §30.2 |
@@ -6464,7 +6537,8 @@ default.
   whose `message` is `reserved_marker_in_output` — `excerpt` is the
   offending text as the model wrote it (before any strip), truncated to
   1000 chars like `result_excerpt` and dropped by the same retention job
-  (C.2)
+  (C.2); the silent-turn nudge (§20.10) adds `{outcome: "nudged"|"gave_up",
+  reasoning_chars: int}` to a row whose `message` is `silent_turn`
 
 ### C.2 Behavioral notes
 
@@ -7313,6 +7387,10 @@ files:                    # §18
   sync_max_mb: 50         # §18.6 desktop sync, per file
 chat:
   core_namespaces: [memory, files, schedule, deliver, time, weather, web, skills]  # §21.2
+  max_turns: 16           # §9 chat budgets
+  max_tokens: 120000
+  stall_s: 240            # nothing streamed during a model call this long → stalled
+  timeout_s: 1800         # wall-clock ceiling per run
 systools:                 # §23.1 — path overrides; default: probe $PATH
   chromium: null          # e.g. /usr/bin/chromium
   gpg: null               # §27.1 gpg backend

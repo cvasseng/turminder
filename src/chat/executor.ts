@@ -460,6 +460,9 @@ export class ChatExecutor {
         budgets: {
           maxTurns: config.settings.chatMaxTurns,
           maxTokens: config.settings.chatMaxTokens,
+          // Attended (§9): a stall clock catches a hung call, and the ceiling
+          // is only a backstop. Handler runs pass no stallS.
+          stallS: config.settings.chatStallS,
           timeoutS: config.settings.chatTimeoutS,
         },
         trace,
@@ -535,7 +538,9 @@ export class ChatExecutor {
                   ? ' — raise chat.max_tokens in config/turminder.yaml'
                   : result.stopReason === 'timeout'
                     ? ' — raise chat.timeout_s in config/turminder.yaml'
-                    : ''
+                    : result.stopReason === 'stalled'
+                      ? ` — nothing arrived from the model for ${config.settings.chatStallS}s; chat.stall_s in config/turminder.yaml sets the limit`
+                      : ''
               }`,
       });
       l.warn(

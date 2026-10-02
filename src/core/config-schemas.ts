@@ -150,6 +150,9 @@ export const TurminderYamlSchema = z.strictObject({
        */
       max_turns: z.number().int().positive().optional(),
       max_tokens: z.number().int().positive().optional(),
+      /** §9: nothing streamed during a model call this long ends the run. */
+      stall_s: z.number().int().positive().optional(),
+      /** §9: the wall-clock ceiling behind the stall clock. */
       timeout_s: z.number().int().positive().optional(),
     })
     .optional(),

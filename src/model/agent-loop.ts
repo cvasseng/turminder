@@ -60,7 +60,25 @@ function markerCorrection(markers: string[]): string {
   );
 }
 
-export type StopReason = 'stop' | 'max_turns' | 'max_tokens' | 'timeout' | 'aborted' | 'error';
+/**
+ * Silent-turn retries (§20.10, App. A): once per run, not per response. A
+ * model that reasons and stops twice has been told what nothing means and did
+ * it again; a third call would only spend more of somebody's patience.
+ */
+const SILENT_TURN_RETRIES = 1;
+
+/**
+ * The silent-turn note (§20.10) — this quote IS the shipped text, and the spec
+ * and this string move together. Appended at the tail in the user role like
+ * the §20.8 correction, so the prefix is untouched; run-local, never persisted.
+ */
+const SILENT_TURN_NOTE =
+  'System note: your last turn ended without a reply or a tool call, so ' +
+  'nothing happened — reasoning is not seen by anyone. Do what you were ' +
+  'working toward now: call the tool, or answer.';
+
+export type StopReason =
+  'stop' | 'max_turns' | 'max_tokens' | 'timeout' | 'stalled' | 'aborted' | 'error';
 
 export interface AgentRunRequest {
   selector: ModelSelector;
@@ -185,9 +203,42 @@ export async function runAgent(
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
+    if (controller.signal.aborted) return;
     timedOut = true;
     controller.abort(new Error(`agent run exceeded timeout_s=${budgets.timeoutS}`));
   }, budgets.timeoutS * 1000);
+  /**
+   * The stall clock (§9), when the caller asked for one. Armed by the gateway's
+   * first tick (the call has left the queue), reset by every tick after it, and
+   * disarmed the moment the call settles — so tool execution, and a form or
+   * confirmation waiting on a human inside one, never runs it. A run that is
+   * working slowly lives; one whose stream went quiet ends here rather than at
+   * the ceiling. Streamed calls only: a call that does not stream ticks once,
+   * on leaving the queue, and would read its own generation as silence.
+   *
+   * Each clock stands down if the run is already stopped: the first to fire
+   * names the stop, and a later timer never relabels it (§9).
+   */
+  let stalled = false;
+  let stallTimer: ReturnType<typeof setTimeout> | undefined;
+  const disarmStall = () => {
+    if (stallTimer !== undefined) clearTimeout(stallTimer);
+    stallTimer = undefined;
+  };
+  const stallS = budgets.stallS;
+  const onProgress =
+    stallS === undefined || !req.onDelta
+      ? undefined
+      : () => {
+          disarmStall();
+          stallTimer = setTimeout(() => {
+            if (controller.signal.aborted) return;
+            stalled = true;
+            controller.abort(
+              new Error(`agent run stalled: nothing streamed for stall_s=${stallS}`),
+            );
+          }, stallS * 1000);
+        };
   const onOuterAbort = () => controller.abort(req.abortSignal?.reason ?? new Error('aborted'));
   req.abortSignal?.addEventListener('abort', onOuterAbort, { once: true });
 
@@ -210,6 +261,8 @@ export async function runAgent(
   const writes = new Map<string, number>();
   // Fabrication-guard retries spent on the current assistant response (§20.8).
   let markerRetries = 0;
+  // Silent-turn nudges spent this run (§20.10) — never restored.
+  let silentRetries = 0;
   // Consecutive empty results per tool namespace (§20.9), reset by any
   // non-empty result from that namespace.
   const futile = new Map<string, number>();
@@ -294,7 +347,11 @@ export async function runAgent(
         ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
         ...(req.jsonSchema ? { jsonSchema: req.jsonSchema } : {}),
         ...(req.grammar ? { grammar: req.grammar } : {}),
+        ...(onProgress ? { onProgress } : {}),
       });
+      // Settled: from here until the next call, nothing the model does is
+      // late — tools, forms and confirmations run on their own budgets (§9).
+      disarmStall();
 
       endpoint = turn.endpoint.name;
       tokensIn += turn.tokensIn;
@@ -591,24 +648,61 @@ export async function runAgent(
       }
 
       if (!valid.length && !invalid.length) {
+        /**
+         * The silent turn (§20.10): a normal finish with nothing in it but
+         * reasoning — no text, no tool call of any kind. `turn.text` rather
+         * than the post-guard text, so a §20.8 strip that left nothing is not
+         * mistaken for one: the guard has already dealt with that turn.
+         */
+        if (turn.finishReason === 'stop' && !turn.text.trim() && !turn.toolCalls.length) {
+          // Only with a turn and token budget left — the loop-top checks —
+          // so a nudge never buys a call the budgets would refuse anyway.
+          const nudge =
+            silentRetries < SILENT_TURN_RETRIES &&
+            turns < budgets.maxTurns &&
+            promptTokens + tokensOut < budgets.maxTokens;
+          trace.append('error', {
+            message: 'silent_turn',
+            outcome: nudge ? 'nudged' : 'gave_up',
+            reasoning_chars: turn.reasoningChars,
+          });
+          if (nudge) {
+            silentRetries += 1;
+            l.warn(
+              { turn: turns, reasoning_chars: turn.reasoningChars },
+              'model turn ended with reasoning only; nudging once',
+            );
+            messages.push({ role: 'user', content: SILENT_TURN_NOTE });
+            continue;
+          }
+        }
         stopReason = 'stop';
         break;
       }
     }
   } catch (e) {
-    if (timedOut) {
-      stopReason = 'timeout';
-      error = `timeout after ${budgets.timeoutS}s`;
-    } else if (req.abortSignal?.aborted) {
-      stopReason = 'aborted';
-      error = 'aborted';
-      // Keep what the aborted turn had already said. Stripped like any fresh
-      // output (§20.8) — this text died before the guard could look at it.
+    // Keep what the cut-off turn had already said: the user watched it
+    // arrive (§9). Stripped like any fresh output (§20.8) — this text died
+    // before the guard could look at it.
+    const salvage = () => {
       const partial = stripReservedMarkers(streamedThisTurn).trim();
       if (partial) {
         text = partial;
         spoken.push(partial);
       }
+    };
+    if (timedOut) {
+      stopReason = 'timeout';
+      error = `timeout after ${budgets.timeoutS}s`;
+      salvage();
+    } else if (stalled) {
+      stopReason = 'stalled';
+      error = `stalled: nothing streamed for ${stallS}s`;
+      salvage();
+    } else if (req.abortSignal?.aborted) {
+      stopReason = 'aborted';
+      error = 'aborted';
+      salvage();
     } else {
       stopReason = 'error';
       error = errMessage(e);
@@ -621,6 +715,7 @@ export async function runAgent(
     l.warn({ stopReason, error }, 'agent run ended abnormally');
   } finally {
     clearTimeout(timer);
+    disarmStall();
     req.abortSignal?.removeEventListener('abort', onOuterAbort);
   }
 

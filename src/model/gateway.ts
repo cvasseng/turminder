@@ -122,6 +122,14 @@ export interface TurnRequest {
   onReasoning?: (text: string) => void;
   /** Progress feedback for whoever is watching (chat UI). */
   onActivity?: (activity: AgentActivity) => void;
+  /**
+   * A tick, never content: once when the call leaves the inference queue, then
+   * once per part the stream yields — text, reasoning, and tool-call argument
+   * deltas alike (§9 stall clock). The last kind is the reason this exists
+   * rather than reusing `onDelta`/`onReasoning`: a model writing a long tool
+   * argument streams nothing on either, and is working, not stalled.
+   */
+  onProgress?: () => void;
 }
 
 export interface RawToolCall {
@@ -292,6 +300,9 @@ export class ModelGateway {
         : {}),
       fn: async ({ queueWaitMs }) => {
         const started = Date.now();
+        // Out of the queue: from here a quiet stream is the model's silence,
+        // not the scheduler's (§9 — queue wait never counts as a stall).
+        req.onProgress?.();
         // The wrapped fetch writes into this (§21.1). One slot per call, so a
         // second concurrent call on the same endpoint cannot land in it.
         const timings: TimingsSlot = {};
@@ -337,6 +348,9 @@ export class ModelGateway {
               let acc = '';
               let reasoning = 0;
               for await (const part of r.fullStream) {
+                // Every part, before anything filters it: a tool-input delta
+                // is the only sign of life a long tool argument gives (§9).
+                req.onProgress?.();
                 if (part.type === 'error') {
                   // Once the stream flushes, ai-sdk replaces a mid-stream
                   // failure with a generic NoOutputGeneratedError ("No output

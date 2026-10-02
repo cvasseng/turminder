@@ -153,7 +153,14 @@ export function priceLabel(cost: EndpointCost | undefined): string {
 export interface Budgets {
   maxTurns: number;
   maxTokens: number;
+  /** Wall clock for the whole run. For chat, the ceiling behind `stallS` (§9). */
   timeoutS: number;
+  /**
+   * The stall clock (§9): the longest a model call may stream nothing once it
+   * has left the queue. Absent means no stall clock — handler runs are
+   * unattended and keep their single `timeoutS` (§5.4).
+   */
+  stallS?: number;
 }
 
 /**
