@@ -84,6 +84,11 @@ export function hashContent(content: string): string {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
+/** The version of a file (§18.6): lowercase hex sha256 of its bytes. */
+export function hashBytes(data: Buffer): string {
+  return crypto.createHash('sha256').update(data).digest('hex');
+}
+
 /** A NUL byte is the same heuristic `grep -I` uses, and it is good enough. */
 export function looksBinary(buf: Buffer): boolean {
   return buf.subarray(0, 8192).includes(0);
@@ -360,6 +365,41 @@ export class FileStore {
     const committed = this.commit(message, clean);
     this.opts.onWrite?.(clean, next, 'modified');
     l.info({ path: clean, committed }, 'file edited');
+    return { path: clean, committed };
+  }
+
+  /** A store path validated by the F.8 rules, as `{rel, abs}`; throws `PathRejected`. */
+  locate(rel: string): { rel: string; abs: string } {
+    return this.file(rel);
+  }
+
+  /**
+   * A **user edit** arriving over the desktop-sync routes (§18.6): the bytes
+   * are written and committed, and `onWrite` is deliberately *not* called —
+   * no self-write suppression, so the §18.4 watcher settles the change like
+   * one made in an editor on the server's own disk.
+   */
+  writeUserBytes(
+    rel: string,
+    data: Buffer,
+    message: string,
+  ): { path: string; committed: boolean; existed: boolean } {
+    const { abs, rel: clean } = this.file(rel);
+    const existed = fs.existsSync(abs);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, data);
+    const committed = this.commit(message, clean);
+    l.info({ path: clean, committed, bytes: data.length }, 'synced file written');
+    return { path: clean, committed, existed };
+  }
+
+  /** The delete half of {@link writeUserBytes}: unlink + commit, no `onWrite`. */
+  deleteUser(rel: string, message: string): { path: string; committed: boolean } {
+    const { abs, rel: clean } = this.file(rel);
+    if (!fs.existsSync(abs)) throw new FileStoreError('not_found', `no such file: ${clean}`);
+    fs.rmSync(abs);
+    const committed = this.commit(message, clean);
+    l.info({ path: clean, committed }, 'synced file deleted');
     return { path: clean, committed };
   }
 

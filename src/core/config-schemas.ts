@@ -121,6 +121,8 @@ export const TurminderYamlSchema = z.strictObject({
       quiescence_s: z.number().int().positive().optional(),
       markers: z.array(z.string().min(1)).optional(),
       watch_rate_limit_s: z.number().int().positive().optional(),
+      /** Per-file size limit for desktop sync (§18.6, App. A). */
+      sync_max_mb: z.number().positive().optional(),
     })
     .optional(),
   daemon: z

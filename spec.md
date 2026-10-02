@@ -2102,6 +2102,111 @@ preview that silently does nothing.
 ## 19. Interactive forms and chat-driven setup
 
 ### 19.1 The form primitive
+### 18.6 Desktop sync: the store on another machine (normative)
+
+When the service runs on a server and the desktop app connects to it
+(§28.1 connect mode), the user still wants to edit the store's files on
+their own machine, in their own editor, and have the assistant see the
+edits. (Christer, 2026-10-02.) The answer needs **zero configuration**: no
+Syncthing, no WebDAV mount, no second credential. The shell already holds
+an authenticated connection, so the shell syncs over it — the client half
+is §28.8; this section is the server half and the protocol.
+
+**What syncs:** the whole store, every file `files.list` would list
+(ignored paths, `.turminderignore` itself and `.git/` never), text and
+binary alike, up to `files.sync_max_mb` per file (G.1, App. A). Files only:
+empty directories are not synced.
+
+**A synced change is a user edit.** It is written to disk and committed,
+and is otherwise exactly an edit the user made on the server's own disk:
+the store's self-write suppression is **not** applied, so the §18.4
+watcher settles it after quiescence — indexed, marker-scanned (a
+`@turminder` line typed on the laptop fires `file.request`), `file.changed`
+for subscribers, `files.changed` to connected screens. The sync routes add
+exactly one thing a raw disk edit lacks: **the commit**, so `git log -p`
+still answers "who changed my todo list". Commit messages, verbatim, with
+`<device>` the authenticated device id and `<path>` store-relative:
+
+| change | commit message |
+|---|---|
+| upload, path did not exist | `Added on <device>: <path>` |
+| upload, path existed | `Edited on <device>: <path>` |
+| delete | `Deleted on <device>: <path>` |
+| conflict copy (below) | `Conflict copy from <device>: <conflict_path>` |
+
+**Versions are content hashes.** The version of a file is the lowercase hex
+sha256 of its **bytes** (for a text file this equals `hashContent` of its
+UTF-8 content). The server computes every hash; the client never hashes —
+it remembers the hash the server gave it for the version it last synced
+(the *base*) and detects its own local changes by `(mtime, size)` alone.
+Every mutation carries the base it was made against, and the server
+applies it **compare-and-swap**: if the file's current hash is not the
+base, the change was made against a version that no longer exists.
+
+**Conflicts keep both, server version in place.** A `PUT` whose base does
+not match (and whose bytes differ from what the server holds) never
+overwrites. The server writes the uploaded bytes to a conflict copy beside
+the original — `<dir>/<stem> (conflict from <device> <YYYY-MM-DD HHmm>)<ext>`,
+local time; on a name collision ` 2`, ` 3`, … is appended inside the
+parenthesis — through the store's ordinary write path (so the copy is
+indexed and treated as a self-write: its markers **do not** re-fire),
+commits it, and queues one `notify` delivery (title
+`Sync conflict: <path>`, body `<device> and <instance> both changed
+<path>. <instance>'s version stayed; <device>'s is in <conflict_path>.`,
+`<instance>` the instance name or `the server` before onboarding). The
+client then takes the server's version for the original path, and receives
+the conflict copy like any other new file. A `DELETE` whose base does not
+match deletes nothing: an edit made while the other side was deleting
+always wins over the delete. Nothing is ever silently lost.
+
+**Routes** (App. E, all bearer-auth, the device token the shell already
+holds):
+
+- `GET /api/files/manifest` → `{files: [{path, sha256, size, mtime}], max_bytes}`
+  — every syncable file. Files over the limit are **listed** (a client
+  that thought one was deleted would delete its copy); the client skips
+  them. Hashes are cached in memory by `(path, mtimeMs, size)` so a
+  manifest of an unchanged store reads no file bytes.
+- `GET /api/files/raw?path=` — the existing route, now also carrying
+  `X-Turminder-Sha256: <hash of the bytes served>`: the hash the client
+  records must describe the bytes it got, not a manifest entry that may
+  have moved on since.
+- `PUT /api/files/sync?path=` — body = the file's bytes
+  (`application/octet-stream`), header `X-Turminder-Base: <sha256>` or
+  `none` (the client has never synced this path). In order: path rejected
+  by F.8 rules, **or a path naming a directory or passing through a
+  file** (`todo.md/x.md`) → 403 `{error: "path_rejected"}`; ignored path
+  → 422 `{error: "ignored"}`; body over `max_bytes` → 413 `{error:
+  "too_large", max_bytes}`, decided from `Content-Length` **before** the
+  body is read when the header is present (a reset connection is a retry
+  to the client; a 413 is an answer); bytes equal the current file → 200
+  `{path, sha256, action: "unchanged", committed: false}` (whatever the
+  base said — two sides that agree are not in conflict); current hash =
+  base, **or the file is absent, whatever the base** → write + commit →
+  200 `{path, sha256, action: "created"|"modified", committed}` (an edit
+  made against a version the server has since deleted recreates the file
+  at its own name: an edit beats a delete, in this direction too);
+  anything else → 409 `{error: "conflict", path, conflict_path, sha256}`
+  with `sha256` the version that stayed. A write that fails on the
+  server's disk (`EACCES`, `ENOSPC`, a name too long once the conflict
+  suffix is added) — the original or the conflict copy — answers 422
+  `{error: "unwritable", message}` with nothing committed, never a bare
+  500 the client would retry forever.
+- `DELETE /api/files/sync?path=` — header `X-Turminder-Base: <sha256>`
+  (required; missing → 400 `{error: "bad_request"}`). The same 403 and
+  422 gates as `PUT`, in the same order — an ignored path, `.turminderignore`
+  and `.git/` included, is never deleted by sync. Absent → 404
+  `{error: "not_found"}`; current hash ≠ base → 409 `{error: "conflict",
+  path, sha256}`, nothing deleted; an unlink that fails on disk → 422
+  `{error: "unwritable", message}`; otherwise unlink + commit → 200
+  `{path, deleted: true, committed}`.
+
+**Limits, deliberately:** a change made directly on the server's disk by
+another program is indexed (§18.4) but not committed — that is unchanged
+by this section. There is no sync of `files.dir` stores other than through
+the store itself; a `files.dir` pointing elsewhere syncs exactly the same
+way, because the routes speak to the store, not to `data/files/`.
+
 
 An agent can summon a structured form to be rendered inline in the current
 chat conversation: the `setup.form` tool (App. F.9) sends a `form.request`
@@ -5655,6 +5760,7 @@ This is deliberate rather than lazy. eSCL has no push, and a panel-initiated
 scan does not appear in the device's own job list; a poller would therefore
 mostly discover scans we started ourselves. The drop folder is the mechanism
 the hardware actually offers.
+| Desktop sync per-file size limit (`files.sync_max_mb`) | 50 MB | §18.6 — over it, a file is listed but neither uploaded nor downloaded. MB = 2^20 bytes, a positive number (fractions allowed); `max_bytes` = floor(mb × 1048576) |
 
 What Turminder does **not** do is serve that folder. A printer scans to SMB,
 FTP or email, and standing up a file share is the operating system's job, not
@@ -6372,6 +6478,7 @@ completes the same sign-in first.
 Pending `form.request`s are re-sent after `welcome` to `forms`-capable
 devices. Forms are transient like `chat.delta` — never outboxed; the
 suspension row is the durable state.
+| `files.changed` | `{path, change: "created"\|"modified"\|"deleted"}` — a store file changed, by any writer (§18.4–18.6); sent to `files`-capable devices: the chat UI's panel, and the desktop shell in connect mode as a sync trigger (§28.8). Transient — the durable record is the git history. Catalogued retroactively with §18.6; it shipped with phase 12 |
 
 A run is not the only thing that may raise one. **Pairing (§24.4) raises a
 form with no run and no conversation**: `run_id` and `conversation_id` are
@@ -6406,7 +6513,10 @@ localStorage and uses it for `/ws`.
 | `POST /embed-api/<id>/event?t=` | `{action, data?}` → `{accepted}`; emits `embed.action` (§22.4) |
 | `GET /embed-api/<id>/state?t=` | → `{state}` — the pouch |
 | `PUT /embed-api/<id>/state?t=` | whole-blob replace, ≤ 64KB → `{accepted, bytes}` |
-| `GET /api/files/raw?path=` | bearer auth; serves a file-store file `Content-Disposition: inline`, `X-Content-Type-Options: nosniff` — the §18.5 preview source. Images and PDFs get their real Content-Type; **HTML is never served as HTML** and SVG carries `Content-Security-Policy: default-src 'none'` — a store file may be assistant-authored and this route answers on the origin holding the device token, so anything else is served `text/plain` (assistant-authored pages run in the §22.3 embed sandbox, never here). Path normalization + symlink rules are F.8's, through the same resolution code (one door); traversal → 403, unknown or a directory → 404, no `path` → 400. The UI fetches with the bearer token and object-URLs the blob (an `<img>`/`<embed>` src cannot carry an Authorization header) |
+| `GET /api/files/raw?path=` | bearer auth; serves a file-store file `Content-Disposition: inline`, `X-Content-Type-Options: nosniff` — the §18.5 preview source. Images and PDFs get their real Content-Type; **HTML is never served as HTML** and SVG carries `Content-Security-Policy: default-src 'none'` — a store file may be assistant-authored and this route answers on the origin holding the device token, so anything else is served `text/plain` (assistant-authored pages run in the §22.3 embed sandbox, never here). Path normalization + symlink rules are F.8's, through the same resolution code (one door); traversal → 403, unknown or a directory → 404, no `path` → 400. Every 200 carries `X-Turminder-Sha256` (hex sha256 of the bytes served) — the version a §28.8 download records. The UI fetches with the bearer token and object-URLs the blob (an `<img>`/`<embed>` src cannot carry an Authorization header) |
+| `GET /api/files/manifest` | bearer auth → `{files: [{path, sha256, size, mtime}], max_bytes}` — every syncable store file (§18.6): the `files.list` set, binaries included, files over `files.sync_max_mb` listed too. `sha256` is of the bytes, cached by `(path, mtimeMs, size)` |
+| `PUT /api/files/sync?path=` | bearer auth; body = the bytes, header `X-Turminder-Base: <sha256>\|none` → compare-and-swap write + commit (§18.6). 200 `{path, sha256, action: "created"\|"modified"\|"unchanged", committed}`; 409 `{error: "conflict", path, conflict_path, sha256}` (the upload is kept as the conflict copy, the server's version stays, one `notify` queued; a file the server deleted is recreated instead — 200 `created`); 413 `{error: "too_large", max_bytes}`; 422 `{error: "ignored"}`; 403 `{error: "path_rejected"}` (also a directory, or a path through a file); 400 `{error: "bad_request"}` without `path` or base header. 413 decided from `Content-Length` before reading when present; 422 `{error: "unwritable", message}` when the disk write fails, nothing committed. Checked in §18.6's order |
+| `DELETE /api/files/sync?path=` | bearer auth; header `X-Turminder-Base: <sha256>` (required) → 200 `{path, deleted: true, committed}`; 409 `{error: "conflict", path, sha256}` (nothing deleted); 404 `{error: "not_found"}`; 422 `{error: "ignored"}` (an ignored path, `.turminderignore` and `.git/` included, is never deleted), or `{error: "unwritable", message}` when the unlink fails; 403/400 as `PUT` (§18.6) |
 | `POST /api/uploads` | bearer auth; body = the file (`Content-Type` + `X-Upload-Name` headers) → `{upload_id, sha256, mime, bytes}` (§26.1). Type outside the whitelist → 415 `{error: "unsupported_media_type"}`; over `upload_max_mb` → 413 `{error: "too_large"}` |
 | `GET /api/uploads/<id>` | bearer auth; the stored bytes, real Content-Type, inline — transcript re-display (§26.2). Expired/unknown → 404 |
 | `POST /api/voice` | bearer auth; body `audio/wav` (16 kHz mono preferred) up to `voice_max_utterance_s` → `audio/wav`, chunked, produced sentence by sentence (§33.2); response headers `X-Turminder-Conversation` (the voice conversation id) and `X-Turminder-Transcript` (what was heard, RFC 8187-encoded). `413 {error: "too_long"}`, `415 {error: "unsupported_media_type"}`, `422 {error: "nothing_heard"}` (empty, too short, or a silence hallucination — nothing written, no chat run; the transcription itself is traced), `502 {error: "speech_failed"}` when the transcriber or the synthesiser was reachable and failed — an outage, not an answer, and the only one of these that can also happen *after* the 200, where the response is simply cut short because there is no status code left to send, `503 {error: "no_speech_endpoint", kind}` naming the missing kind |
@@ -7101,6 +7211,7 @@ user_name: Alex
 timezone: Europe/Oslo
 locale: en
 onboarded_at: 2026-08-20T…Z
+  sync_max_mb: 50         # §18.6 desktop sync, per file
 ---
 ```
 

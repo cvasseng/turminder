@@ -311,6 +311,8 @@ export interface Settings {
   filesQuiescenceS: number;
   filesMarkers: string[];
   filesWatchRateLimitS: number;
+  /** Desktop sync's per-file size limit (§18.6). */
+  filesSyncMaxMb: number;
   chatTools: string[];
   chatConfirm: string[];
   /** Tool namespaces open in every conversation from the first turn (§21.2.1). */
@@ -390,6 +392,7 @@ export const DEFAULT_SETTINGS: Settings = {
   filesQuiescenceS: 30,
   filesMarkers: ['@turminder'],
   filesWatchRateLimitS: 600,
+  filesSyncMaxMb: 50,
   // `config.*` is here so the assistant can author its own handlers and tune
   // its own personality from chat (plan §6). Calendar writes are included
   // because the user is present and asked; the destructive one is gated below.
@@ -552,6 +555,7 @@ export function resolveSettings(
   if (raw.files?.watch_rate_limit_s !== undefined) {
     s.filesWatchRateLimitS = raw.files.watch_rate_limit_s;
   }
+  if (raw.files?.sync_max_mb !== undefined) s.filesSyncMaxMb = raw.files.sync_max_mb;
   if (raw.systools?.chromium !== undefined) s.systoolChromium = raw.systools.chromium;
   if (raw.systools?.gpg !== undefined) s.systoolGpg = raw.systools.gpg;
   if (raw.systools?.git !== undefined) s.systoolGit = raw.systools.git;

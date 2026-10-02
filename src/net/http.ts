@@ -10,7 +10,8 @@ import { readUiFile, shellVersion } from './static.js';
 import { handleCommit, handleProbe, setupErrorBody, setupStatus } from './setup-api.js';
 import { EmbedRoutes } from './embed-api.js';
 import { VoiceRoutes } from './voice-api.js';
-import { mimeForPath } from '../files/store.js';
+import { hashBytes, mimeForPath } from '../files/store.js';
+import { FileSync } from '../files/sync.js';
 import { NoteCapturedPayload, PageCapturedPayload } from '../core/config-schemas.js';
 import { PathRejected } from '../tools/paths.js';
 import { WsGateway } from './ws.js';
@@ -150,8 +151,17 @@ export class HttpServer {
   readonly ws: WsGateway;
   private readonly embeds: EmbedRoutes;
   private readonly voice: VoiceRoutes;
+  private readonly fileSync: FileSync;
 
   constructor(private readonly service: Service) {
+    this.fileSync = new FileSync({
+      store: service.files,
+      maxBytes: () => Math.floor(service.app.config.settings.filesSyncMaxMb * 1024 * 1024),
+      instanceName: () =>
+        service.app.config.identity()?.frontmatter.instance_name ?? 'the server',
+      notify: (title, body) =>
+        void service.outbox.queue({ intent: 'notify', payload: { title, body } }),
+    });
     this.embeds = new EmbedRoutes(service);
     this.voice = new VoiceRoutes(service);
     this.server = http.createServer((req, res) => void this.handle(req, res));
@@ -378,8 +388,60 @@ export class HttpServer {
             // Never let a browser upgrade a served file into something
             // executable by sniffing its bytes.
             'x-content-type-options': 'nosniff',
+            // The version this exact byte string is (§18.6): a sync client
+            // records this, not a manifest entry that may have moved on.
+            'x-turminder-sha256': hashBytes(body),
           });
           return void res.end(body);
+        }
+
+        /* Desktop sync (§18.6, App. E): the manifest, then CAS writes. */
+        case 'GET /api/files/manifest': {
+          if (!this.authorised(req)) return this.json(res, 401, { error: 'unauthorized' });
+          return this.json(res, 200, {
+            files: this.fileSync.manifest(),
+            max_bytes: this.fileSync.maxBytes,
+          });
+        }
+
+        case 'PUT /api/files/sync': {
+          const device = this.deviceFor(req);
+          if (!device) return this.json(res, 401, { error: 'unauthorized' });
+          const rel = url.searchParams.get('path') ?? '';
+          const base = String(req.headers['x-turminder-base'] ?? '').trim();
+          if (!rel || !base) return this.json(res, 400, { error: 'bad_request' });
+          const refused = this.fileSync.precheck(rel);
+          if (refused) return this.json(res, refused.status, refused.body);
+          const declared = Number(req.headers['content-length']);
+          if (Number.isFinite(declared) && declared > this.fileSync.maxBytes) {
+            // Refused from the header alone: the body is never consumed.
+            res.setHeader('connection', 'close');
+            return this.json(res, 413, {
+              error: 'too_large',
+              max_bytes: this.fileSync.maxBytes,
+            });
+          }
+          let bytes: Buffer;
+          try {
+            bytes = await readBytes(req, this.fileSync.maxBytes);
+          } catch {
+            return this.json(res, 413, {
+              error: 'too_large',
+              max_bytes: this.fileSync.maxBytes,
+            });
+          }
+          const result = this.fileSync.put(rel, bytes, base, device);
+          return this.json(res, result.status, result.body);
+        }
+
+        case 'DELETE /api/files/sync': {
+          const device = this.deviceFor(req);
+          if (!device) return this.json(res, 401, { error: 'unauthorized' });
+          const rel = url.searchParams.get('path') ?? '';
+          const base = String(req.headers['x-turminder-base'] ?? '').trim();
+          if (!rel || !base) return this.json(res, 400, { error: 'bad_request' });
+          const result = this.fileSync.delete(rel, base, device);
+          return this.json(res, result.status, result.body);
         }
 
         /*

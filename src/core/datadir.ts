@@ -106,6 +106,7 @@ files:
   quiescence_s: 30
   markers: ["@turminder"]
   watch_rate_limit_s: 600
+  sync_max_mb: 50         # §18.6 desktop sync, per file
 systools:                 # §23.1 — path overrides; default: probe $PATH
   chromium: null          # e.g. /usr/bin/chromium
   gpg: null               # §27.1 gpg secret backend
