@@ -1,5 +1,27 @@
  # Next
 
+ * Long jobs no longer lose their work to the context window. A run that
+   fills the model's window shrinks old tool results and spare copies of
+   instructions and keeps going, instead of being cut off or refused. An
+   answer the window cut off is never saved as finished: it's asked for once
+   more, and if it still doesn't fit you're told why. The service learns the
+   window each endpoint really serves (at startup, or from the endpoint's own
+   refusal) without touching models.yaml, and an optional
+   `max_output_tokens` per endpoint caps what's requested from providers
+   that refuse more.
+
+ * The assistant remembers what its last answer did. Each answer carries a
+   short record of what it created or changed (with ids) and how it ended,
+   so "try again" after a failure picks up from what was already built,
+   instead of starting over or rebuilding it.
+
+ * Every run knows today's date and time from the start, and tool sets you
+   stopped using in a conversation close again after three messages.
+
+ * Long calendar, task and other list results are cut at whole items with
+   "6 of 23 shown", instead of mid-entry, and calendar and Asana results
+   leave out fields nobody reads.
+
  * Documents built from templates. Ask for a digest, a report or anything
    you'll print more than once, and the assistant builds it as a reusable
    embed template: the layout once, the numbers bound live, its own

@@ -16,6 +16,13 @@ tools each answer used, collapsed above it as they were live. A chat run is
 never cut off while it is still streaming: it stops only after 240 s with
 nothing arriving (`chat.stall_s`) or at 30 minutes (`chat.timeout_s`).
 
+Long jobs survive a small context window. When a run fills the model's
+window, older tool results and spare copies of instructions are shrunk and the
+run carries on. The real window of each endpoint is learned, not trusted from
+config. Each answer also carries a short record of what it changed and how it
+ended, so asking again after a failure continues from what was built. Every
+run knows the current date from its first step.
+
 Focus mode hides the top bar and the sidebar and sets the conversation in a
 narrower column with larger text, for reading or writing at length. Esc brings
 the rest back.
