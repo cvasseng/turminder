@@ -6171,6 +6171,7 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Quick note cap (`quick_note_max_chars`) | 2000 chars | §28.7 |
 | Futility streak threshold (`futile_streak_threshold`) | 3 consecutive empty results per namespace | §20.9 |
 | Silent-turn retries (`silent_turn_retries`) | 1 per run | §20.10 |
+| Shipped skill size (`shipped_skill_max_chars`) | 8000 chars | G.8 |
 | Watcher minimum cadence (`watch_min_interval_s`) | 300s (create refuses tighter) | §30.3 |
 | Watcher default cadence | 1800s when `every_s` omitted | §30.3 |
 | Watcher failure threshold (`watch_failure_threshold`) | 5 consecutive poll failures → `watch.failed`, edge-triggered | §30.2 |
@@ -7624,6 +7625,16 @@ to work around — and `neverElide` (§20.4), because a skill body is the run's
 instructions rather than data it can re-fetch for free. A skill that does
 not fit 20k is a skill to split, and it says so in the result like any other
 truncation.
+
+**A shipped skill stays under `shipped_skill_max_chars`** (App. A, 8000),
+and a test enforces it. A skill is never elided while it is the run's
+brief, so its size is paid on every call of every run that reads it.
+Observed 2026-10-02: `embeds` had grown to 16.7k characters (about 4.5k
+tokens) and arrived twice in one run, close to a third of a 32k window.
+Larger guidance is split into **companion skills** named `<skill>-<part>`
+(`embeds-templates`, `embeds-presentations`, `embeds-mini-apps`). The parent
+names them in one line each, saying when to fetch which. There is no new
+mechanism: each is an ordinary skill in the roster.
 
 ### G.9 Memory files — `memory/<name>.md`
 
