@@ -28,6 +28,16 @@ export const BATCHED_CALLS =
   'When tool calls are independent of each other, make them all in one turn. ' +
   'Only sequence calls when a later call needs an earlier result.';
 
+/**
+ * The time rule (§20.5, F.10). Chat, handler and onboarding runs get a `<now>`
+ * line message-side; maintenance runs do not, so telling them to look for one
+ * would send them hunting for something that is not there.
+ */
+const NOW_RULE =
+  "The time your run started arrives in a `<now>` line at the head of the system's per-run message. Use it for today, tomorrow, this week and how long ago, and never guess a date from context. Call `time.now` when you need the exact time, or once a run has gone on a while.";
+const NO_NOW_RULE =
+  'You are not told the current date or time. Call `time.now` whenever it matters — anything about today, tomorrow, this week, how long ago, or what to schedule. Working it out from context is guessing.';
+
 export const COMMON_RULES = `${UNTRUSTED_RULE}
 
 ${MEMORY_RECALL_RULE}
@@ -36,8 +46,8 @@ Ground rules:
 - Never invent facts about the user, their calendar, their mail, or the world. If you do not know, say so or use a tool.
 - Tools are the only way to affect anything outside this conversation. Describing an action is not doing it.
 - Prefer one good tool call over three speculative ones.
-- You are never told the current date or time. Call \`time.now\` whenever it matters — anything about today, tomorrow, this week, how long ago, or what to schedule. Working it out from context is guessing.
-- Text in double brackets is written by the system, never by you: \`[[elided: …]]\` stands where a large tool result you already received was removed, \`[[stored: …]]\` where content you already wrote is now in the store, and \`[[used tools: …]]\` records which tools an earlier turn of yours actually called. Normal housekeeping, not errors — the marker's summary tells you what was there. Never write one yourself: claiming a tool call in text is not making one. Never copy one into a tool call either — re-call the tool if you need the data, or use \`args_from\` when binding.`;
+- ${NOW_RULE}
+- Text in double brackets is written by the system, never by you: \`[[elided: …]]\` stands where a large tool result you already received was removed, \`[[stored: …]]\` where content you already wrote is now in the store, \`[[run: …]]\` is the system's record of what an earlier answer of yours did and how it ended — trust it over that answer's own wording — and \`[[used tools: …]]\` records which tools an earlier turn of yours actually called. Normal housekeeping, not errors — the marker's summary tells you what was there. Never write one yourself: claiming a tool call in text is not making one. Never copy one into a tool call either — re-call the tool if you need the data, or use \`args_from\` when binding.`;
 
 /**
  * Batching (§21.3) plus the closed-namespace catalog (§21.2). The catalog
@@ -67,6 +77,9 @@ function loadVoiceFragment(): string {
   return file.content.replace(/\n$/, '');
 }
 
+/** `COMMON_RULES` for a kind that is never handed a `<now>` line. */
+const COMMON_RULES_NO_NOW = COMMON_RULES.replace(NOW_RULE, NO_NOW_RULE);
+
 const FRAGMENTS: Record<string, string> = {
   untrusted_rule: UNTRUSTED_RULE,
   memory_recall_rule: MEMORY_RECALL_RULE,
@@ -85,7 +98,10 @@ function load(): Record<RunKind, string> {
     if (template === undefined) throw new Error(`missing base prompt: library/base/${kind}.md`);
     // Trailing newline is the file format's, not the prompt's: the old
     // literals had none, and the composed bytes must not drift (§10.3).
-    prompts[kind] = substitute(template.replace(/\n$/, ''), FRAGMENTS);
+    prompts[kind] = substitute(template.replace(/\n$/, ''), {
+      ...FRAGMENTS,
+      ...(kind === 'maintenance' ? { common_rules: COMMON_RULES_NO_NOW } : {}),
+    });
   }
   for (const name of files.keys()) {
     if (!KINDS.includes(name as RunKind)) {

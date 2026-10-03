@@ -76,7 +76,9 @@ describe('chat executor (§9)', () => {
       role: string;
       content: string;
     }[];
-    const texts = messages.filter((m) => m.role !== 'system').map((m) => m.content);
+    const texts = messages
+      .filter((m) => m.role !== 'system' && !m.content.startsWith('<now>'))
+      .map((m) => m.content);
     expect(texts).toEqual(['my cat is called Fen', 'ack', 'what is my cat called?']);
   });
 
@@ -352,8 +354,14 @@ describe('the onboarding greeting (§3c, App. B)', () => {
     // No history retrieval on a run with nothing to retrieve against, and no
     // fabricated user turn in the transcript sent to the model either: the
     // opening instruction is the only user-role message.
-    const sentMessages = h.fake.requests.at(-1)!.body.messages as { role: string }[];
-    expect(sentMessages.filter((m) => m.role === 'user')).toHaveLength(1);
+    const sentMessages = h.fake.requests.at(-1)!.body.messages as {
+      role: string;
+      content: string;
+    }[];
+    // …after the `<now>` tail line, which every run carries (§20.5).
+    const users = sentMessages.filter((m) => m.role === 'user');
+    expect(users).toHaveLength(2);
+    expect(users[0]!.content.startsWith('<now>')).toBe(true);
   });
 
   it('is requested during start, so a half-finished install picks itself up', async () => {

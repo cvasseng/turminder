@@ -7,6 +7,8 @@ export {
   USER_FIELDS,
   fenceFile,
   fenceMemoryRecall,
+  fenceTail,
+  renderNow,
   fenceUntrusted,
 } from './fencing.js';
 export {

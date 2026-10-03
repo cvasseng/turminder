@@ -94,7 +94,7 @@ export function timeTools(deps: TimeDeps): ToolDefinition[] {
     {
       name: 'time.now',
       description:
-        "The current date and time, in the user's timezone. Call it whenever the answer depends on what today, now, tomorrow or this week means — you are not told the time otherwise, and guessing it is always wrong.",
+        "The current date and time, in the user's timezone. Call it whenever the answer depends on what today, now, tomorrow or this week means — each run starts with a `<now>` line, so call this for exact time, another timezone, or once a run has gone on a while; never guess.",
       tier: 'ro',
       args: z.object({
         timezone: z

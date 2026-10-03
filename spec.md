@@ -2804,6 +2804,17 @@ Normative fix, for conversational assembly:
   message immediately before the latest user message**, fenced as
   `<memory-recall>…</memory-recall>`; the base prompt explains the fence.
   It is never persisted to `turns` — it is re-derived per run.
+- **The current time rides the same ephemeral message**, as its first
+  line: `<now>Friday 2026-10-02 23:44 Europe/Oslo, week 40</now>` (the
+  `time.now` `local` format, the identity's zone, and the ISO week). The
+  message is sent even when no memory was recalled. The tail changes every
+  run anyway, so this costs the cache nothing. It ends the guess that put
+  a calendar query in August while `time.now` was still in flight in the
+  same round (2026-10-02). `time.now` stays the tool for exact or
+  mid-run time. An accepted constraint: every run now sends two consecutive user-role
+  messages (the tail, then the user's own), which a chat template demanding
+  strict user/assistant alternation would reject. Any recalled memory always
+  did this; the supported endpoints accept it.
 - Cache math, so nobody "simplifies" this later: with tail placement,
   request N+1 diverges from request N at the *previous* memory message —
   the cache covers everything except roughly the last exchange. With
@@ -3330,8 +3341,8 @@ grants and are single-shot; they are not paged):
    those unavailable servers is a more specific case of the same fact, so it
    gets its own shape rather than the plain list:
    `{error: "namespace_unavailable", name, status, message}`. There is no
-   `tools.close` in v1 (deferred, §16) — the open set is **monotonic per
-   conversation**.
+   `tools.close` in v1 (deferred, §16). Instead an open namespace
+   **decays** (item 5).
 4. **Implicit open:** a model call to a tool that is granted but closed
    (it remembered `HassTurnOn` from earlier history) does NOT fail — the
    dispatcher opens that tool's namespace, records
@@ -3340,11 +3351,23 @@ grants and are single-shot; they are not paged):
    closed calls would turn a context optimization into a behavioral
    regression; never do it.
 5. **Persistence:** the open set lives on the conversation row
-   (`conversations.open_namespaces`, App. C, JSON array). Loaded at run
-   start (`core ∪ persisted`), appended and written through immediately on
-   every open (explicit or implicit). A new conversation starts at core
-   only. This is what makes a lights conversation keep its HA tools across
+   (`conversations.open_namespaces`, App. C), as a JSON array of `{name,
+   idle_runs}`. A legacy array of plain names reads as `idle_runs: 0` each
+   and is rewritten in the new shape on the next write. Loaded at run start
+   (`core ∪ persisted`), appended and written through immediately on every
+   open (explicit or implicit). A new conversation starts at core only.
+   This is what makes a lights conversation keep its HA tools across
    messages while a calendar conversation never pays for them.
+   **Decay:** at the start of every chat run, each persisted namespace's
+   `idle_runs` goes up by one, and any now above `namespace_idle_runs`
+   (App. A, 3) is dropped, back to a catalog line. A namespace the run opens,
+   or calls a tool in, is written through as `idle_runs: 0`, so it closes
+   only after three whole runs without use. Observed 2026-10-02: one conversation carried eight non-core
+   namespaces' definitions on every call, and its first-call prompt grew
+   from 8.5k to 14.4k tokens before the model had done anything. Closing
+   happens only at a run boundary, so within a run the tool definitions
+   never change (item 7), and implicit open (item 4) means a closed
+   namespace is never a refusal.
 6. **Implementation shape (normative):** a `PagedDispatcher` that wraps
    `GrantedDispatcher`. The wrapper filters `toolSet()` to open namespaces
    and injects the synthetic `tools.open` definition; `dispatch()` performs
@@ -3355,8 +3378,9 @@ grants and are single-shot; they are not paged):
 7. **Cache determinism:** the rendered toolset and the catalog must be
    byte-deterministic for a given open set — tools and catalog lines sorted
    by name. Opening a namespace busts the llama.cpp prefix once (tools
-   render at the prompt head); the monotonic, persisted open set makes
-   every subsequent turn and run of that conversation stable again. Same
+   render at the prompt head), and so does a decay closing one at a run
+   boundary. The persisted open set keeps every turn and run in between
+   stable. Same
    argument as §20.4 elision: one reprocess bought a permanently better
    context.
 
@@ -6425,6 +6449,7 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Run record length (`run_record_max_chars`) | 600 chars | §20.2 |
 | Context-overflow retries (`context_retries`) | 1 per run | §20.11 |
 | Cut-off-output retries (`length_retries`) | 1 per run | §20.11 |
+| Namespace decay (`namespace_idle_runs`) | 3 runs without use → closed | §21.2 item 5 |
 | Shipped skill size (`shipped_skill_max_chars`) | 8000 chars | G.8 |
 | Watcher minimum cadence (`watch_min_interval_s`) | 300s (create refuses tighter) | §30.3 |
 | Watcher default cadence | 1800s when `every_s` omitted | §30.3 |
@@ -6639,7 +6664,7 @@ CREATE TABLE conversations (
   last_activity_at TEXT NOT NULL,
   distilled_at     TEXT,                             -- last_activity_at the distillation
                                                      -- pass last ran against (§9)
-  open_namespaces  TEXT NOT NULL DEFAULT '[]'        -- JSON array; sticky tool paging (§21.2)
+  open_namespaces  TEXT NOT NULL DEFAULT '[]'        -- JSON array of {name, idle_runs}; legacy plain names read as idle 0 (§21.2 item 5)
 );
 
 CREATE TABLE turns (
@@ -7391,9 +7416,10 @@ answer would have caused.
 | `time.now` | ro | `{timezone?: string}` (default: identity.md timezone) | `{iso, unix, timezone, local: "Friday 2026-08-21 14:03", week: int, day_of_week, dst: bool}` |
 
 A tool rather than a system-prompt injection deliberately: a timestamp in
-the prompt goes stale mid-conversation and busts the stable-prefix cache
-(App. H.1). Models must call `time.now` whenever current date/time matters;
-the base prompts say so.
+the system prompt goes stale mid-conversation and busts the stable-prefix
+cache (App. H.1). The run's start time does arrive message-side, in the
+`<now>` line of the ephemeral tail (§20.5). Models call `time.now` for
+exact time or once a run has gone on a while; the base prompts say so.
 
 ### F.11 `weather`
 
@@ -8033,8 +8059,8 @@ static-first, volatile-last. Items 1–4 form the **system prompt**; items
 3. Skill description roster (changes on skill edits) and the project
    roster (§31.2 — changes on project create/edit; same volatility class)
 4. Tool definitions (from the dispatcher grant)
-5. Auto-retrieved memory block (per event/turn) — message-side, never in
-   the system prompt
+5. The `<now>` line (§20.5) and the auto-retrieved memory block (per
+   event/turn) — message-side, never in the system prompt
 6. Task context: handler body / conversation history
 7. The fenced event payload / latest user message
 

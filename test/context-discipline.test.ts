@@ -663,7 +663,7 @@ describe('prefix stability (§20.5)', () => {
      * stops a future refactor quietly moving volatile content forward again.
      */
     const volatileTail = (messages: { content: string }[]) => {
-      const recall = messages.findIndex((m) => m.content.startsWith('<memory-recall>'));
+      const recall = messages.findIndex((m) => m.content.startsWith('<now>'));
       return recall >= 0 ? recall : messages.length;
     };
     const stableA = requestA.messages.slice(0, volatileTail(requestA.messages));

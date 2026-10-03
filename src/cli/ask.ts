@@ -5,7 +5,7 @@ import { requireModelStack } from '../model/index.js';
 import { runAgent } from '../model/agent-loop.js';
 import { MemoryTraceSink, type ModelSelector, type Priority } from '../model/types.js';
 import { ROUTABLE_PURPOSES, type RoutablePurpose } from '../model/routes.js';
-import { assembleSystemPrompt } from '../prompts/index.js';
+import { assembleSystemPrompt, renderNow } from '../prompts/index.js';
 import { nowIso } from '../core/time.js';
 import { UserFacingError } from '../core/errors.js';
 import { globalOpts } from './common.js';
@@ -73,7 +73,15 @@ export function registerAskCommand(program: Command): void {
           selector,
           priority,
           system,
-          messages: [{ role: 'user', content: promptWords.join(' ') }],
+          // A chat-kind prompt promises a `<now>` line in the tail (§20.5), so
+          // the one-shot ask sends one too.
+          messages: [
+            {
+              role: 'user',
+              content: renderNow(new Date(), app.config.identity()?.frontmatter.timezone),
+            },
+            { role: 'user', content: promptWords.join(' ') },
+          ],
           trace,
           ...(opts.stream ? { onDelta: (t: string) => process.stdout.write(t) } : {}),
         });

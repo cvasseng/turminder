@@ -11,11 +11,7 @@ import { GrantedDispatcher } from '../tools/dispatcher.js';
 import type { RunGrants } from '../tools/run-grants.js';
 import type { ConfirmBroker } from './confirm.js';
 import type { ToolHub } from '../tools/hub.js';
-import {
-  assembleSystemPrompt,
-  renderEventPayload,
-  fenceMemoryRecall,
-} from '../prompts/index.js';
+import { assembleSystemPrompt, fenceTail, renderEventPayload } from '../prompts/index.js';
 import type { LoadedHandler } from './handlers.js';
 
 const l = log('exec');
@@ -30,6 +26,8 @@ export interface HandlerExecutorDeps {
   /** Where this run's grant set is published for the length of the run (§23.2). */
   runGrants?: RunGrants;
   rag?: RagIndex;
+  /** The `<now>` line's clock (§20.5); tests substitute it. */
+  now?: () => Date;
 }
 
 export interface HandlerOutcome {
@@ -115,11 +113,17 @@ export class HandlerExecutor {
       `- event_id: ${event.id}\n` +
       (event.summary ? `- summary: ${event.summary}\n` : '') +
       `\nPayload:\n${payload}`;
-    // H.1 items 5–7 in message order: memory, then the task, then the payload.
+    // H.1 items 5–7 in message order: the `<now>` line and memory (one
+    // message, always sent), then the task, then the payload.
     const messages: { role: 'user'; content: string }[] = [
-      ...(memories.length
-        ? [{ role: 'user' as const, content: fenceMemoryRecall(memories) }]
-        : []),
+      {
+        role: 'user' as const,
+        content: fenceTail(
+          (this.deps.now ?? (() => new Date()))(),
+          config.identity()?.frontmatter.timezone,
+          memories,
+        ),
+      },
       { role: 'user' as const, content: message },
     ];
 

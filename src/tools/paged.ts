@@ -6,6 +6,9 @@ import type { ToolHandle } from './types.js';
 
 const l = log('tools');
 
+/** App. A `namespace_idle_runs`: whole runs a namespace may sit unused before it closes (§21.2.5). */
+export const NAMESPACE_IDLE_RUNS = 3;
+
 /** App. F.12 — synthetic, so it has no integration and no `ToolHandle`. */
 export const OPEN_TOOL = 'tools.open';
 
@@ -24,7 +27,10 @@ const OPEN_TOOL_DESCRIPTION =
 export interface PagingStore {
   /** Namespaces opened so far, persisted per conversation (§21.2.5). */
   opened(): readonly string[];
-  /** Record one as open. Called on every open, explicit or implicit. */
+  /**
+   * Record one as open and in use (`idle_runs: 0`). Called on every open,
+   * explicit or implicit, and on every call into a persisted namespace.
+   */
   open(namespace: string): void;
 }
 
@@ -184,6 +190,10 @@ export class PagedDispatcher implements ToolDispatcher {
       this.opts.store.open(handle.source);
       implicitOpen = handle.source;
       l.info({ tool: call.name, namespace: handle.source }, 'implicitly opened namespace');
+    } else if (handle && !this.opts.core.includes(handle.source)) {
+      // A call is use: the idle counter restarts (§21.2.5). Core is never
+      // persisted, so it has no counter to restart.
+      this.opts.store.open(handle.source);
     }
 
     // Ungranted calls fall through untouched: the refusal is the inner
@@ -242,6 +252,8 @@ export class PagedDispatcher implements ToolDispatcher {
       // Already open — idempotent rather than an error. The model asking twice
       // costs one cheap turn; a refusal costs it a plan. The skill was
       // delivered with the first open and is in the transcript; not again.
+      // Asking is use, though, so the idle counter restarts.
+      if (!this.opts.core.includes(namespace)) this.opts.store.open(namespace);
       return { ok: true, output: { opened: namespace, tools: names } };
     }
     this.opts.store.open(namespace);

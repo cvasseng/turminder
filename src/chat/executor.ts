@@ -17,12 +17,12 @@ import type {
   RunKind,
 } from '../model/types.js';
 import { GrantedDispatcher, type Grants } from '../tools/dispatcher.js';
-import { PagedDispatcher } from '../tools/paged.js';
+import { NAMESPACE_IDLE_RUNS, PagedDispatcher } from '../tools/paged.js';
 import type { RunGrants } from '../tools/run-grants.js';
 import type { ChatStops } from './stop.js';
 import type { GrantStore } from '../tools/grants.js';
 import type { ToolHub } from '../tools/hub.js';
-import { assembleSystemPrompt, fenceMemoryRecall } from '../prompts/index.js';
+import { assembleSystemPrompt, fenceTail } from '../prompts/index.js';
 import type { ProjectStore } from '../projects/store.js';
 import type { RagIndex } from '../rag/index-store.js';
 import type { TurnsIndex } from '../rag/turns-index.js';
@@ -83,6 +83,8 @@ export interface ChatExecutorDeps {
   stops?: ChatStops;
   /** Tracks work nobody waits for, so it finishes before shutdown. */
   background: BackgroundTasks;
+  /** The `<now>` line's clock (§20.5); tests substitute it, production reads the wall. */
+  now?: () => Date;
 }
 
 /**
@@ -222,6 +224,13 @@ export class ChatExecutor {
               .map((s) => ({ name: s.name, status: s.needs_auth ? 'needs_auth' : 'dropped' })),
         });
     const dispatcher = paged ?? granted;
+    // Decay at run start (§21.2.5), before anything renders the open set: a
+    // closed namespace costs one prefix bust now and none for the run's
+    // remaining calls, whose tool definitions never change.
+    if (paged) {
+      const dropped = repos.conversations.decayNamespaces(conversation.id, NAMESPACE_IDLE_RUNS);
+      if (dropped.length) l.info({ namespaces: dropped }, 'idle namespaces closed');
+    }
 
     // Auto-push the memories that look relevant to this turn (§5.4); the model
     // can still pull more with memory.query.
@@ -360,11 +369,20 @@ export class ChatExecutor {
           'Open the conversation yourself, following your instructions above.',
       });
     }
-    if (memories.length) {
+    {
       // Immediately before the latest user message, so the prefix up to the
-      // previous exchange stays byte-stable (§20.5).
+      // previous exchange stays byte-stable (§20.5). Always inserted: the
+      // `<now>` line is its first line and is wanted on a run that recalled
+      // nothing too.
       const at = messages.at(-1)?.role === 'user' ? messages.length - 1 : messages.length;
-      messages.splice(at, 0, { role: 'user', content: fenceMemoryRecall(memories) });
+      messages.splice(at, 0, {
+        role: 'user',
+        content: fenceTail(
+          (this.deps.now ?? (() => new Date()))(),
+          identity?.frontmatter.timezone,
+          memories,
+        ),
+      });
     }
 
     const wantsTools = granted.granted().length > 0;

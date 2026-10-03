@@ -433,7 +433,10 @@ describe('reasoning effort (§10.6)', () => {
     expect(after.reasoning_effort).toBe('high');
     // The system prompt and the rendered user message, byte for byte.
     expect(after.messages[0]).toEqual(before.messages[0]);
-    expect(after.messages[1]).toEqual(before.messages[1]);
+    // The `<now>` tail line differs by clock, so it is excluded; the user message is not.
+    const userOnly = (ms: { role: string; content: string }[]) =>
+      ms.filter((m) => m.role === 'user' && !m.content.startsWith('<now>'));
+    expect(userOnly(after.messages).at(-1)).toEqual(userOnly(before.messages).at(-1));
     client.close();
   });
 

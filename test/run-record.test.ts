@@ -730,11 +730,13 @@ describe('the record crosses the turn (§20.2, §20.11)', () => {
     await h.service.queue.drain();
     const third = lastBody().messages;
     // Everything the second request sent before its tail is the third's prefix.
-    const prefix = (ms: { role: string; content: unknown }[]) =>
-      ms.slice(
-        0,
-        ms.findIndex((m) => m.role === 'user' && m.content === 'two'),
-      );
+    // The `<now>` line is the tail (§20.5): present before 'two' only in the
+    // request that sent it, so the prefix stops short of it when it is there.
+    const prefix = (ms: { role: string; content: unknown }[]) => {
+      const at = ms.findIndex((m) => m.role === 'user' && m.content === 'two');
+      const now = String(ms[at - 1]?.content).startsWith('<now>');
+      return ms.slice(0, now ? at - 1 : at);
+    };
     expect(JSON.stringify(prefix(third))).toBe(JSON.stringify(prefix(second)));
     expect(assistantContents({ messages: second })).toContain(
       '[[run: done · created notes/b.md]]\nSaved.',

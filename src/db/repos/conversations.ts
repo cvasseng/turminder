@@ -479,26 +479,58 @@ export class ConversationsRepo {
   }
 
   /**
-   * Namespaces this conversation has paged in (§21.2.5). The core set is not
-   * stored — it is the same for every conversation and comes from config, so
-   * changing the default takes effect everywhere rather than only in
-   * conversations started afterwards.
+   * The persisted open set with its idle counters (§21.2.5). The column holds
+   * `[{name, idle_runs}]`; a legacy array of plain names reads as
+   * `idle_runs: 0` each and takes the new shape on the next write — no
+   * migration, because the read is tolerant. Sorted by name, the order the
+   * prompt renders in.
    */
-  openNamespaces(id: string): string[] {
+  private namespaceRows(id: string): { name: string; idle_runs: number }[] {
     const row = this.db
       .prepare(`SELECT open_namespaces FROM conversations WHERE id = ?`)
       .get(id) as { open_namespaces: string } | undefined;
     if (!row) return [];
     try {
       const parsed = JSON.parse(row.open_namespaces) as unknown;
-      return Array.isArray(parsed)
-        ? parsed.filter((n): n is string => typeof n === 'string')
-        : [];
+      if (!Array.isArray(parsed)) return [];
+      const rows: { name: string; idle_runs: number }[] = [];
+      for (const entry of parsed as unknown[]) {
+        if (typeof entry === 'string') {
+          rows.push({ name: entry, idle_runs: 0 });
+        } else if (
+          entry &&
+          typeof entry === 'object' &&
+          typeof (entry as { name?: unknown }).name === 'string'
+        ) {
+          const idle = (entry as { idle_runs?: unknown }).idle_runs;
+          rows.push({
+            name: (entry as { name: string }).name,
+            idle_runs: typeof idle === 'number' && idle >= 0 ? Math.floor(idle) : 0,
+          });
+        }
+      }
+      return rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     } catch {
       // A hand-mangled column means this conversation starts from core again,
       // which costs one round of re-opening and nothing else.
       return [];
     }
+  }
+
+  private writeNamespaceRows(id: string, rows: { name: string; idle_runs: number }[]): void {
+    this.db
+      .prepare(`UPDATE conversations SET open_namespaces = ? WHERE id = ?`)
+      .run(JSON.stringify(rows), id);
+  }
+
+  /**
+   * Namespaces this conversation has paged in (§21.2.5), names only. The core
+   * set is not stored — it is the same for every conversation and comes from
+   * config, so changing the default takes effect everywhere rather than only
+   * in conversations started afterwards.
+   */
+  openNamespaces(id: string): string[] {
+    return this.namespaceRows(id).map((r) => r.name);
   }
 
   /**
@@ -536,20 +568,51 @@ export class ConversationsRepo {
   }
 
   /**
-   * Records one namespace as open, write-through and idempotent. Monotonic by
-   * construction: there is no counterpart that removes one (§21.2.3).
-   * Returns whether this call was the one that added it.
+   * Records one namespace as open and in use, write-through: an open or a tool
+   * call in it writes `idle_runs: 0` (§21.2.5). Returns whether this call was
+   * the one that added it. Only run-start decay removes one, never this.
    */
   openNamespace(id: string, namespace: string): boolean {
-    const current = this.openNamespaces(id);
-    if (current.includes(namespace)) return false;
+    const current = this.namespaceRows(id);
+    const existing = current.find((r) => r.name === namespace);
     // Sorted on the way in: the column is read straight into a rendered
     // prompt, and byte-determinism there is what keeps the prefix cache warm.
-    const next = [...current, namespace].sort();
-    this.db
-      .prepare(`UPDATE conversations SET open_namespaces = ? WHERE id = ?`)
-      .run(JSON.stringify(next), id);
-    return true;
+    const next = existing
+      ? current.map((r) => (r.name === namespace ? { name: r.name, idle_runs: 0 } : r))
+      : [...current, { name: namespace, idle_runs: 0 }].sort((a, b) =>
+          a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+        );
+    if (existing?.idle_runs === 0 && this.rawIsCurrentShape(id)) return false;
+    this.writeNamespaceRows(id, next);
+    return !existing;
+  }
+
+  /** Whether the stored column is already `[{name, idle_runs}]` (no legacy strings). */
+  private rawIsCurrentShape(id: string): boolean {
+    const row = this.db
+      .prepare(`SELECT open_namespaces FROM conversations WHERE id = ?`)
+      .get(id) as { open_namespaces: string } | undefined;
+    try {
+      const parsed = JSON.parse(row?.open_namespaces ?? '[]') as unknown;
+      return Array.isArray(parsed) && (parsed as unknown[]).every((e) => typeof e === 'object');
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Run-start decay (§21.2.5): every persisted namespace's `idle_runs` goes up
+   * by one and any now above `maxIdle` is dropped back to a catalog line.
+   * Returns the dropped names. Called once, before the run's first model
+   * call — closing mid-run would change the tool definitions under it.
+   */
+  decayNamespaces(id: string, maxIdle: number): string[] {
+    const current = this.namespaceRows(id);
+    if (!current.length) return [];
+    const bumped = current.map((r) => ({ name: r.name, idle_runs: r.idle_runs + 1 }));
+    const kept = bumped.filter((r) => r.idle_runs <= maxIdle);
+    this.writeNamespaceRows(id, kept);
+    return bumped.filter((r) => r.idle_runs > maxIdle).map((r) => r.name);
   }
 
   /**

@@ -30,11 +30,13 @@ of these roles, it's wrong.
    "simplify" it into buffering whole deltas or regexing the final string.
 2. **History re-reads `context_text`, never `text`** (§20.2).
    `context_text` = last non-empty utterance of the run;
-   `(used tools: …)` composed at read time; fallback to `text` only for
+   a `[[run: …]]` record (outcome, effects, tools used; §20.2) stored on the
+   turn and rendered at read time; fallback to `text` only for
    old rows. The UI renders `text`. Don't swap these.
 3. **Prefix stability** (§20.5, §21.2.7): system prompt =
-   conversation-stable material ONLY. Retrieved memories are the ephemeral
-   `<memory-recall>` user-role message before the latest user message —
+   conversation-stable material ONLY. The `<now>` line and any retrieved
+   memories are the ephemeral user-role tail message (`<now>` first, then
+   `<memory-recall>`) before the latest user message, sent every run —
    never in the system prompt, never persisted. Toolset + catalog are
    sorted and byte-deterministic for a given open set. Anything per-turn
    goes at the TAIL of messages. If you add per-turn content to the system
@@ -52,8 +54,9 @@ of these roles, it's wrong.
    unbypassable. Never fold them together. Granted-but-closed calls
    implicitly open and execute; ungranted calls refuse exactly as before —
    the refusal path must not change by one byte.
-7. **The open-namespace set is monotonic and persisted** on the
-   conversation row, loaded as `core ∪ persisted`. New conversation = core
+7. **The open-namespace set is persisted** on the conversation row as
+   `[{name, idle_runs}]`, loaded as `core ∪ persisted`, and changes only at
+   a run boundary (decay) or on an open/call (§21.2.5). New conversation = core
    only. Don't cache it in memory across runs without the write-through.
 8. **Budgets are policy in the loop** (agent-loop.ts): `promptTokens` is
    the MAX single-turn prompt (not the sum — summing makes a 4-turn run
