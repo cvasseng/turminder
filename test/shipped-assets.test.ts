@@ -278,3 +278,29 @@ describe('a broken asset is an event, not a log line (§12.3, App. B)', () => {
     expect(invalid()).toHaveLength(2);
   });
 });
+
+describe('shipped skills stay small (G.8, shipped_skill_max_chars)', () => {
+  // A skill is never elided while it is the run's brief, so its size is paid on
+  // every call of every run that reads it. App. A: 8000.
+  const SHIPPED_SKILL_MAX_CHARS = 8000;
+  const skills = SHIPPED_ASSETS.filter((a) => a.path.startsWith('skills/'));
+
+  it('ships the embeds skill and its three companions', () => {
+    const names = skills.map((a) => a.path);
+    for (const n of [
+      'embeds',
+      'embeds-templates',
+      'embeds-presentations',
+      'embeds-mini-apps',
+    ]) {
+      expect(names).toContain(`skills/${n}.md`);
+    }
+  });
+
+  it.each(skills.map((a) => [a.path, a.content.length] as const))(
+    '%s is within the cap (%i chars)',
+    (_p, len) => {
+      expect(len).toBeLessThanOrEqual(SHIPPED_SKILL_MAX_CHARS);
+    },
+  );
+});

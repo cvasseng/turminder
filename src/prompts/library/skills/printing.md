@@ -33,7 +33,7 @@ that — the PDF is exactly the page that was previewed.
 
 **Should it look designed, or come around again?** A digest, a report or a
 cover sheet — or anything printed on a schedule — is an embed template, not
-markdown: fetch the `embeds` skill and read "Templates". Markdown →
+markdown: fetch the `embeds-templates` skill (after `embeds`). Markdown →
 `docs.to_pdf` is for quick one-offs.
 
 ## Which machine
