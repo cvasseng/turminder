@@ -2601,8 +2601,9 @@ Applied in the hub's `ToolHandle.call` wrapper — after execution, before
 the result reaches the agent loop — so it covers bundled integrations and
 external MCP servers identically:
 
-- Serialize the output; if it exceeds `tool_result_max_chars` (App. A,
-  default 4000), the transcript receives instead:
+- Serialize the output. If it exceeds `tool_result_max_chars` (App. A,
+  default 4000) and is a list, it is **cut at whole items** (below);
+  otherwise the transcript receives instead:
 
 ```jsonc
 {
@@ -2613,6 +2614,38 @@ external MCP servers identically:
 }
 ```
 
+- **A list is cut at whole items, never mid-JSON.** A 4000-char excerpt of
+  a 15–20k calendar or task listing ended mid-object, showed the model part
+  of a list it could not tell was partial, and it re-called with other
+  arguments: the calendar three times and the task list three times in one
+  run (`01M3Z967H8QH9MTDZFS4AF45F2`). So when the output, or the value of
+  one of its top-level keys, or of a key one level deeper in the largest
+  such array's items, is an array: take the **largest** such array,
+  keep its items in order while the whole serialization stays within the
+  cap, and replace the rest with nothing. The output gains, at top level,
+
+  ```jsonc
+  "_truncated": {"field": "events", "kept": 6, "total": 23,
+                 "hint": "6 of 23 events shown; narrow the call (a smaller window, max_results, a filter) to see the rest"}
+  ```
+
+  where `field` is the dotted path (`sections.0.tasks` for a nested one).
+  **Which array:** the largest top-level array (or the output itself when
+  it is a bare array, which is then wrapped as `{items, _truncated}` with
+  `field: "items"`). Only when not even one of its items fits does the cut
+  go one level into its **first** item's largest array. A nested cut drops
+  the later parent items too, and says so: `_truncated` then also carries
+  `"dropped": {"field": "sections", "count": 3}`, and the hint ends
+  `; 3 more sections not shown`, so the model knows the rest exists. If not even one item fits, the excerpt form
+  above applies. External MCP tools get exactly the same treatment: it is
+  structure, not a per-tool rule.
+- **Chatty integrations return a slim shape.** A bundled tool's result
+  omits fields that only cost tokens: on `calendar.*` events `updated` and
+  `etag`, plus `calendar_id` when it is `primary` and `organizer` when it is
+  the user. `recurring_event_id` stays: `calendar.update_event` and
+  `calendar.respond` use it to act on a whole series; on `asana.*` tasks
+  `assignee` on the user's own lists (`my_tasks`, `inbox`), `modified_at`,
+  and `tags`/`projects` when empty. The F rows list what remains.
 - A `ToolDefinition` may declare `maxResultChars` to raise its own cap
   (a tool whose *job* is returning a document, called with explicit
   limits). External MCP tools never get an override. **A tool that cannot

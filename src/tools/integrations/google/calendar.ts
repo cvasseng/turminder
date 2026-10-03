@@ -327,6 +327,23 @@ function draftToResource(draft: EventPatch): Record<string, unknown> {
   return resource;
 }
 
+/** Events whose organizer is the authorised user (Google's `organizer.self`). */
+const organizedByMe = new WeakSet<CalendarEvent>();
+
+/**
+ * The shape a tool result carries (§20.3): fields that only cost tokens are
+ * left out. The poller keeps the full event — it keys on `updated` and
+ * `calendar_id`.
+ */
+export function slimEvent(event: CalendarEvent): Omit<CalendarEvent, 'updated'> {
+  const { updated: _updated, calendar_id: calendarId, organizer, ...rest } = event;
+  return {
+    ...rest,
+    ...(calendarId !== 'primary' ? { calendar_id: calendarId } : {}),
+    ...(organizer && !organizedByMe.has(event) ? { organizer } : {}),
+  } as Omit<CalendarEvent, 'updated'>;
+}
+
 function convertEvent(raw: unknown, calendarId: string): CalendarEvent | null {
   const item = raw as {
     id?: string;
@@ -339,7 +356,7 @@ function convertEvent(raw: unknown, calendarId: string): CalendarEvent | null {
     recurringEventId?: string;
     start?: { dateTime?: string; date?: string };
     end?: { dateTime?: string; date?: string };
-    organizer?: { email?: string; displayName?: string };
+    organizer?: { email?: string; displayName?: string; self?: boolean };
     attendees?: {
       email?: string;
       displayName?: string;
@@ -358,7 +375,7 @@ function convertEvent(raw: unknown, calendarId: string): CalendarEvent | null {
     item.conferenceData?.entryPoints?.find((e) => e.entryPointType === 'video')?.uri;
   const myResponse = item.attendees?.find((a) => a.self)?.responseStatus;
 
-  return {
+  const event: CalendarEvent = {
     id: item.id,
     calendar_id: calendarId,
     summary: item.summary ?? '(no title)',
@@ -382,6 +399,8 @@ function convertEvent(raw: unknown, calendarId: string): CalendarEvent | null {
     ...(conference ? { conference_url: conference } : {}),
     ...(item.updated ? { updated: item.updated } : {}),
   };
+  if (item.organizer?.self) organizedByMe.add(event);
+  return event;
 }
 
 /**
@@ -449,7 +468,7 @@ export function calendarTools(client: CalendarClient): ToolDefinition[] {
             ...(args.calendar_id ? { calendarId: args.calendar_id } : {}),
             ...(args.max_results ? { maxResults: args.max_results } : {}),
           });
-          return { events, untrusted: true };
+          return { events: events.map(slimEvent), untrusted: true };
         });
       },
     },
@@ -464,7 +483,7 @@ export function calendarTools(client: CalendarClient): ToolDefinition[] {
       }),
       async execute(args: { event_id: string; calendar_id?: string }) {
         return guard(async () => ({
-          event: await client.getEvent(args.event_id, args.calendar_id ?? 'primary'),
+          event: slimEvent(await client.getEvent(args.event_id, args.calendar_id ?? 'primary')),
           untrusted: true,
         }));
       },
@@ -491,7 +510,7 @@ export function calendarTools(client: CalendarClient): ToolDefinition[] {
             maxResults: 10,
           });
           const next = events.find((e) => !e.all_day) ?? events[0] ?? null;
-          return { event: next, untrusted: true };
+          return { event: next ? slimEvent(next) : null, untrusted: true };
         });
       },
     },
@@ -547,7 +566,7 @@ export function calendarTools(client: CalendarClient): ToolDefinition[] {
             },
             args.calendar_id ?? 'primary',
           );
-          return { event, created: true };
+          return { event: slimEvent(event), created: true };
         });
       },
     },
@@ -594,7 +613,7 @@ export function calendarTools(client: CalendarClient): ToolDefinition[] {
             { ...rest, ...(allDay !== undefined ? { allDay } : {}) },
             calendarId ?? 'primary',
           );
-          return { event, updated: true };
+          return { event: slimEvent(event), updated: true };
         });
       },
     },
@@ -635,7 +654,7 @@ export function calendarTools(client: CalendarClient): ToolDefinition[] {
             args.response,
             args.calendar_id ?? 'primary',
           );
-          return { event, response: args.response };
+          return { event: slimEvent(event), response: args.response };
         });
       },
     },

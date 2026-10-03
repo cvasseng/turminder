@@ -12,18 +12,24 @@ export interface AsanaToolsConfig {
   dailySection: string;
 }
 
-function summarise(task: AsanaTask): Record<string, unknown> {
+/**
+ * The slim task shape (§20.3): `modified_at` is never carried, `tags` and
+ * `projects` only when non-empty, and `assignee` only outside the user's own
+ * lists (`my_tasks`, `inbox`), where it is always the user.
+ */
+function summarise(task: AsanaTask, ownList = false): Record<string, unknown> {
+  const projects = task.projects?.map((p) => p.name) ?? [];
+  const tags = task.tags?.map((t) => t.name) ?? [];
   return {
     gid: task.gid,
     name: task.name,
     section: task.section?.name ?? null,
     completed: task.completed,
     due_on: task.due_on ?? null,
-    assignee: task.assignee?.name ?? null,
-    projects: task.projects?.map((p) => p.name) ?? [],
-    tags: task.tags?.map((t) => t.name) ?? [],
+    ...(ownList ? {} : { assignee: task.assignee?.name ?? null }),
+    ...(projects.length ? { projects } : {}),
+    ...(tags.length ? { tags } : {}),
     url: task.permalink_url ?? null,
-    modified_at: task.modified_at ?? null,
   };
 }
 
@@ -114,7 +120,7 @@ export function asanaTools(client: AsanaClient, config: AsanaToolsConfig): ToolD
           }
           return {
             section: match.section.name,
-            tasks: match.tasks.filter((t) => !t.completed).map(summarise),
+            tasks: match.tasks.filter((t) => !t.completed).map((t) => summarise(t, true)),
             untrusted: true,
           };
         });
@@ -139,7 +145,7 @@ export function asanaTools(client: AsanaClient, config: AsanaToolsConfig): ToolD
               section: g.section.name,
               tasks: g.tasks
                 .filter((t) => args.include_completed || !t.completed)
-                .map(summarise),
+                .map((t) => summarise(t, true)),
             })),
             untrusted: true,
           };

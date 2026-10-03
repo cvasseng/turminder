@@ -28,6 +28,112 @@ function serialize(output: unknown): string {
   }
 }
 
+type Json = Record<string, unknown>;
+
+function isRecord(v: unknown): v is Json {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function sizeOf(v: unknown): number {
+  return serialize(v).length;
+}
+
+/** The array-valued key of `obj` with the largest serialization, if any. */
+function largestArrayKey(obj: Json): string | null {
+  let best: string | null = null;
+  let bestSize = -1;
+  for (const [k, v] of Object.entries(obj)) {
+    if (!Array.isArray(v) || v.length === 0) continue;
+    const size = sizeOf(v);
+    if (size > bestSize) {
+      best = k;
+      bestSize = size;
+    }
+  }
+  return best;
+}
+
+/** Largest `kept` in [1, total-1] for which `build(kept)` fits, or 0 when none does. */
+function fitKept(total: number, maxChars: number, build: (kept: number) => unknown): number {
+  let lo = 0;
+  let hi = total - 1;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (sizeOf(build(mid)) <= maxChars) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+function truncatedMarker(
+  field: string,
+  kept: number,
+  total: number,
+  dropped?: { field: string; count: number },
+): Json {
+  const leaf = field.split('.').pop()!;
+  const more = dropped && dropped.count > 0 ? dropped : null;
+  return {
+    field,
+    kept,
+    total,
+    hint:
+      `${kept} of ${total} ${leaf} shown; narrow the call (a smaller window, max_results, a filter) to see the rest` +
+      (more ? `; ${more.count} more ${more.field.split('.').pop()} not shown` : ''),
+    ...(more ? { dropped: more } : {}),
+  };
+}
+
+/**
+ * Cut a list at whole items (§20.3), or return null when the output has no
+ * list to cut or not even one item fits. Structure, not a per-tool rule:
+ * the output itself, the largest array among its top-level keys, and — when
+ * not even one item of that fits — the largest array one level inside its
+ * first item (`sections.0.tasks`).
+ */
+function cutList(output: unknown, maxChars: number): unknown | null {
+  let base: Json;
+  let key: string;
+  if (Array.isArray(output)) {
+    // A bare array has nowhere to carry the marker; wrap it.
+    base = { items: output };
+    key = 'items';
+  } else if (isRecord(output)) {
+    const k = largestArrayKey(output);
+    if (k === null) return null;
+    base = output;
+    key = k;
+  } else {
+    return null;
+  }
+  const list = base[key] as unknown[];
+
+  const withTop = (kept: number): Json => ({
+    ...base,
+    [key]: list.slice(0, kept),
+    _truncated: truncatedMarker(key, kept, list.length),
+  });
+  const kept = fitKept(list.length, maxChars, withTop);
+  if (kept >= 1) return withTop(kept);
+
+  // Not even one whole item fits: look one level inside the first item.
+  const first = list[0];
+  if (!isRecord(first)) return null;
+  const inner = largestArrayKey(first);
+  if (inner === null) return null;
+  const innerList = first[inner] as unknown[];
+  const withInner = (k: number): Json => ({
+    ...base,
+    [key]: [{ ...first, [inner]: innerList.slice(0, k) }],
+    _truncated: truncatedMarker(`${key}.0.${inner}`, k, innerList.length, {
+      field: key,
+      count: list.length - 1,
+    }),
+  });
+  const innerKept = fitKept(innerList.length, maxChars, withInner);
+  return innerKept >= 1 ? withInner(innerKept) : null;
+}
+
 /**
  * Cap one result. Returns the original untouched when it fits, so the common
  * case allocates nothing and the trace keeps the identical object.
@@ -35,6 +141,10 @@ function serialize(output: unknown): string {
 export function capResult(output: unknown, maxChars: number): CappedResult {
   const serialized = serialize(output);
   if (serialized.length <= maxChars) return { output };
+  const cut = cutList(output, maxChars);
+  if (cut !== null) {
+    return { output: cut, traceOutput: output, truncatedFrom: serialized.length };
+  }
   return {
     output: {
       _truncated: true,
