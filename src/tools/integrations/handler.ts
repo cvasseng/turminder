@@ -339,6 +339,10 @@ export function handlerTools(deps: HandlerToolsDeps): ToolDefinition[] {
         reason: z.string().min(1).describe('shown to the user verbatim'),
         catch_all: z.boolean().optional().describe('true: offered every event'),
       }),
+      // A cancelled or unanswered form writes nothing and says so without an
+      // `{error}` — so only a result that reached the commit is an effect.
+      effect: (args: CreateArgs, result: { committed?: unknown }) =>
+        result.committed === undefined ? null : `created handler ${args.name}`,
       async execute(args: CreateArgs, ctx: ToolContext) {
         const bad = badName(args.name);
         if (bad) return bad;
@@ -422,6 +426,8 @@ export function handlerTools(deps: HandlerToolsDeps): ToolDefinition[] {
         reason: z.string().min(1).optional().describe('needed when tools or triggers change'),
         catch_all: z.boolean().optional(),
       }),
+      effect: (args: UpdateArgs, result: { committed?: unknown }) =>
+        result.committed === undefined ? null : `updated handler ${args.name}`,
       async execute(args: UpdateArgs, ctx: ToolContext) {
         const bad = badName(args.name);
         if (bad) return bad;

@@ -345,6 +345,10 @@ export function configTools(home: DataHome, deps: ConfigToolsDeps): ToolDefiniti
           .optional()
           .describe('handlers/*.md only: ask the user again which model runs this handler.'),
       }),
+      // An unanswered routing form writes nothing and returns no `{error}`
+      // (`submitted: false`), so only a result that reached the commit counts.
+      effect: (args: { path: string }, result: { path?: string; committed?: unknown }) =>
+        result.committed === undefined ? null : `wrote ${result.path ?? args.path}`,
       async execute(
         args: { path: string; content: string; message: string; rechoose_routing?: boolean },
         ctx: ToolContext,

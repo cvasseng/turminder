@@ -80,6 +80,20 @@ export function embedsTools(deps: EmbedsDeps): ToolDefinition[] {
             'data bindings to attach in the same call — exactly the embeds.bind entries',
           ),
       }),
+      // The next run reads this instead of the payload (§20.2): the id, whole,
+      // is what keeps it from building the page a second time.
+      effect: (
+        args: { title: string; kind?: string },
+        result: { embed_id: string; bindings?: string[]; bind_error?: unknown },
+      ) => {
+        const kind = args.kind ?? 'ephemeral';
+        const bound = result.bind_error
+          ? '; bindings rejected'
+          : result.bindings?.length
+            ? `; bindings: ${result.bindings.join(', ')}`
+            : '';
+        return `created embed ${result.embed_id} "${args.title}" (${kind}${bound})`;
+      },
       async execute(
         args: {
           title: string;
@@ -151,6 +165,7 @@ export function embedsTools(deps: EmbedsDeps): ToolDefinition[] {
         find: z.string().min(1).describe('the exact text to replace, appearing exactly once'),
         replace: z.string().describe('what to put there instead'),
       }),
+      effect: (args: { embed_id: string }) => `edited embed ${args.embed_id}`,
       async execute(args: { embed_id: string; find: string; replace: string }) {
         return store.edit(args.embed_id, args.find, args.replace);
       },
@@ -211,6 +226,9 @@ export function embedsTools(deps: EmbedsDeps): ToolDefinition[] {
           .record(z.string(), z.unknown())
           .describe('the whole pouch, replacing what was there'),
       }),
+      effect: (args: { embed_id: string }, result: { bytes?: number }) =>
+        `wrote the state of embed ${args.embed_id}` +
+        (typeof result.bytes === 'number' ? ` (${result.bytes} bytes)` : ''),
       async execute(args: { embed_id: string; state: Record<string, unknown> }) {
         return store.writeState(args.embed_id, args.state);
       },
@@ -226,6 +244,10 @@ export function embedsTools(deps: EmbedsDeps): ToolDefinition[] {
           .array(bindingEntry)
           .describe('the complete list; anything left out is unbound'),
       }),
+      effect: (args: { embed_id: string }, result: { bound?: string[] }) =>
+        result.bound?.length
+          ? `bound embed ${args.embed_id}: ${result.bound.join(', ')}`
+          : `unbound embed ${args.embed_id}`,
       async execute(
         args: {
           embed_id: string;
@@ -271,6 +293,7 @@ export function embedsTools(deps: EmbedsDeps): ToolDefinition[] {
         'Keep an embed for good: it moves into the data repo with history, gets a permanent link, and stops expiring. Ask first — this is the user’s decision.',
       tier: 'se',
       args: z.object({ embed_id: idArg }),
+      effect: (args: { embed_id: string }) => `kept embed ${args.embed_id} (persistent)`,
       async execute(args: { embed_id: string }) {
         return store.promote(args.embed_id);
       },
@@ -281,6 +304,11 @@ export function embedsTools(deps: EmbedsDeps): ToolDefinition[] {
         'Delete an embed and every handler bound to it. Say what you are deleting and why before you do.',
       tier: 'se',
       args: z.object({ embed_id: idArg }),
+      effect: (args: { embed_id: string }, result: { handlers_removed?: string[] }) =>
+        `deleted embed ${args.embed_id}` +
+        (result.handlers_removed?.length
+          ? ` and handlers ${result.handlers_removed.join(', ')}`
+          : ''),
       async execute(args: { embed_id: string }) {
         return store.delete(args.embed_id);
       },

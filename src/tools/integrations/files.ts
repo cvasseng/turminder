@@ -107,6 +107,8 @@ export function filesTools(deps: FilesDeps): ToolDefinition[] {
       // §20.6: the file is the store, so the arg need not be the store too.
       bulkArgs: ['content'],
       args: z.object({ path: pathArg, content: z.string(), message: messageArg }),
+      effect: (args: { path: string }, result: { path?: string; action?: string }) =>
+        `${result.action === 'created' ? 'created' : 'wrote'} ${result.path ?? args.path}`,
       async execute(args: { path: string; content: string; message: string }) {
         try {
           return store.write(args.path, args.content, args.message);
@@ -122,6 +124,8 @@ export function filesTools(deps: FilesDeps): ToolDefinition[] {
       tier: 'se',
       bulkArgs: ['content'],
       args: z.object({ path: pathArg, content: z.string(), message: messageArg }),
+      effect: (args: { path: string }, result: { path?: string }) =>
+        `appended to ${result.path ?? args.path}`,
       async execute(args: { path: string; content: string; message: string }) {
         try {
           return store.append(args.path, args.content, args.message);
@@ -141,6 +145,8 @@ export function filesTools(deps: FilesDeps): ToolDefinition[] {
         replace: z.string().describe('what to put there instead'),
         message: messageArg,
       }),
+      effect: (args: { path: string }, result: { path?: string }) =>
+        `edited ${result.path ?? args.path}`,
       async execute(args: { path: string; find: string; replace: string; message: string }) {
         try {
           return store.edit(args.path, args.find, args.replace, args.message);

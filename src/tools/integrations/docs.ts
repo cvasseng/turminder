@@ -148,6 +148,8 @@ export function docsTools(deps: DocsDeps): ToolDefinition[] {
         source: z.string().min(1).describe('an embed id, or a store path ending .md or .html'),
         out_path: z.string().min(1).describe('where the PDF goes, e.g. reports/q3.pdf'),
       }),
+      effect: (args: { source: string; out_path: string }, result: { out_path?: string }) =>
+        `rendered ${result.out_path ?? args.out_path} from ${args.source}`,
       async execute(args: { source: string; out_path: string }) {
         if (!/\.pdf$/i.test(args.out_path)) {
           return {

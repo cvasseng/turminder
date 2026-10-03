@@ -75,6 +75,10 @@ export function memoryTools(
             'which loaded project this belongs to; omit for the one being worked on, null to remember it generally',
           ),
       }),
+      effect: (_args: unknown, result: { name: string; action?: string }) =>
+        result.action === 'merged'
+          ? `merged into memory ${result.name}`
+          : `saved memory ${result.name}`,
       async execute(
         args: {
           type: 'fact' | 'preference' | 'note' | 'reference';
@@ -114,6 +118,7 @@ export function memoryTools(
         content: z.string().optional(),
         description: z.string().optional(),
       }),
+      effect: (args: { name: string }) => `updated memory ${args.name}`,
       async execute(args: { name: string; content?: string; description?: string }) {
         const result = await agent.update(args.name, args);
         return result ?? { error: 'not_found', name: args.name };
@@ -124,6 +129,7 @@ export function memoryTools(
       description: 'Delete a memory that has turned out to be wrong or is no longer true.',
       tier: 'se',
       args: z.object({ name: z.string().min(1), reason: z.string().min(1) }),
+      effect: (args: { name: string }) => `forgot memory ${args.name}`,
       async execute(args: { name: string; reason: string }) {
         return agent.forget(args.name, args.reason);
       },

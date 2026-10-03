@@ -56,6 +56,13 @@ export interface DispatchResult {
    * answer; absent on every call that needed no such thing.
    */
   implicitOpen?: string;
+  /**
+   * What this call changed, as one phrase for the run record (§20.2). Set by
+   * the dispatcher on a `se` call that ran and did not return `{error}` — the
+   * tool's own `effect` phrase, else `<tool> <target>`. Absent on every read,
+   * every refusal and every failure: the record's "used tools" names those.
+   */
+  effect?: string;
 }
 
 /**

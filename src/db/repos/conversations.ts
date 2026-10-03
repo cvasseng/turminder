@@ -1,6 +1,6 @@
 import type { Db } from '../index.js';
 import { newId } from '../../core/ids.js';
-import { stripReservedMarkers } from '../../core/markers.js';
+import { stripReservedMarkers, type RunRecord } from '../../core/markers.js';
 import { nowIso } from '../../core/time.js';
 
 /** What the `mode` column may hold — the CHECK constraint's vocabulary. */
@@ -82,6 +82,8 @@ export interface Turn extends Omit<TurnRow, 'content'> {
   toolsUsed: string[];
   /** User turns only (§26.2); empty for everything else. */
   attachments: TurnAttachment[];
+  /** Assistant turns: what the run did and how it ended (§20.2). Absent on legacy rows. */
+  record?: RunRecord;
 }
 
 function toTurn(row: TurnRow): Turn {
@@ -90,6 +92,7 @@ function toTurn(row: TurnRow): Turn {
     context_text?: string;
     tools_used?: unknown;
     attachments?: unknown;
+    record?: unknown;
   } = {};
   try {
     parsed = JSON.parse(row.content) as typeof parsed;
@@ -112,7 +115,25 @@ function toTurn(row: TurnRow): Turn {
           (a) => a && typeof a.upload_id === 'string',
         )
       : [],
+    ...(isRunRecord(parsed.record) ? { record: parsed.record } : {}),
   };
+}
+
+/**
+ * A stored run record (§20.2), checked rather than trusted: a row that does
+ * not hold one reads as legacy, which renders exactly as it always did.
+ */
+function isRunRecord(value: unknown): value is RunRecord {
+  if (!value || typeof value !== 'object') return false;
+  const r = value as Record<string, unknown>;
+  const strings = (v: unknown) => Array.isArray(v) && v.every((x) => typeof x === 'string');
+  return (
+    typeof r.outcome === 'string' &&
+    ['done', 'stopped', 'cut_short', 'failed'].includes(r.outcome) &&
+    (r.reason === undefined || typeof r.reason === 'string') &&
+    strings(r.effects) &&
+    strings(r.used)
+  );
 }
 
 /** Conversations and their turns (§9). Tool activity lives in trace, not here (App. C.2). */
@@ -284,6 +305,8 @@ export class ConversationsRepo {
     runId?: string | null;
     /** User turns only (§26.2). */
     attachments?: readonly TurnAttachment[];
+    /** Assistant turns: the run record, computed once by the caller (§20.2). */
+    record?: RunRecord;
   }): Turn {
     const created = nowIso();
     const toolsUsed = input.toolsUsed ?? [];
@@ -305,6 +328,7 @@ export class ConversationsRepo {
     if (contextText !== undefined) content.context_text = contextText;
     if (toolsUsed.length) content.tools_used = toolsUsed;
     if (attachments.length) content.attachments = attachments;
+    if (input.record) content.record = input.record;
 
     const info = this.db
       .prepare(
@@ -328,6 +352,7 @@ export class ConversationsRepo {
       contextText: contextText ?? text,
       toolsUsed,
       attachments: [...attachments],
+      ...(input.record ? { record: input.record } : {}),
       event_id: input.eventId ?? null,
       run_id: input.runId ?? null,
       created_at: created,

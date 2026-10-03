@@ -274,6 +274,15 @@ export function printTools(deps: PrintToolsDeps): ToolDefinition[] {
           ],
         };
       },
+      effect: (
+        args: { path: string },
+        result: { device?: string; jobs?: { job_id: unknown }[] },
+      ) => {
+        const jobs = result.jobs ?? [];
+        const which =
+          jobs.length === 1 ? `job ${String(jobs[0]!.job_id)}` : `${jobs.length} jobs`;
+        return `printed ${args.path}${result.device ? ` on ${result.device}` : ''} (${which})`;
+      },
       async execute(args: {
         path: string;
         device?: string;

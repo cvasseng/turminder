@@ -1487,6 +1487,9 @@ function handle(frame) {
       clearMessages();
       for (const turn of p.turns || []) {
         if (turn.activity?.length) addReplayedActivity(turn.activity);
+        // A run that said nothing still leaves a turn for its record (§20.2):
+        // the activity block above is all it has to show, never an empty bubble.
+        if (turn.role === 'assistant' && !turn.text?.trim()) continue;
         addMessage(turn.role, turn.text, undefined, turn.attachments);
       }
       // History is settled text, so its embeds can mount immediately.

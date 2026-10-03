@@ -225,6 +225,8 @@ export function scheduleTools(deps: ScheduleDeps): ToolDefinition[] {
           .optional()
           .describe('default timer.fired; your own (digest.due) is owned by one handler'),
       }),
+      effect: (args: { note: string }, result: { schedule_id: string }) =>
+        `scheduled ${result.schedule_id} "${args.note}"`,
       async execute(
         args: {
           fire_at: string;
@@ -338,6 +340,7 @@ export function scheduleTools(deps: ScheduleDeps): ToolDefinition[] {
       description: 'Cancel a schedule by id.',
       tier: 'se',
       args: z.object({ schedule_id: z.string().min(1) }),
+      effect: (args: { schedule_id: string }) => `cancelled schedule ${args.schedule_id}`,
       async execute(args: { schedule_id: string }) {
         const cancelled = repos.schedules.cancel(args.schedule_id);
         if (!cancelled) {

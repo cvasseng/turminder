@@ -148,7 +148,7 @@ describe('display text vs context text (§20.2)', () => {
     const history = messages.map((m) => m.content).join('\n');
     expect(history).not.toContain('Let me look that up');
     expect(history).toContain('It is Friday.');
-    expect(history).toContain('[[used tools: time.now]]');
+    expect(history).toContain('[[run: done · used tools: time.now]]');
     expect(history).not.toContain('(used tools:');
   });
 });

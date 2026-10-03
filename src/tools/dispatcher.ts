@@ -2,6 +2,7 @@ import { jsonSchema, tool, type ToolSet } from 'ai';
 import { globMatchAny } from '../core/glob.js';
 import { errMessage } from '../core/errors.js';
 import { log } from '../core/logger.js';
+import { effectPhrase, fallbackEffect } from '../core/markers.js';
 import type { DispatchCall, DispatchResult, ToolDispatcher } from '../model/dispatcher.js';
 import { redactTraceArgs } from './redact.js';
 import type { ToolContext, ToolHandle } from './types.js';
@@ -157,9 +158,13 @@ export class GrantedDispatcher implements ToolDispatcher {
         call.signal ? { ...this.ctx, signal: call.signal } : this.ctx,
       );
       const stored = outcome.ok && !isErrorReturn(outcome.output);
+      const effect = stored ? effectOf(handle, redacted, outcome) : null;
       return {
         ...outcome,
         ...traceArgs,
+        // The run record's phrase (§20.2), from here for the reason `bulkArgs`
+        // is: only a call that ran and succeeded changed anything.
+        ...(effect ? { effect } : {}),
         ...(handle.bulkArgs?.length && stored ? { bulkArgs: handle.bulkArgs } : {}),
         // A static property of the tool, reported per call for the same reason
         // `bulkArgs` is: the loop holds the transcript, and the handle is here.
@@ -207,6 +212,35 @@ function isEmptyResult(handle: ToolHandle, output: unknown): boolean {
     }
   }
   return handle.tier === 'ro' && isErrorReturn(output);
+}
+
+/**
+ * What a successful call changed, for the run record (§20.2). Reads change
+ * nothing. A `se` tool's own phrase wins; one that declares none gets `<tool>
+ * <target>`. The phrase is computed from the tool's real result — the capped
+ * transcript form may have cut away the very id the next run needs — and from
+ * the redacted args, because the record rides into every later request and a
+ * `setup.*` value must not ride with it (App. F.9). A phrase function that
+ * throws is a bug in one tool, and costs that tool its own wording, nothing
+ * more.
+ */
+function effectOf(
+  handle: ToolHandle,
+  args: unknown,
+  outcome: { output: unknown; traceOutput?: unknown },
+): string | null {
+  if (handle.tier !== 'se') return null;
+  const result = outcome.traceOutput !== undefined ? outcome.traceOutput : outcome.output;
+  if (isErrorReturn(result)) return null;
+  if (handle.effect) {
+    try {
+      const phrase = handle.effect(args, result);
+      return phrase && phrase.trim() ? effectPhrase(phrase) : null;
+    } catch (e) {
+      l.warn({ tool: handle.name, err: errMessage(e) }, 'effect phrase failed; using fallback');
+    }
+  }
+  return fallbackEffect(handle.name, args, handle.bulkArgs);
 }
 
 /** The expected-failure shape every tool speaks (`{error, message}`). */

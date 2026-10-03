@@ -95,6 +95,15 @@ export class McpConnection {
      */
     private readonly awaitsHuman: ReadonlyMap<string, () => number> = new Map(),
     /**
+     * Per-tool run-record phrases (§20.2). Bundled integrations only: the
+     * phrase rides into every later request of the conversation, and an
+     * external server does not get to write the system's own voice.
+     */
+    private readonly effects: ReadonlyMap<
+      string,
+      (args: unknown, result: unknown) => string | null
+    > = new Map(),
+    /**
      * In-process connections are trivially alive and must stay that way: a
      * bundled integration is the same process, and it cannot drop.
      */
@@ -177,6 +186,17 @@ export class McpConnection {
         .filter((d) => d.awaitsHuman)
         .map((d) => [d.name, d.awaitsHuman!.bind(d) as () => number] as const),
     );
+    const effects = new Map(
+      defs
+        .filter((d) => d.effect)
+        .map(
+          (d) =>
+            [
+              d.name,
+              d.effect!.bind(d) as (args: unknown, result: unknown) => string | null,
+            ] as const,
+        ),
+    );
     return new McpConnection(
       name,
       client,
@@ -188,6 +208,7 @@ export class McpConnection {
       emptiness,
       summaries,
       awaitsHuman,
+      effects,
     );
   }
 
@@ -207,6 +228,7 @@ export class McpConnection {
       new Map(),
       new Map(),
       new Set(),
+      new Map(),
       new Map(),
       new Map(),
       new Map(),
@@ -240,6 +262,7 @@ export class McpConnection {
         ...(this.neverElide.has(t.name) ? { neverElide: true } : {}),
         ...(this.emptiness.has(t.name) ? { isEmpty: this.emptiness.get(t.name)! } : {}),
         ...(this.summaries.has(t.name) ? { confirmSummary: this.summaries.get(t.name)! } : {}),
+        ...(this.effects.has(t.name) ? { effect: this.effects.get(t.name)! } : {}),
         call: (args: unknown, ctx: ToolContext) => this.call(t.name, args, ctx),
       } satisfies ToolHandle;
     });

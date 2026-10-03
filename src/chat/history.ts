@@ -1,5 +1,10 @@
 import type { ModelMessage } from 'ai';
-import { imageMarker, stripReservedMarkers, usedToolsMarker } from '../core/markers.js';
+import {
+  imageMarker,
+  runRecordMarker,
+  stripReservedMarkers,
+  usedToolsMarker,
+} from '../core/markers.js';
 import type { Turn, TurnAttachment } from '../db/repos/conversations.js';
 
 /**
@@ -17,14 +22,17 @@ export interface ImageContext {
 
 /**
  * Conversation history as model context (§20.2). Composed at read time from
- * `contextText` — the final answer of each run — with a single marker naming
- * the tools that were used. Continuity without payloads: the model knows it
- * looked something up without re-reading what came back.
+ * `contextText` — the final answer of each run — with one line before it: the
+ * run record, `[[run: …]]`, saying how the run ended, what it changed (ids
+ * whole) and which tools it otherwise used. Continuity without payloads: the
+ * model knows it built something, or failed, without re-reading what came
+ * back. The record was computed once when the turn was stored and is rendered
+ * from that, so the line is the same bytes on every request (§20.5). Rows from
+ * before the record keep `[[used tools: …]]`, exactly as they always had it.
  *
- * The marker is `[[used tools: …]]`, in the system voice of §20.8, and that is
- * the load-bearing detail. The prose form this once used — `(used tools: …)` —
- * read as something the assistant could have written, so the model learned to
- * write it: four turns narrated file appends it never called. Anything rendered
+ * Both are in the system voice of §20.8, and that is the load-bearing detail.
+ * The prose form this once used — `(used tools: …)` — read as something the
+ * assistant could have written, so the model learned to write it: four turns narrated file appends it never called. Anything rendered
  * into history in the system's voice must look like the system's voice.
  *
  * `text` (the display transcript) is deliberately never rendered here. It holds
@@ -53,8 +61,21 @@ export function toModelMessage(turn: Turn, mode?: AttachmentMode): ModelMessage 
       content: userParts(text, turn.attachments, mode ?? { kind: 'no_vision' }),
     };
   }
+  const body = stripReservedMarkers(turn.contextText);
+  if (turn.record) {
+    // A run that said nothing still leaves its record (§20.2): the line alone.
+    const line = runRecordMarker(turn.record);
+    return { role: 'assistant', content: line ? (body ? `${line}\n${body}` : line) : body };
+  }
+  // Legacy rows, byte for byte as they always rendered.
   const used = turn.toolsUsed.length ? `${usedToolsMarker(turn.toolsUsed)}\n` : '';
-  return { role: 'assistant', content: `${used}${stripReservedMarkers(turn.contextText)}` };
+  return { role: 'assistant', content: `${used}${body}` };
+}
+
+/** The one system-voice line above an assistant turn, or null (§20.2). */
+function recordLine(turn: Turn): string | null {
+  if (turn.record) return runRecordMarker(turn.record);
+  return turn.toolsUsed.length ? usedToolsMarker(turn.toolsUsed) : null;
 }
 
 type UserPart =
@@ -111,8 +132,7 @@ export function toModelMessages(turns: Turn[], images?: ImageContext | null): Mo
   };
   return turns
     .filter(
-      (t) =>
-        t.role === 'user' || stripReservedMarkers(t.contextText).trim() || t.toolsUsed.length,
+      (t) => t.role === 'user' || stripReservedMarkers(t.contextText).trim() || recordLine(t),
     )
     .map((t) => toModelMessage(t, modeFor(t)));
 }

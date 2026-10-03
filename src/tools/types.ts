@@ -85,6 +85,17 @@ export interface ToolDefinition<A = any> {
    * model wrote about itself.
    */
   confirmSummary?(args: A): ConfirmLines;
+  /**
+   * What a successful call changed, in one terse phrase for the run record
+   * (§20.2): `created embed <id> "<title>" (persistent; bindings: a, b)`,
+   * `wrote <path>`. The next run reads it in place of the payload, so ids are
+   * written whole and first, and the phrase is at most 120 chars. Called only
+   * for a `se` call that did not return `{error}`, with the tool's real result
+   * (not the transcript's capped form). `null` = this call changed nothing
+   * worth naming, and it is listed as used instead. A `se` tool that declares
+   * none gets `<tool> <target>`; declare it wherever a phrase beats that.
+   */
+  effect?(args: A, result: any): string | null;
   execute(args: A, ctx: ToolContext): Promise<unknown>;
 }
 
@@ -116,6 +127,8 @@ export interface ToolHandle {
   bulkArgs?: readonly string[];
   /** This tool's own words for an approval dialog (§7.3); bundled only. */
   confirmSummary?(args: unknown): ConfirmLines;
+  /** The run-record phrase for a successful call (§20.2); bundled only. */
+  effect?(args: unknown, result: unknown): string | null;
   call(args: unknown, ctx: ToolContext): Promise<ToolCallOutcome>;
 }
 

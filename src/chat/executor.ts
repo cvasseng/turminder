@@ -6,7 +6,7 @@ import type { Config } from '../core/config.js';
 import type { BackgroundTasks } from '../core/background.js';
 import type { Repos } from '../db/repos/index.js';
 import type { EventRecord } from '../db/repos/events.js';
-import { runAgent, type AgentRunResult } from '../model/agent-loop.js';
+import { runAgent, runRecord, type AgentRunResult } from '../model/agent-loop.js';
 import type { ModelGateway } from '../model/gateway.js';
 import type {
   ModelCap,
@@ -505,7 +505,26 @@ export class ChatExecutor {
             : null,
     });
 
+    // What the run did and how it ended (§20.2), computed once, here, and
+    // stored: history renders the stored value, so it is byte-stable.
+    const record = runRecord(result);
+
     if (failed) {
+      // A run that said nothing still leaves its record (§20.2) when it did
+      // anything at all: one that built an embed silently and then hit the
+      // window would otherwise leave the next run exactly as blind as before.
+      // The run row still says failed and the banner still goes out.
+      if (record.effects.length || record.used.length) {
+        repos.conversations.addTurn({
+          conversationId: conversation.id,
+          role: 'assistant',
+          text: '',
+          contextText: '',
+          toolsUsed: result.toolsUsed,
+          record,
+          runId,
+        });
+      }
       // A window stop that said nothing still gets its banner (§20.11): the
       // bare run error names a number, the banner says what it means.
       const message = stopped
@@ -522,10 +541,11 @@ export class ChatExecutor {
       conversationId: conversation.id,
       role: 'assistant',
       // Display gets everything spoken; model context gets the final answer
-      // and the tool names (§20.2).
+      // and the run record (§20.2).
       text,
       contextText: result.contextText.trim() || text,
       toolsUsed: result.toolsUsed,
+      record,
       runId,
     });
     stream.done({ conversationId: conversation.id, runId, turnSeq: turn.seq });

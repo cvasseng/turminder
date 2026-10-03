@@ -1,7 +1,12 @@
 import type { ModelMessage, ToolSet } from 'ai';
 import { log } from '../core/logger.js';
 import { errMessage } from '../core/errors.js';
-import { reservedMarkers, stripReservedMarkers } from '../core/markers.js';
+import {
+  reservedMarkers,
+  stableJson,
+  stripReservedMarkers,
+  type RunRecord,
+} from '../core/markers.js';
 import {
   ModelCallError,
   type JsonSchemaSpec,
@@ -235,6 +240,12 @@ export interface AgentRunResult {
   toolCallCount: number;
   /** Names of the tools called, deduped, in call order (§20.2). */
   toolsUsed: string[];
+  /**
+   * Every executed tool call, in call order, with what it changed when it
+   * changed something (§20.2: the dispatcher result carries the phrase). The
+   * run record is computed from this, once, at persist time — `runRecord()`.
+   */
+  calls: { tool: string; effect?: string }[];
   /** Reasoning produced across the run. Metrics only (§20.1). */
   reasoningChars: number;
   stopReason: StopReason;
@@ -330,6 +341,7 @@ export async function runAgent(
   let billedWithTimings = 0;
   let toolCallCount = 0;
   const toolsUsed = new Set<string>();
+  const calls: { tool: string; effect?: string }[] = [];
   // Identical calls seen this run, for the circling backstop (§20.7).
   // Zero-arg calls are exempt: `time.now` twice in a run is time passing,
   // not a model that lost the thread.
@@ -879,6 +891,11 @@ export async function runAgent(
           }
           toolCallCount += 1;
           toolsUsed.add(call.toolName);
+          calls.push(
+            outcome.effect
+              ? { tool: call.toolName, effect: outcome.effect }
+              : { tool: call.toolName },
+          );
           // Learned once and remembered for the run: every later elision pass
           // walks the whole transcript, including this result (§20.4).
           if (outcome.neverElide) neverElide.add(call.toolName);
@@ -1063,6 +1080,7 @@ export async function runAgent(
     billedWithTimings,
     toolCallCount,
     toolsUsed: [...toolsUsed],
+    calls,
     reasoningChars,
     stopReason,
     endpoint,
@@ -1071,6 +1089,64 @@ export async function runAgent(
   };
   if (error) result.error = error;
   return result;
+}
+
+/**
+ * The run record (§20.2): what the run did and how it ended, because a list of
+ * tool names said neither. Observed 2026-10-02: a run built an embed and died
+ * on a context overflow; the next run saw its last narration and the tool
+ * names, did not know it had failed or that the embed existed, and the one
+ * after that spent three rounds rediscovering it.
+ *
+ * Computed once, by whoever persists the turn, and stored — history renders
+ * the stored value, so the bytes are the same on every later request. The
+ * outcome is the stop reason's: a run that stopped for any reason but `stop`
+ * did not simply finish, whatever the run row says.
+ */
+export function runRecord(
+  result: Pick<AgentRunResult, 'stopReason' | 'error' | 'calls' | 'assistantText' | 'text'>,
+): RunRecord {
+  const effects: string[] = [];
+  const used: string[] = [];
+  for (const call of result.calls) {
+    if (call.effect) effects.push(call.effect);
+    else if (!used.includes(call.tool)) used.push(call.tool);
+  }
+  return { ...runOutcome(result), effects, used };
+}
+
+/** §20.2's mapping from the loop's stop reason to the record's outcome. */
+function runOutcome(
+  result: Pick<AgentRunResult, 'stopReason' | 'error' | 'assistantText' | 'text'>,
+): Pick<RunRecord, 'outcome' | 'reason'> {
+  switch (result.stopReason) {
+    case 'stop':
+      // Finished cleanly and said nothing — a §20.10 silent turn that gave up,
+      // or an empty response. The user saw it fail; the record must not say
+      // `done` (the executor's own test for a failed run: no text at all).
+      return result.assistantText.trim() || result.text.trim()
+        ? { outcome: 'done' }
+        : { outcome: 'failed', reason: 'no answer' };
+    case 'aborted':
+      return { outcome: 'stopped' };
+    case 'timeout':
+      return { outcome: 'cut_short', reason: 'timeout' };
+    case 'stalled':
+      return { outcome: 'cut_short', reason: 'stalled' };
+    case 'max_turns':
+      return { outcome: 'cut_short', reason: 'max turns' };
+    case 'max_tokens':
+      return { outcome: 'cut_short', reason: 'max tokens' };
+    case 'context_full':
+      return { outcome: 'failed', reason: 'context window full' };
+    case 'output_cut':
+      return { outcome: 'failed', reason: 'output cut off' };
+    case 'error': {
+      const cause = (result.error ?? 'it did not answer').replace(/\s+/g, ' ').trim();
+      const short = cause.length <= 80 ? cause : `${cause.slice(0, 79)}…`;
+      return { outcome: 'failed', reason: `endpoint error: ${short}` };
+    }
+  }
 }
 
 type ToolMessage = Extract<ModelMessage, { role: 'tool' }>;
@@ -1212,17 +1288,4 @@ function dedupeSkill(tool: string, output: unknown, loaded: ReadonlySet<string>)
   }
   const { skill: _dropped, ...rest } = o;
   return { ...rest, skill_already_loaded: skill.name };
-}
-
-/** Key-order-independent serialization, so "the same call" means the same call. */
-function stableJson(value: unknown): string {
-  return (
-    JSON.stringify(value, (_key, v) =>
-      v && typeof v === 'object' && !Array.isArray(v)
-        ? Object.fromEntries(
-            Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1)),
-          )
-        : v,
-    ) ?? 'null'
-  );
 }

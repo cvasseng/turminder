@@ -2570,7 +2570,13 @@ model re-reads. `turns.content` becomes:
 {
   "text": "…",           // DISPLAY: everything spoken across the run (unchanged)
   "context_text": "…",   // MODEL: the last non-empty assistant utterance of the run
-  "tools_used": ["weather.forecast", "files.read"]   // names only, deduped, call order
+  "tools_used": ["weather.forecast", "files.read"],  // names only, deduped, call order
+  "record": {                                        // §20.2 run record; absent on older rows
+    "outcome": "done",       // done | stopped | cut_short | failed
+    "reason": "…",           // with cut_short/failed: timeout | stalled | context window full | output cut off | max turns | max tokens | endpoint error: <≤80 chars>
+    "used": ["weather.forecast", "print.document"],   // tools that produced no effect: reads, and failed writes
+    "effects": ["created embed 01M3Z9H42NJ90HKZ9EG5AEYA3G \"Daily printed digest\" (persistent; bindings: weather, calendar)"]
+  }
 }
 ```
 
@@ -2579,11 +2585,69 @@ model re-reads. `turns.content` becomes:
   narration ("Let me check…") is display-only; it must not accumulate in
   history.
 - **History assembly** (chat context reconstruction) uses `context_text`,
-  composed at read time: when `tools_used` is non-empty, prepend a single
-  line `[[used tools: a, b]]` — continuity without payloads, in the
-  reserved system voice of §20.8 (it must not read as prose the model
-  could have written; the prose form taught the model to fabricate it,
-  see §20.8). Never render `text` into model context.
+  composed at read time with one line before it, in the reserved system
+  voice of §20.8: the **run record**. It is continuity without payloads, and
+  it must not read as prose the model could have written (the prose form
+  taught the model to fabricate it, see §20.8). Never render `text` into
+  model context.
+- **The run record** says what the run *did* and *how it ended*, because a
+  list of tool names said neither. Observed 2026-10-02: a run built an embed
+  and then died on a context overflow. The next run saw only that run's
+  last narration ("Now I'll pull the prose inputs for today's issue.") and
+  `[[used tools: …, embeds.create, …]]`, did not know the run had failed or
+  that the embed existed, announced a retry and stopped. The run after that
+  spent three rounds rediscovering the embed (`01M3Z967H8…`, `01M3Z9SZ3D…`,
+  `01M3ZADXT0…`). The line is, exactly:
+
+  `[[run: <outcome phrase>[ · <effect>]…[ · used tools: a, b]]]`
+
+  - *Outcome phrase*: `done`, `stopped by the user`, `cut short (<reason>)`,
+    or `failed (<reason>)`, from `record.outcome`/`reason`. A run whose
+    status is `done` but whose stop reason was not `stop` (a §9 cut-short,
+    `max_turns`, `max_tokens`) is `cut_short`. `failed` is a run that ended
+    in an endpoint error, `context_full` or `output_cut` (§20.11), and
+    also a run whose row is `failed` although its stop reason was `stop`
+    (it never answered: a §20.10 silent turn that gave up, or an empty
+    response), rendered `failed (no answer)`. The record never says `done`
+    for a run the user saw fail.
+  - *Effects*: what the run's **successful `se`-tier calls** changed, in call
+    order, one phrase each (≤ 120 chars), at most `run_record_max_effects`
+    (App. A, 12) then `…and N more`. A tool declares the phrase:
+    `ToolDefinition.effect?(args, result) → string | null`, for example
+    `created embed <id> "<title>" (<kind>; bindings: a, b)`, `wrote <path>`,
+    `updated handler <name>`, `rendered <out_path>`, `printed <path> (job
+    <id>)`, `scheduled <id> "<note>"`. A `se` tool that declares none gets
+    `<tool> <target>`, where the target is its args minus `bulkArgs` (§20.7)
+    in stable JSON cut to 80 chars. A call that returned `{error}` is not
+    an effect. Ids are written whole: the next run needs them.
+  - *Used tools*: `record.used`, every tool the run called that produced
+    no effect, deduped, call order: the reads, plus any `se` call that
+    failed (so a failed `print.document` is still visible). `tools_used`
+    keeps its meaning (every tool, names only) for its other readers.
+    Payloads still never cross a turn. Data is stale by the next turn
+    anyway, and the trace keeps it.
+  - The whole line is capped at `run_record_max_chars` (App. A, 600), cut
+    at an effect boundary; past the last effect, used-tool names are
+    dropped from the end and the list ends `, …`. Every phrase and reason
+    in the line is made marker-safe: one line, and **no two adjacent
+    brackets of either kind** anywhere (`[[[` becomes `[ [ [`), so no
+    content can close the line or open a marker inside it. A run with outcome `done`, no effects and no
+    tools renders no line at all.
+  - The record is computed **once, at persist time**, from the loop's own
+    record of calls (the dispatcher result carries the effect phrase) and
+    stored as `record` (above). History renders the stored value, so it is
+    byte-stable turn to turn and the prefix cache holds (§20.5).
+  - **Legacy rows** (no `record`) render `[[used tools: a, b]]` exactly as
+    before.
+  - **A run that said nothing still leaves its record.** A run that
+    streamed no text but would render a non-empty line (it called a tool, or
+    changed something) persists an assistant turn with `text: ""`,
+    `context_text: ""` and its `record`, while the run row still says
+    `failed` and the banner is still sent. Otherwise a run that built an
+    embed silently and then hit `context_full` would leave the next run
+    exactly as blind as before. History renders only the `[[run: …]]` line
+    for it. The chat panel renders such a turn as its activity block alone,
+    never an empty bubble.
 - **Legacy sanitation:** turns persisted before the §20.8 guard may carry
   a fabricated `(used tools: …)` prefix inside their stored text. History
   assembly strips every reserved pattern (§20.8) out of the content it
@@ -2861,8 +2925,8 @@ Normative rules:
 
 - **Reserved markers** are system-authored strings that may appear in
   model *input* but never in model *output*: `[[elided: …]]` (§20.4),
-  `[[stored: …]]` (§20.6), `[[used tools: …]]` (§20.2), `[[image: …]]`
-  (§26), and the legacy prose form `(used tools: ` at the start of a
+  `[[stored: …]]` (§20.6), `[[run: …]]` and `[[used tools: …]]` (§20.2),
+  `[[image: …]]` (§26), and the legacy prose form `(used tools: ` at the start of a
   line. The family is reserved, not the individual strings — any future
   prompt-visible annotation uses the `[[…]]` form and joins this guard by
   doing so. A marker is a single line by construction, so an unterminated
@@ -2918,8 +2982,11 @@ Normative rules:
   fail-open rule (§1.1): that rule governs *relevance* decisions; this is
   output validation, the same class as §23.2's rejection of
   deterministically-broken bindings.
-- The base prompts (H.5) explain `[[used tools:]]` alongside
-  `[[elided:]]`: system housekeeping, never yours to write.
+- The base prompts (H.5) explain `[[run:]]` and `[[used tools:]]`
+  alongside `[[elided:]]`: system housekeeping, never yours to write.
+  `[[run:]]` gets one clause more: it is the system's record of what an
+  earlier answer did and how it ended, so trust it over that answer's own
+  wording.
 
 Two accepted limitations, decided rather than overlooked:
 
@@ -6354,6 +6421,8 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Token estimate (`chars_per_token_estimate`) | 3 chars per token, lowered per run to the measured ratio, never raised | §20.11 |
 | Window margin (`window_margin`) | max(256 tokens, 3% of the window) | §20.11 |
 | Minimum output room (`min_output_room`) | 1024 tokens; less after rung 3 → `context_full` | §20.11 |
+| Run record effects (`run_record_max_effects`) | 12, then `…and N more` | §20.2 |
+| Run record length (`run_record_max_chars`) | 600 chars | §20.2 |
 | Context-overflow retries (`context_retries`) | 1 per run | §20.11 |
 | Cut-off-output retries (`length_retries`) | 1 per run | §20.11 |
 | Shipped skill size (`shipped_skill_max_chars`) | 8000 chars | G.8 |
@@ -6737,7 +6806,7 @@ default.
   role+text only. Tool detail lives in `trace`, keyed by the assistant
   turn's `run_id`.
 - Assistant `turns.content` JSON is
-  `{text, context_text?, tools_used?: [string]}` (§20.2): `text` is the
+  `{text, context_text?, tools_used?: [string], record?: {outcome, reason?, effects: [string], used: [string]}}` (§20.2): `text` is the
   display transcript (everything spoken), `context_text` is what model
   context reconstruction uses (the run's last non-empty utterance), and
   `tools_used` is names only. Rows without `context_text` fall back to
