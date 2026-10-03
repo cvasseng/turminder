@@ -285,6 +285,12 @@ export const ModelEndpointSchema = z
     caps: z.array(ModelCapSchema).default([]),
     context_size: z.number().int().positive().optional(),
     /**
+     * The most this endpoint accepts as `max_tokens` (§20.11, G.2). Optional:
+     * hosted providers refuse a request above their own output ceiling, and
+     * the window room alone can exceed it. Omitted = no cap beyond the window.
+     */
+    max_output_tokens: z.number().int().positive().optional(),
+    /**
      * The model `caps` and `context_size` were actually measured against
      * (§10.2). Optional, because an entry written before probes recorded their
      * subject has none — and that is *unknown*, never *stale*. Differing from

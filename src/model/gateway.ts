@@ -26,6 +26,7 @@ import {
   type AgentActivity,
   type LlmCallTrace,
   type ModelSelector,
+  type ObservedContextStore,
   type Priority,
   type ResolvedEndpoint,
   type TraceSink,
@@ -88,6 +89,19 @@ function scrubUrlCredentials(message: string): string {
  * exception it should never have to parse itself.
  */
 export class ModelCallError extends Error {
+  /**
+   * The window the endpoint said it has, when this was a refusal for length
+   * (§20.11) — which is not a failure but a measurement: the loop records it,
+   * compacts against it and asks again. Absent on every other error.
+   */
+  contextLimit?: number;
+  /**
+   * The prompt's own size, when the refusal states it (vllm: `your prompt
+   * contains at least N input tokens`) — proof the loop's estimate was low,
+   * and the number it re-anchors on (§20.11).
+   */
+  contextPromptTokens?: number;
+
   constructor(
     readonly endpoint: string,
     readonly errorClass: string,
@@ -97,6 +111,54 @@ export class ModelCallError extends Error {
     super(message, cause !== undefined ? { cause } : undefined);
     this.name = 'ModelCallError';
   }
+}
+
+const VLLM_LIMIT = /maximum context length is (\d+)/i;
+const LLAMA_REFUSAL = /exceeds the available context size/i;
+const LLAMA_LIMIT = /n_ctx(?:_slot)?["']?\s*[:=]\s*(\d+)/i;
+const VLLM_PROMPT = /your prompt contains at least (\d+) input tokens/i;
+
+/**
+ * The context size an HTTP 400 is refusing on, or `undefined` when the 400 is
+ * about something else (§20.11). Two dialects: vllm and OpenAI-style servers
+ * say `maximum context length is N`; llama.cpp says `exceeds the available
+ * context size` and carries `n_ctx` / `n_ctx_slot` alongside, in the message
+ * or in the error body. A 400 matching neither is an ordinary error — a
+ * malformed request must not be "fixed" by shrinking the window.
+ */
+export function parseContextRefusal(
+  status: number | undefined,
+  text: string,
+): number | undefined {
+  if (status !== 400) return undefined;
+  const vllm = VLLM_LIMIT.exec(text);
+  if (vllm) return Number(vllm[1]);
+  if (!LLAMA_REFUSAL.test(text)) return undefined;
+  const llama = LLAMA_LIMIT.exec(text);
+  return llama ? Number(llama[1]) : undefined;
+}
+
+/**
+ * The size a length refusal names, read from the API error behind the AI
+ * SDK's wrappers. The body is read for the number only and goes nowhere —
+ * not into the trace, not into the message (§27: an endpoint's error text is
+ * not ours to relay).
+ */
+function contextRefusal(e: unknown): { limit: number; prompt?: number } | undefined {
+  let cur: unknown = RetryError.isInstance(e) ? e.lastError : e;
+  const seen = new Set<unknown>();
+  while (cur instanceof Error && !seen.has(cur)) {
+    if (APICallError.isInstance(cur)) {
+      const text = `${cur.message}\n${cur.responseBody ?? ''}`;
+      const limit = parseContextRefusal(cur.statusCode, text);
+      if (!limit) return undefined;
+      const prompt = VLLM_PROMPT.exec(text);
+      return { limit, ...(prompt ? { prompt: Number(prompt[1]) } : {}) };
+    }
+    seen.add(cur);
+    cur = cur.cause;
+  }
+  return undefined;
 }
 
 export interface TurnRequest {
@@ -226,6 +288,13 @@ const SPEECH_TIMEOUT_MS = 60_000;
 export interface GatewayOptions {
   /** Injected for tests; defaults to global fetch. */
   fetch?: typeof globalThis.fetch;
+  /**
+   * Where observed context sizes live (§20.11, `meta`). The model stack holds
+   * it, so every call — chat, handlers, ingress, distillation, titles — reads
+   * the same measurement and teaches it; no caller wires it. Absent means
+   * the configured `context_size` alone, and nothing learned is kept.
+   */
+  observedContext?: ObservedContextStore;
   /** llama.cpp prompt cache reuse across calls (§10.3). */
   cachePrompt?: boolean;
 }
@@ -278,6 +347,32 @@ export class ModelGateway {
     const m = this.buildModel(ep);
     this.plainModels.set(ep.name, m);
     return m;
+  }
+
+  /**
+   * The effective window of an endpoint (§20.11): observed, else G.2
+   * `context_size`, else unknown. An observation learned against a different
+   * configured size is stale — the file was edited since, perhaps because the
+   * server grew — so it is dropped here rather than allowed to outvote the
+   * edit. A `null` configured matches only a config that still has none.
+   */
+  contextWindow(ep: Pick<ResolvedEndpoint, 'name' | 'contextSize'>): number | undefined {
+    const store = this.opts.observedContext;
+    const observed = store?.get(ep.name) ?? null;
+    if (observed && observed.configured !== (ep.contextSize ?? null)) {
+      store!.delete(ep.name);
+      l.info(
+        { endpoint: ep.name, observed: observed.size, configured: ep.contextSize ?? null },
+        'context_size changed since the window was observed; the observation is dropped',
+      );
+      return ep.contextSize ?? undefined;
+    }
+    return observed?.size ?? ep.contextSize ?? undefined;
+  }
+
+  /** Where observed sizes are kept, for the §10.7 startup check. */
+  get observedContext(): ObservedContextStore | undefined {
+    return this.opts.observedContext;
   }
 
   /**
@@ -421,7 +516,20 @@ export class ModelGateway {
             error: cause,
           };
           trace.append('llm_call', rec);
-          throw new ModelCallError(ep.name, cause.class, cause.message, e);
+          const err = new ModelCallError(ep.name, cause.class, cause.message, e);
+          const refusal = contextRefusal(e);
+          if (refusal) {
+            err.contextLimit = refusal.limit;
+            if (refusal.prompt) err.contextPromptTokens = refusal.prompt;
+            // A measurement, recorded where every caller's calls pass (§20.11).
+            recordObservedContext(
+              this.opts.observedContext,
+              ep.name,
+              ep.contextSize,
+              refusal.limit,
+            );
+          }
+          throw err;
         }
 
         const durationMs = Date.now() - started;
@@ -461,7 +569,7 @@ export class ModelGateway {
             : {}),
           duration_ms: durationMs,
           queue_wait_ms: queueWaitMs,
-          ...(ep.contextSize ? { context_size: ep.contextSize } : {}),
+          ...(this.contextWindow(ep) ? { context_size: this.contextWindow(ep) } : {}),
         });
 
         return {
@@ -655,6 +763,32 @@ export class ModelGateway {
       },
     });
   }
+}
+
+/**
+ * Record a context size an endpoint reported (§20.11, §10.7): the startup
+ * drift check and a length refusal both land here. Returns whether it was
+ * news. A size that differs from G.2 `context_size` is said once, with both
+ * numbers, when it is first learned — config is never rewritten, so the
+ * human decides whether the file should follow.
+ */
+export function recordObservedContext(
+  store: ObservedContextStore | undefined,
+  endpoint: string,
+  configured: number | undefined,
+  size: number,
+): boolean {
+  const known = store?.get(endpoint) ?? null;
+  if (known && known.size === size && known.configured === (configured ?? null)) return false;
+  store?.set(endpoint, { size, configured: configured ?? null });
+  if (configured !== undefined && configured !== size) {
+    l.warn(
+      { endpoint, observed: size, configured },
+      `endpoint ${endpoint} serves a ${size}-token window but config/models.yaml says ` +
+        `context_size: ${configured}; budgeting against ${size}`,
+    );
+  }
+  return true;
 }
 
 /**

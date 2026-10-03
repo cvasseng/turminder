@@ -48,7 +48,9 @@ export function registerServeCommand(program: Command): void {
           );
         }
       }
-      const service = new Service(app);
+      // The serving process, and only it, asks each endpoint for its real
+      // window at startup (§10.7, §20.11).
+      const service = new Service(app, { observeContextOnStart: true });
       await service.start();
       const http = new HttpServer(service);
       const { host, port } = await http.listen();

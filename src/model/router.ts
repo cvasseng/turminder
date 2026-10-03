@@ -36,6 +36,7 @@ export class ModelRouter {
       };
       if (e.api_key) ep.apiKey = e.api_key;
       if (e.context_size) ep.contextSize = e.context_size;
+      if (e.max_output_tokens) ep.maxOutputTokens = e.max_output_tokens;
       if (e.efforts) ep.efforts = e.efforts;
       if (e.no_think) ep.noThink = e.no_think;
       if (e.voice) ep.voice = e.voice;

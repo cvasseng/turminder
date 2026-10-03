@@ -5,9 +5,9 @@ import { z } from 'zod';
 import { log } from '../core/logger.js';
 import { errMessage } from '../core/errors.js';
 import { ModelsYamlSchema, type ModelCap, type ModelEffort } from '../core/config-schemas.js';
-import { ModelGateway } from './gateway.js';
+import { ModelGateway, recordObservedContext } from './gateway.js';
 import { ModelRouter } from './router.js';
-import type { ResolvedEndpoint } from './types.js';
+import type { ObservedContextStore, ResolvedEndpoint } from './types.js';
 import { InferenceScheduler } from './scheduler.js';
 import { readWavHeader } from './wav.js';
 
@@ -216,6 +216,51 @@ export async function listModels(
     ok: true,
     models: data.map((m) => m?.id).filter((id): id is string => typeof id === 'string'),
   };
+}
+
+/**
+ * The context length an endpoint says it serves, from the one `GET /v1/models`
+ * the §10.7 startup drift check makes: vllm's `max_model_len`, or llama.cpp's
+ * `meta.n_ctx`, on the listed entry for the configured model (else the first).
+ * `undefined` when the endpoint does not say, or does not answer — an
+ * unreachable endpoint is the degradation story, not drift (§10.7).
+ */
+export async function servedContextSize(
+  endpoint: Pick<ResolvedEndpoint, 'url' | 'apiKey' | 'model'>,
+  opts: Pick<ProbeOptions, 'fetch' | 'timeoutMs'> = {},
+): Promise<number | undefined> {
+  const { api } = normaliseEndpointUrl(endpoint.url);
+  const listed = await getJson(`${api}/models`, {
+    ...opts,
+    ...(endpoint.apiKey ? { apiKey: endpoint.apiKey } : {}),
+  });
+  if (!listed.ok) return undefined;
+  const data: any[] = Array.isArray(listed.body?.data) ? listed.body.data : [];
+  const entry = data.find((m) => m?.id === endpoint.model) ?? data[0];
+  const n = entry?.max_model_len ?? entry?.meta?.n_ctx;
+  return typeof n === 'number' && Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * The context half of the §10.7 startup drift check, per chat endpoint:
+ * a served length the endpoint reports is recorded as its **observed** size
+ * (§20.11), which the agent loop budgets against. A measurement, never a
+ * config edit; a size that differs from G.2 `context_size` is warned about
+ * once, naming both. Best-effort and never throws — one request per endpoint.
+ */
+export async function observeServedContext(
+  endpoints: readonly ResolvedEndpoint[],
+  store: ObservedContextStore,
+  opts: Pick<ProbeOptions, 'fetch' | 'timeoutMs'> = {},
+): Promise<void> {
+  await Promise.all(
+    endpoints
+      .filter((ep) => ep.kind === 'chat')
+      .map(async (ep) => {
+        const size = await servedContextSize(ep, opts);
+        if (size) recordObservedContext(store, ep.name, ep.contextSize, size);
+      }),
+  );
 }
 
 /** The embedding half of App. E's probe: does this endpoint embed, and how wide? */

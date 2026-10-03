@@ -86,6 +86,76 @@ describe('agent loop', () => {
     expect(wire).toContain('1.49');
   });
 
+  it('does not call a retry that worked "unchanged" (§20.7)', async () => {
+    // 2026-10-02: a print that failed on a missing PDF and then succeeded came
+    // back telling the model the answer had not changed.
+    const same = { toolCalls: [{ name: 'print', args: { q: 'digest.pdf' } }] };
+    fake.script(same, same, { text: 'printed' });
+    let n = 0;
+    const disp = new RecordingDispatcher({
+      print: () => ((n += 1) === 1 ? { error: 'not_found' } : { job: 7 }),
+    });
+    const r = await runAgent(gw, { ...base, dispatcher: disp });
+    expect(r.stopReason).toBe('stop');
+    expect(disp.calls).toHaveLength(2);
+    const tool = (fake.requests.at(-1)!.body.messages as any[]).filter(
+      (m) => m.role === 'tool',
+    );
+    expect(JSON.stringify(tool[1])).toContain('job');
+    expect(JSON.stringify(tool[1])).not.toContain('repeated_call');
+  });
+
+  it('keeps executing a repeat while its results keep changing (§20.7)', async () => {
+    const same = { toolCalls: [{ name: 'status', args: { q: 'job 7' } }] };
+    fake.script(same, same, same, same, same, { text: 'finished' });
+    let n = 0;
+    const disp = new RecordingDispatcher({ status: () => ({ progress: (n += 1) }) });
+    const r = await runAgent(gw, { ...base, dispatcher: disp });
+    expect(r.stopReason).toBe('stop');
+    // Never two identical results in a row, so never served from the cache,
+    // and never wrapped as "unchanged".
+    expect(disp.calls).toHaveLength(5);
+    expect(JSON.stringify(fake.requests.at(-1)!.body.messages)).not.toContain('repeated_call');
+  });
+
+  it('caches from the 4th repeat only once two results in a row agree (§20.7)', async () => {
+    const same = { toolCalls: [{ name: 'status', args: { q: 'job 7' } }] };
+    fake.script(same, same, same, same, same, { text: 'finished' });
+    let n = 0;
+    // 1, 2, done, done, … — settles on the third call.
+    const disp = new RecordingDispatcher({
+      status: () => ((n += 1) < 3 ? { progress: n } : { done: true }),
+    });
+    const r = await runAgent(gw, { ...base, dispatcher: disp });
+    expect(r.stopReason).toBe('stop');
+    // Calls 1–4 execute (3 and 4 agree), the 5th is answered from the cache.
+    expect(disp.calls).toHaveLength(4);
+    const tool = (fake.requests.at(-1)!.body.messages as any[]).filter(
+      (m) => m.role === 'tool',
+    );
+    expect(JSON.stringify(tool[2])).not.toContain('repeated_call');
+    expect(JSON.stringify(tool[3])).toContain('the answer has not changed');
+    expect(JSON.stringify(tool[4])).toContain('Stop repeating it');
+  });
+
+  it('keeps a cached error an error on the trace (§20.7)', async () => {
+    const same = { toolCalls: [{ name: 'lookup', args: { q: 'gone' } }] };
+    fake.script(same, same, same, same, { text: 'giving up' });
+    const disp = new RecordingDispatcher({ lookup: () => ({ error: 'not_found' }) });
+    // RecordingDispatcher reports ok: true for anything it ran; make the
+    // source honest about the failure, as the real dispatcher is.
+    const honest = {
+      toolSet: () => disp.toolSet(),
+      dispatch: async (c: any) => ({ ...(await disp.dispatch(c)), ok: false }),
+    };
+    const trace = new MemoryTraceSink();
+    await runAgent(gw, { ...base, dispatcher: honest, trace });
+    expect(disp.calls).toHaveLength(3);
+    const rows = trace.ofKind('tool_call') as any[];
+    expect(rows).toHaveLength(4);
+    expect(rows.map((r) => r.ok)).toEqual([false, false, false, false]);
+  });
+
   it('leaves zero-arg calls out of the repeat backstop — time passes', async () => {
     const same = { toolCalls: [{ name: 'now', args: {} }] };
     fake.script(same, same, same, same, { text: 'done' });

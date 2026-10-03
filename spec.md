@@ -1293,6 +1293,9 @@ makes "configured ≠ served" a structural fact the system checks:
   with both values and the fix (`turminder models --probe <name>`), and a
   line in `turminder doctor`. Never an auto-edit: caps may be deliberate
   manual overrides (§10.2), and a heal that rewrites judgment is a bug.
+  A reported served length is, however, recorded as the endpoint's
+  **observed** context size (§20.11), which the loop budgets against. That
+  is a measurement, not judgment, and it does not touch the file.
 - **At startup, the embedding endpoint** (when configured): one tiny
   embeddings round-trip. Failure stays fail-open exactly as §8.3 says —
   lexical continues — but it now *announces itself*: a `warn` naming the
@@ -2800,13 +2803,22 @@ An identical tool call repeated within a run is a model that lost the
 thread — usually because the result it needed was elided. The agent loop
 keeps a per-run map of `(tool, stable-serialized args)`:
 
-- Repeats **2–3** execute normally but come back wrapped:
-  `{repeated_call: true, note: "identical to your earlier <tool> call this
-  run — the answer has not changed", result: <the real output>}` — the data
-  always arrives; the note never hides it.
+- Repeats **2–3** execute normally, and come back wrapped **only when the
+  result is identical** (stable serialization) to the previous result for
+  that call: `{repeated_call: true, note: "identical to your earlier <tool>
+  call this run — the answer has not changed", result: <the real output>}`.
+  The data always arrives; the note never hides it. A repeat whose result
+  differs (the first try was `{error: "not_found"}` and this one worked) is
+  returned unwrapped, because "the answer has not changed" would be false.
+  Observed 2026-10-02: a `print.document` that failed on a missing PDF and
+  succeeded after the PDF was rendered came back with exactly that false
+  note (`01M3ZADXT0ZJDSCA6MP7AGV4ZA`).
 - From the **4th** repeat the cached result is returned without touching
-  the tool, with a stop-repeating note: by then the upstream answer is not
-  the missing piece, and the loop should not hammer it.
+  the tool, with a stop-repeating note, **only when the last two results
+  were identical**. The cached result keeps its source's `ok`: a cached
+  error is still an error on the trace. By then the upstream answer is not the missing piece,
+  and the loop should not hammer it. While results keep changing, the call
+  executes.
 - **Zero-arg calls are exempt** — `time.now` twice in a run is time
   passing, not circling.
 - Args are compared key-order-independently, so "the same call" means the
@@ -3029,6 +3041,140 @@ not work?".
   models do this is a query.
 - It applies to every run of the agent loop, handlers included: an
   unattended handler that reasons and stops has the same nothing to show.
+
+### 20.11 The window is a budget (normative)
+
+A run that runs out of context used to die of it. Observed 2026-10-02 on a
+self-hosted endpoint whose real window was 32,768 tokens while G.2 said
+65,536: one run's last call ended `length` at exactly 27,559 + 5,209 =
+32,768 tokens while writing an embed, so nothing in it ran, and the run was
+recorded **done** with an old narration as its answer
+(`01M3Z8R3WN0GSZWJYGMW916BP4`). The next one built the embed and then
+fetched a feed into a 26.6k context, and the endpoint refused the following
+call with HTTP 400 (`01M3Z967H8QH9MTDZFS4AF45F2`). Every failure became a
+"try again", and every retry began from scratch. Christer: "the way we
+handle context causes memory loss and loops." The fix is that the loop
+treats the window as a budget it manages, not a wall it hits.
+
+- **The observed sizes belong to the model stack, not to callers.** The
+  gateway holds the `meta`-backed store and every call it makes reads and
+  records through it, so ingress, distillation, titles, `turminder ask`,
+  handlers and chat all budget against the same measurement and all teach
+  it. No caller wires it.
+- **The effective window** `W` of a call is the endpoint's **observed**
+  context size when one is known, else G.2 `context_size`, else unknown.
+  Observed sizes live in the `meta` table under
+  `observed_context_size:<endpoint name>` (an integer, App. C) and are
+  written from two sources: the startup drift check (§10.7) when the
+  endpoint reports its length (vllm's `max_model_len`, llama.cpp's
+  `n_ctx`), and any call refused for length (below). Observed beats
+  configured because the server just said so. An observed size is stored
+  with the configured `context_size` it was learned against (`meta` value
+  `{"size": <int>, "configured": <int|null>}`), and is **discarded when the
+  configuration changes**: someone edited the file, perhaps because the
+  server grew, and a stale measurement must not outvote that. Config is
+  never rewritten
+  (§10.7's rule stands); `models.list` and `chat.usage` report the effective
+  `W`. A newly learned size that differs from the configured one logs one
+  `warn` naming both.
+- **Before every model call**, when `W` is known, the loop estimates the
+  prompt as the previous call's reported `tokens_in` plus the characters
+  appended since, divided by the run's **chars-per-token ratio**. That
+  ratio starts at `chars_per_token_estimate` (App. A, 3) and, after every
+  call that reports usage, becomes `min(3, request chars ÷ tokens_in)`, so a
+  server that tokenizes denser than 3 is measured rather than guessed. It
+  never rises above the default. A length refusal that states the prompt's
+  size is a measurement too. Only calls whose request carries **no binary
+  parts** (images, attachments) update the ratio, because those parts cost
+  tokens and no characters and would make the ratio meaningless. Characters
+  **added** since the anchor call are costed at the ratio; characters
+  **removed** (compaction) are credited at `max(ratio, the anchor request's
+  own chars ÷ its tokens_in)`, never more generously than the last call
+  measured itself. For a first call there is no previous
+  figure, so the whole request is estimated. It reserves `R = max(output_reserve_tokens, 20% of W)` (App. A,
+  6000) for the answer. When `estimate + R > W`, the loop **compacts**, one
+  rung at a time, re-estimating after each, and stops at the first rung that
+  fits:
+  1. Elide (§20.4 markers) every result above `elide_threshold_chars`,
+     regardless of age, **except the latest tool round's**, which the model
+     has not yet answered.
+  2. Stub every skill body (§20.4's `neverElide`) except the most recently
+     delivered one, as `[[elided: skill <name>, <n> chars — fetch it again
+     with skills.fetch if you need it]]`. Under real pressure, a brief that
+     can be re-fetched beats a run that dies.
+  3. Elide every result older than the latest round, whatever its size.
+
+  Each rung that runs writes a trace row `{message: "compacted", rung,
+  estimate_before, estimate_after, window}` (C.1). Compaction is monotonic
+  like §20.4 elision and busts the prefix cache once, for the same reason
+  elision may.
+- **The output is bounded honestly.** When `W` is known, every call sends
+  `max_tokens = min(W − estimate − margin, G.2 max_output_tokens, the
+  caller's own cap)`, where `margin = max(256, 3% of W)` (App. A,
+  `window_margin`), because vllm counts `max_tokens` against the window and
+  an estimate a little low must not become a refusal. The first two are
+  the endpoint's limits; G.2's `max_output_tokens` is optional and exists
+  for hosted providers that refuse a `max_tokens` above their own ceiling.
+  If even rung 3 leaves less than `min_output_room` (App. A, 1024) tokens of
+  room, the run ends
+  with stop reason `context_full`, run error `context window full:
+  <estimate> of <W> tokens`, banner `answer cut short (context full) — this
+  run's working set no longer fits the model's <W>-token window`.
+- **A call refused for length is not a failure.** An HTTP 400 whose message
+  matches `maximum context length is (\d+)` (vllm, OpenAI-style), or
+  llama.cpp's `exceeds the available context size` carrying `n_ctx` /
+  `n_ctx_slot` `(\d+)`, records that number as the observed size, then
+  compacts against it and retries the call **once** (`context_retries`,
+  App. A, 1). The retry **always runs at least rung 1**, and when the
+  refusal states the prompt's own size (vllm: `your prompt contains at least
+  (\d+) input tokens`) the estimate is re-anchored on that number before the
+  rungs are measured, since the refusal itself proves the estimate was low.
+  **A refused call is not a turn**: `max_turns` counts calls that returned,
+  so a one-turn run (ingress) still gets its retry. Trace: `{message: "context_overflow", limit, outcome:
+  "retried"|"gave_up"}`. A second refusal ends the run `context_full`, as
+  above.
+- **A `length` finish is never `done`** when the window bound it: when the
+  call's `max_tokens` was the window room, or no `max_tokens` was sent. A
+  cut at a cap the caller or G.2 set below the room is that caller's own
+  budget (a title, a probe, a memory call) and behaves as before. A turn
+  whose finish reason is `length` was cut off mid-output, so its text is unfinished and any tool
+  call it was writing is incomplete. Nothing in it is executed, and what it
+  streamed is retracted (`chat.retract`, §20.8). Once per run
+  (`length_retries`, App. A, 1), the loop compacts and asks again with this
+  note, verbatim, in the §20.8 voice: *"System note: your last output was
+  cut off after <n> tokens because the context window was full, so nothing
+  in it was executed. <k> tokens of output fit now. If you were writing
+  something large, put it in one tool call and keep the prose around it
+  short."* `<n>` is the cut turn's `tokens_out` and `<k>` the
+  `max_tokens` the retry actually sends. With the window unknown the rule still holds (a cut-off
+  answer is never `done`); the note then omits the sentence *"<k> tokens of
+  output fit now."*, nothing is compacted, and the banner reads `…ran into
+  its window twice` without `<W>-token`.
+- **A cut-short run that said nothing still gets its banner.** When a
+  `context_full` or `output_cut` run streamed no text, the failure the chat
+  shows is the banner itself, not the bare run error. A second `length` ends the run with stop reason
+  `output_cut`, run error `output cut off at the context window`, banner
+  `answer cut short (output cut off) — the model's answer ran into its
+  <W>-token window twice`. Trace: `{message: "output_cut", tokens_out,
+  outcome: "retried"|"gave_up"}`.
+- **A skill body is a skill body however it arrived.** The `skill.content`
+  riding a `tools.open` result (F.12) is treated exactly like a
+  `skills.fetch` result: §20.4 never elides it, rung 2 stubs it with the
+  skill stub form, replacing only the `skill` field so `opened` and `tools`
+  survive, with `<n>` the body's length (whose "fetch it again with skills.fetch" is the way back,
+  since re-opening an open namespace does not re-deliver it), and dedupe
+  below covers it.
+- **A skill body is delivered once per run.** A `skills.fetch` result, or a
+  `tools.open` result carrying `skill` (F.12), for a skill whose body is
+  already present and unstubbed in this run's messages reaches the
+  transcript as `{name, already_loaded: true, note: "this skill is already
+  in your context above; use that copy"}` instead (F.12 `tools.open`
+  likewise drops `skill` and adds `skill_already_loaded: "<name>"`). The
+  loop decides this, because the tool cannot see the transcript. A body
+  that rung 2 stubbed is no longer present, so a fetch after that delivers
+  it in full again. The trace keeps the real result (§20.3).
+- Applies to every agent-loop run, handlers included: an unattended
+  handler fills its window the same way.
 
 ---
 
@@ -6204,6 +6350,12 @@ stated otherwise. All JSON stored in SQLite is stored as TEXT.
 | Quick note cap (`quick_note_max_chars`) | 2000 chars | §28.7 |
 | Futility streak threshold (`futile_streak_threshold`) | 3 consecutive empty results per namespace | §20.9 |
 | Silent-turn retries (`silent_turn_retries`) | 1 per run | §20.10 |
+| Output reserve (`output_reserve_tokens`) | max(6000, 20% of the window) | §20.11 |
+| Token estimate (`chars_per_token_estimate`) | 3 chars per token, lowered per run to the measured ratio, never raised | §20.11 |
+| Window margin (`window_margin`) | max(256 tokens, 3% of the window) | §20.11 |
+| Minimum output room (`min_output_room`) | 1024 tokens; less after rung 3 → `context_full` | §20.11 |
+| Context-overflow retries (`context_retries`) | 1 per run | §20.11 |
+| Cut-off-output retries (`length_retries`) | 1 per run | §20.11 |
 | Shipped skill size (`shipped_skill_max_chars`) | 8000 chars | G.8 |
 | Watcher minimum cadence (`watch_min_interval_s`) | 300s (create refuses tighter) | §30.3 |
 | Watcher default cadence | 1800s when `every_s` omitted | §30.3 |
@@ -6283,7 +6435,8 @@ the migration runner applies numbered migrations from the service binary.
 
 ```sql
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
--- rows: ('db_version', '1')
+-- rows: ('db_version', '1'),
+--       ('observed_context_size:<endpoint name>', '{"size":<int>,"configured":<int|null>}')   -- §20.11, learned; dropped when G.2 context_size changes
 
 CREATE TABLE events (
   id                TEXT PRIMARY KEY,            -- ULID
@@ -6572,7 +6725,11 @@ default.
   offending text as the model wrote it (before any strip), truncated to
   1000 chars like `result_excerpt` and dropped by the same retention job
   (C.2); the silent-turn nudge (§20.10) adds `{outcome: "nudged"|"gave_up",
-  reasoning_chars: int}` to a row whose `message` is `silent_turn`
+  reasoning_chars: int}` to a row whose `message` is `silent_turn`; the
+  window budget (§20.11) writes rows whose `message` is `compacted`
+  (`{rung: 1|2|3, estimate_before, estimate_after, window}`),
+  `context_overflow` (`{limit, outcome: "retried"|"gave_up"}`) or
+  `output_cut` (`{tokens_out, outcome: "retried"|"gave_up"}`)
 
 ### C.2 Behavioral notes
 
@@ -7188,7 +7345,7 @@ the result so answers can carry it. No activation required
 
 | tool | tier | args | returns |
 |---|---|---|---|
-| `tools.open` | ro | `{namespace: string}` | `{opened, tools: [names], skill?: {name, content, note}}` or `{error: "unknown_namespace", available: [...], unavailable?: [{name, status: "dropped"\|"needs_auth"}], message?}` or `{error: "namespace_unavailable", name, status, message}` — when a skill named exactly like the namespace exists, its **full body rides the open result**: "read the skill first" was demonstrably skipped, and a rule the model must remember loses to a body it cannot fail to see. Delivered once per conversation by construction (opens are sticky; the idempotent re-open omits it). `unavailable`/`message` ride the `unknown_namespace` result only when a configured external server is `dropped` or `needs_auth` (§11.6) — a down namespace is not one that doesn't exist, so a guess isn't the model's only move (painpoints X2); naming that server's own name exactly gets the more specific `namespace_unavailable` shape instead of the plain list |
+| `tools.open` | ro | `{namespace: string}` | `{opened, tools: [names], skill?: {name, content, note}, skill_already_loaded?: string}` or `{error: "unknown_namespace", available: [...], unavailable?: [{name, status: "dropped"\|"needs_auth"}], message?}` or `{error: "namespace_unavailable", name, status, message}` — when a skill named exactly like the namespace exists, its **full body rides the open result**: "read the skill first" was demonstrably skipped, and a rule the model must remember loses to a body it cannot fail to see. Delivered once per open (a decayed namespace re-opened gets it again, §21.2), and never twice in one run: when the body is already present in the run's messages the loop drops `skill` and sets `skill_already_loaded` to its name (§20.11). `unavailable`/`message` ride the `unknown_namespace` result only when a configured external server is `dropped` or `needs_auth` (§11.6) — a down namespace is not one that doesn't exist, so a guess isn't the model's only move (painpoints X2); naming that server's own name exactly gets the more specific `namespace_unavailable` shape instead of the plain list |
 
 Not a hub integration: a synthetic definition injected by the
 `PagedDispatcher` wrapper (chat runs only), because it mutates the run's
@@ -7467,6 +7624,7 @@ endpoints:
       out_per_mtok: 15.0
       currency: USD
     efforts: [low, high, xhigh]   # §10.6 — reasoning levels this model honors; omit = knob never sent
+    max_output_tokens: 8192       # §20.11 — optional; the most this endpoint accepts as max_tokens. Omit = no cap beyond the window
   - name: embedding
     kind: embedding                # a vector server (§8.3); takes no classes, caps, efforts or cost
     url: http://localhost:8080     # llama.cpp /embedding endpoint — the server root; a trailing /v1 is tolerated and stripped

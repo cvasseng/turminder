@@ -506,7 +506,11 @@ export class ChatExecutor {
     });
 
     if (failed) {
-      const message = stopped ? 'stopped' : chatFailureMessage(result);
+      // A window stop that said nothing still gets its banner (§20.11): the
+      // bare run error names a number, the banner says what it means.
+      const message = stopped
+        ? 'stopped'
+        : (windowBanner(result) ?? chatFailureMessage(result));
       // Chat failures are reported in-band. A retry an hour later would answer
       // a question the user has long since re-asked, so the event is complete.
       stream.failed({ conversationId: conversation.id, message });
@@ -533,7 +537,8 @@ export class ChatExecutor {
         message:
           result.stopReason === 'error'
             ? `answer cut short — ${chatFailureMessage(result)}`
-            : `answer cut short (${result.stopReason})${
+            : (windowBanner(result) ??
+              `answer cut short (${result.stopReason})${
                 result.stopReason === 'max_tokens'
                   ? ' — raise chat.max_tokens in config/turminder.yaml'
                   : result.stopReason === 'timeout'
@@ -541,7 +546,7 @@ export class ChatExecutor {
                     : result.stopReason === 'stalled'
                       ? ` — nothing arrived from the model for ${config.settings.chatStallS}s; chat.stall_s in config/turminder.yaml sets the limit`
                       : ''
-              }`,
+              }`),
       });
       l.warn(
         {
@@ -557,11 +562,16 @@ export class ChatExecutor {
 
     // What this turn cost, and how full the window is (shown under the input).
     const total = repos.runs.tokensForConversation(conversation.id);
-    let contextSize: number | null = null;
-    try {
-      contextSize = gateway.router.resolve(selector).endpoint.contextSize ?? null;
-    } catch {
-      /* the endpoint went away between the run and now; not worth failing over */
+    // The effective window (§20.11): what the run budgeted against, else what
+    // is known about the endpoint now — observed beats configured.
+    let contextSize: number | null = result.contextWindow ?? null;
+    if (contextSize === null) {
+      try {
+        const served = gateway.router.resolve(selector).endpoint;
+        contextSize = gateway.contextWindow(served) ?? null;
+      } catch {
+        /* the endpoint went away between the run and now; not worth failing over */
+      }
     }
     // The ledger is a query over stamped rows (§10.5), so "what did this cost"
     // is answered from the same numbers the trace shows, not a running total
@@ -661,6 +671,23 @@ export class ChatExecutor {
       repos.runs.finish(runId, { status: 'failed', error: errMessage(e) });
     }
   }
+}
+
+/**
+ * The §20.11 banners — verbatim, and the spec moves with them. `null` for any
+ * stop that is not the window's.
+ */
+export function windowBanner(
+  result: Pick<AgentRunResult, 'stopReason' | 'contextWindow'>,
+): string | null {
+  const w = result.contextWindow;
+  if (result.stopReason === 'context_full') {
+    return `answer cut short (context full) — this run's working set no longer fits the model's ${w}-token window`;
+  }
+  if (result.stopReason === 'output_cut') {
+    return `answer cut short (output cut off) — the model's answer ran into its ${w ? `${w}-token ` : ''}window twice`;
+  }
+  return null;
 }
 
 /**

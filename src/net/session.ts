@@ -799,12 +799,17 @@ export class ChannelSession {
         // Which one would serve this conversation right now — the honest
         // answer to "what am I talking to", override or not.
         const serving = this.servingEndpoint(override)?.name ?? null;
+        // The effective window (§20.11): what the endpoint was observed to
+        // serve beats what models.yaml says, because the server said so.
+        const gateway = this.service.modelStack?.gateway;
+        const contextSize = (e: (typeof endpoints)[number]) =>
+          gateway ? gateway.contextWindow(e) : e.contextSize;
         this.send('models.list.result', {
           endpoints: endpoints.map((e) => ({
             name: e.name,
             classes: e.classes,
             caps: e.caps,
-            ...(e.contextSize ? { context_size: e.contextSize } : {}),
+            ...(contextSize(e) ? { context_size: contextSize(e) } : {}),
             ...(e.efforts ? { efforts: e.efforts } : {}),
             ...(e.cost && 'inPerMtok' in e.cost
               ? {

@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
 import { bootstrap } from '../app.js';
+import { MetaRepo } from '../db/repos/meta.js';
 import { requireModelStack } from '../model/index.js';
 import { runAgent } from '../model/agent-loop.js';
 import { MemoryTraceSink, type ModelSelector, type Priority } from '../model/types.js';
@@ -45,7 +46,12 @@ export function registerAskCommand(program: Command): void {
           );
         }
 
-        const { gateway } = requireModelStack(app.config);
+        // The same observed windows every other caller budgets against
+        // (§20.11) — a measurement in `meta`, never a config edit.
+        const meta = new MetaRepo(app.db);
+        const { gateway } = requireModelStack(app.config, {
+          observedContext: meta.observedContextStore(),
+        });
         if (opts.endpoint && !gateway.router.byName(opts.endpoint, 'chat')) {
           throw new UserFacingError('bad_option', `no chat endpoint named "${opts.endpoint}"`);
         }

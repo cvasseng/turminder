@@ -13,6 +13,7 @@ import { createPipeline } from './ingress/pipeline.js';
 import { createModelStack, type ModelStack } from './model/index.js';
 import { InferenceScheduler } from './model/scheduler.js';
 import type { GatewayOptions } from './model/gateway.js';
+import { observeServedContext } from './model/probe.js';
 import { ToolHub, type HubClock } from './tools/hub.js';
 import { SkillLoader } from './tools/skills.js';
 import { MemoryStore } from './memory/store.js';
@@ -103,6 +104,13 @@ export interface ServiceOptions {
    * they scripted for their own turn.
    */
   greetOnStart?: boolean;
+  /**
+   * Run the context half of the §10.7 startup drift check (§20.11). Off by
+   * default and on for the serving process: the CLI commands that build a
+   * Service for one job would otherwise each wait, at stop, on a request to
+   * every model endpoint — and an unreachable one holds that for its timeout.
+   */
+  observeContextOnStart?: boolean;
 }
 
 /**
@@ -242,7 +250,7 @@ export class Service {
       store: this.uploads,
       ttlDays: () => this.app.config.settings.uploadTtlDays,
     });
-    this.models = createModelStack(app.config, opts.gateway ?? {});
+    this.models = createModelStack(app.config, this.gatewayOptions());
 
     const pipeline: EventProcessor =
       opts.processor ??
@@ -448,10 +456,23 @@ export class Service {
     return this.toolHub;
   }
 
+  /**
+   * The model stack's options, with the `meta`-backed store of observed
+   * context sizes (§20.11) — held by the gateway, so every call any caller
+   * makes budgets against the same measurement and teaches it.
+   */
+  private gatewayOptions(): GatewayOptions {
+    const meta = this.repos.meta;
+    return {
+      ...this.opts.gateway,
+      observedContext: meta.observedContextStore(),
+    };
+  }
+
   /** Rebuild the model stack after setup writes config/models.yaml. */
   loadModels(): boolean {
     this.app.config.reload();
-    this.models = createModelStack(this.app.config, this.opts.gateway ?? {});
+    this.models = createModelStack(this.app.config, this.gatewayOptions());
     this.chatExecutor = null;
     this.distillExecutor = null;
     this.ingressAgent = null;
@@ -546,6 +567,21 @@ export class Service {
   }
 
   async start(): Promise<void> {
+    /*
+     * The context half of the §10.7 startup drift check: one `GET /v1/models`
+     * per chat endpoint, and a served length it reports is recorded as the
+     * endpoint's observed window (§20.11) — a measurement in `meta`, never an
+     * edit to models.yaml. Fire-and-forget: startup never waits on a model
+     * server, and one that does not answer is not drift.
+     */
+    const models = this.models;
+    const observed = models?.gateway.observedContext;
+    if (models && observed && this.opts.observeContextOnStart) {
+      const fetch = this.opts.gateway?.fetch;
+      this.background.run('models:observed-context', () =>
+        observeServedContext(models.router.chatEndpoints(), observed, fetch ? { fetch } : {}),
+      );
+    }
     // RAG and memory come up before the tool hub, because the memory
     // integration is one of the tools it serves.
     const embeddingCfg = this.models?.router.embedding() ?? null;

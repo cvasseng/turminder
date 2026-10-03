@@ -1,16 +1,28 @@
-import type { ModelMessage } from 'ai';
+import type { ModelMessage, ToolSet } from 'ai';
 import { log } from '../core/logger.js';
 import { errMessage } from '../core/errors.js';
 import { reservedMarkers, stripReservedMarkers } from '../core/markers.js';
-import { ModelCallError, type JsonSchemaSpec, type ModelGateway } from './gateway.js';
+import {
+  ModelCallError,
+  type JsonSchemaSpec,
+  type ModelGateway,
+  type TurnResult,
+} from './gateway.js';
 import { emptyDispatcher, type DispatchResult, type ToolDispatcher } from './dispatcher.js';
-import { elideStaleResults, stubBulkArgs, type ElisionSettings } from './elide.js';
+import {
+  compactRung,
+  elideStaleResults,
+  stubBulkArgs,
+  type CompactionRung,
+  type ElisionSettings,
+} from './elide.js';
 import {
   nullTraceSink,
   type AgentActivity,
   type Budgets,
   type ModelSelector,
   type Priority,
+  type ResolvedEndpoint,
   type ToolCallTrace,
   type TraceSink,
 } from './types.js';
@@ -77,8 +89,68 @@ const SILENT_TURN_NOTE =
   'nothing happened — reasoning is not seen by anyone. Do what you were ' +
   'working toward now: call the tool, or answer.';
 
+/**
+ * The window budget (§20.11, App. A). The reserve is what the answer gets:
+ * `max(OUTPUT_RESERVE_TOKENS, 20% of W)`, because an output that runs into the
+ * wall is cut mid-sentence or mid-tool-call and nothing in it can be used.
+ */
+const OUTPUT_RESERVE_TOKENS = 6000;
+const OUTPUT_RESERVE_SHARE = 0.2;
+/**
+ * The starting chars-per-token ratio, and its ceiling (App. A): pessimistic,
+ * because an over-estimate costs a compaction and an under-estimate a refused
+ * call. Each call that reports usage re-measures it, never above this — a
+ * server that tokenizes denser is measured rather than guessed.
+ */
+const CHARS_PER_TOKEN = 3;
+/**
+ * `max_tokens = W − estimate − margin`, `margin = max(256, 3% of W)` (App. A
+ * `window_margin`): vllm counts `max_tokens` against the window, so an
+ * estimate a little low must not become a refusal.
+ */
+const WINDOW_MARGIN_MIN = 256;
+const WINDOW_MARGIN_SHARE = 0.03;
+const windowMargin = (w: number) =>
+  Math.max(WINDOW_MARGIN_MIN, Math.ceil(w * WINDOW_MARGIN_SHARE));
+/**
+ * App. A `min_output_room`: less room than this after the last rung, and the
+ * run ends `context_full`.
+ */
+const MIN_OUTPUT_ROOM = 1024;
+/** Length refusals answered by learning, compacting and retrying (App. A). */
+const CONTEXT_RETRIES = 1;
+/** `length` finishes answered by compacting and asking again (App. A). */
+const LENGTH_RETRIES = 1;
+/** §20.4's App. A default, for compaction on a run that passed no elision. */
+const DEFAULT_ELIDE_THRESHOLD_CHARS = 2000;
+
+/**
+ * The cut-off note (§20.11) — this quote IS the shipped text, and the spec and
+ * this string move together, as with §20.8 and §20.10. With the window
+ * unknown there is no honest `<k>`, so that one sentence is left out.
+ */
+function lengthNote(tokensOut: number, room?: number): string {
+  return (
+    `System note: your last output was cut off after ${tokensOut} tokens because the ` +
+    `context window was full, so nothing in it was executed. ` +
+    (room !== undefined ? `${room} tokens of output fit now. ` : '') +
+    `If you were writing something large, put it in one tool call and keep ` +
+    `the prose around it short.`
+  );
+}
+
 export type StopReason =
-  'stop' | 'max_turns' | 'max_tokens' | 'timeout' | 'stalled' | 'aborted' | 'error';
+  | 'stop'
+  | 'max_turns'
+  | 'max_tokens'
+  | 'timeout'
+  | 'stalled'
+  | 'aborted'
+  | 'error'
+  /** The working set no longer fits the window, even compacted (§20.11). */
+  | 'context_full'
+  /** The answer ran into the window twice (§20.11). */
+  | 'output_cut';
 
 export interface AgentRunRequest {
   selector: ModelSelector;
@@ -168,6 +240,11 @@ export interface AgentRunResult {
   stopReason: StopReason;
   error?: string;
   endpoint: string;
+  /**
+   * The effective window the run budgeted against (§20.11): observed, else
+   * configured. Absent when neither is known — and then nothing was budgeted.
+   */
+  contextWindow?: number;
   /** Full transcript including tool calls and results, for debugging/replay. */
   messages: ModelMessage[];
 }
@@ -256,7 +333,12 @@ export async function runAgent(
   // Identical calls seen this run, for the circling backstop (§20.7).
   // Zero-arg calls are exempt: `time.now` twice in a run is time passing,
   // not a model that lost the thread.
-  const repeats = new Map<string, { count: number; output: unknown }>();
+  // `settled` is whether the last two results were identical — the only
+  // condition under which a repeat may be answered from the cache.
+  const repeats = new Map<
+    string,
+    { count: number; output: unknown; ok: boolean; settled: boolean }
+  >();
   /** Writes per (tool, target) — the args minus their bulk content (§20.7). */
   const writes = new Map<string, number>();
   // Fabrication-guard retries spent on the current assistant response (§20.8).
@@ -286,6 +368,38 @@ export async function runAgent(
   let stopReason: StopReason;
   let error: string | undefined;
 
+  /**
+   * The window budget (§20.11). `W` is re-read every turn — observed beats
+   * configured, and a refusal mid-run teaches the run a smaller one — and the
+   * estimate is anchored on what the endpoint last *reported*, so only the
+   * characters added (or compacted away) since are guessed at. The observed
+   * sizes themselves are the gateway's (§20.11: the model stack's, not ours).
+   */
+  let learnedWindow: number | undefined;
+  let contextWindow: number | undefined;
+  let lastCall: { tokensIn: number; chars: number } | null = null;
+  // The run's chars-per-token ratio (§20.11): starts at the default, and
+  // each call that reports usage re-measures it, never above the default.
+  let charsPerToken = CHARS_PER_TOKEN;
+  let contextRetries = 0;
+  let lengthRetries = 0;
+  // The cut turn's `tokens_out`, while a §20.11 note is owed to the next call.
+  let cutTokensOut: number | null = null;
+  // After a refusal or a cut-off output the next call compacts at least once,
+  // even when the arithmetic says it fits: the arithmetic is what just failed.
+  let forceCompaction = false;
+  const compactThreshold = req.elision?.thresholdChars ?? DEFAULT_ELIDE_THRESHOLD_CHARS;
+  const windowFor = (): { ep: ResolvedEndpoint | null; size: number | undefined } => {
+    let ep: ResolvedEndpoint;
+    try {
+      ep = gateway.router.resolve(req.selector).endpoint;
+    } catch {
+      // The gateway will throw the same thing, properly, in a moment.
+      return { ep: null, size: learnedWindow };
+    }
+    return { ep, size: learnedWindow ?? gateway.contextWindow(ep) };
+  };
+
   try {
     for (;;) {
       if (turns >= budgets.maxTurns) {
@@ -305,53 +419,193 @@ export async function runAgent(
         break;
       }
 
-      turns += 1;
       // Before the call, not after: the point is to shrink what this turn sends.
       if (req.elision) {
         const dropped = elideStaleResults(messages, req.elision, neverElide);
-        if (dropped.length) l.debug({ tools: dropped, turn: turns }, 'elided stale results');
+        if (dropped.length)
+          l.debug({ tools: dropped, turn: turns + 1 }, 'elided stale results');
       }
+      const system = typeof req.system === 'function' ? req.system() : req.system;
+      const toolSet = dispatcher.toolSet();
+      const { ep: windowEp, size: W } = windowFor();
+      contextWindow = W;
+      const estimate = () =>
+        estimateTokens(lastCall, requestChars(system, messages, toolSet), charsPerToken);
+      let maxOutputTokens = req.maxOutputTokens;
+      /**
+       * Did the window bound this call's output (§20.11)? Only then is a
+       * `length` finish the window's doing. A cut at a cap the caller or G.2
+       * set below the room is that caller's own budget and behaves as before.
+       */
+      let windowBound = req.maxOutputTokens === undefined;
+      /**
+       * The window is a budget (§20.11). Unknown `W` skips all of this — no
+       * compaction, no `max_tokens` — which is exactly the behaviour before
+       * the budget existed, and the only honest one without a number. (The
+       * `length` rule below is the one part that does not need a number.)
+       */
+      if (W) {
+        let est = estimate();
+        const reserve = Math.max(OUTPUT_RESERVE_TOKENS, Math.ceil(W * OUTPUT_RESERVE_SHARE));
+        const forced = forceCompaction;
+        forceCompaction = false;
+        for (const rung of [1, 2, 3] as CompactionRung[]) {
+          if (est + reserve <= W && !(forced && rung === 1)) break;
+          const before = est;
+          const replaced = compactRung(messages, rung, compactThreshold, neverElide);
+          est = estimate();
+          trace.append('error', {
+            message: 'compacted',
+            rung,
+            estimate_before: before,
+            estimate_after: est,
+            window: W,
+          });
+          l.info({ rung, replaced, before, after: est, window: W }, 'compacted the transcript');
+        }
+        /**
+         * `max_tokens = min(room, G.2 max_output_tokens, the caller's cap)`.
+         * The first two are the endpoint's limits; the caller's is its own
+         * budget — a title has no business with twenty thousand tokens just
+         * because they would fit.
+         */
+        const bound = (room: number) =>
+          Math.min(
+            room,
+            windowEp?.maxOutputTokens ?? Infinity,
+            req.maxOutputTokens ?? Infinity,
+          );
+        let room = W - est - windowMargin(W);
+        if (cutTokensOut !== null) {
+          // Appended at the tail in the user role, like §20.8's correction, so
+          // the prefix is untouched; run-local, never persisted. `<k>` is the
+          // `max_tokens` this call actually sends, measured with the note
+          // itself in the transcript.
+          const note: ModelMessage = {
+            role: 'user',
+            content: lengthNote(cutTokensOut, bound(room)),
+          };
+          messages.push(note);
+          est = estimate();
+          room = W - est - windowMargin(W);
+          note.content = lengthNote(cutTokensOut, bound(room));
+          cutTokensOut = null;
+        }
+        if (room < MIN_OUTPUT_ROOM) {
+          stopReason = 'context_full';
+          error = `context window full: ${est} of ${W} tokens`;
+          break;
+        }
+        maxOutputTokens = bound(room);
+        windowBound = maxOutputTokens === room;
+      } else if (cutTokensOut !== null) {
+        // No window, so nothing to compact against and no room to promise:
+        // the note without its `<k>` sentence, and the same request again.
+        messages.push({ role: 'user', content: lengthNote(cutTokensOut) });
+        cutTokensOut = null;
+      }
+      const sentChars = requestChars(system, messages, toolSet);
+      // Image and file parts cost tokens and no characters: a call carrying
+      // one measures nothing about the tokenizer (§20.11).
+      const measurable = !hasBinaryParts(messages);
+
+      turns += 1;
       req.onActivity?.({ kind: 'thinking', turn: turns });
       streamedThisTurn = '';
-      const turn = await gateway.turn({
-        selector: req.selector,
-        priority: req.priority,
-        system: typeof req.system === 'function' ? req.system() : req.system,
-        messages,
-        tools: dispatcher.toolSet(),
-        trace,
-        abortSignal: controller.signal,
-        ...(req.onDelta
-          ? {
-              onDelta: (t: string) => {
-                streamedThisTurn += t;
-                req.onDelta!(t);
-              },
-            }
-          : {}),
-        // Reasoning is feedback, never content (§20.1): it rides the activity
-        // channel and is not accumulated into anything this loop returns.
-        ...(req.onActivity
-          ? { onReasoning: (text: string) => req.onActivity?.({ kind: 'reasoning', text }) }
-          : {}),
-        ...(req.onActivity
-          ? {
-              onActivity: (activity: AgentActivity) =>
-                req.onActivity?.(
-                  // The gateway does not know which turn it is serving.
-                  activity.kind === 'usage' ? { ...activity, turn: turns } : activity,
-                ),
-            }
-          : {}),
-        ...(req.maxOutputTokens ? { maxOutputTokens: req.maxOutputTokens } : {}),
-        ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
-        ...(req.jsonSchema ? { jsonSchema: req.jsonSchema } : {}),
-        ...(req.grammar ? { grammar: req.grammar } : {}),
-        ...(onProgress ? { onProgress } : {}),
-      });
+      let turn: TurnResult;
+      try {
+        turn = await gateway.turn({
+          selector: req.selector,
+          priority: req.priority,
+          system,
+          messages,
+          tools: toolSet,
+          trace,
+          abortSignal: controller.signal,
+          ...(req.onDelta
+            ? {
+                onDelta: (t: string) => {
+                  streamedThisTurn += t;
+                  req.onDelta!(t);
+                },
+              }
+            : {}),
+          // Reasoning is feedback, never content (§20.1): it rides the activity
+          // channel and is not accumulated into anything this loop returns.
+          ...(req.onActivity
+            ? { onReasoning: (text: string) => req.onActivity?.({ kind: 'reasoning', text }) }
+            : {}),
+          ...(req.onActivity
+            ? {
+                onActivity: (activity: AgentActivity) =>
+                  req.onActivity?.(
+                    // The gateway does not know which turn it is serving, nor
+                    // the window the run is budgeting against (§20.11).
+                    activity.kind === 'usage'
+                      ? { ...activity, turn: turns, ...(W ? { context_size: W } : {}) }
+                      : activity,
+                  ),
+              }
+            : {}),
+          ...(maxOutputTokens ? { maxOutputTokens } : {}),
+          ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+          ...(req.jsonSchema ? { jsonSchema: req.jsonSchema } : {}),
+          ...(req.grammar ? { grammar: req.grammar } : {}),
+          ...(onProgress ? { onProgress } : {}),
+        });
+      } catch (e) {
+        disarmStall();
+        /**
+         * A call refused for length is not a failure (§20.11): the endpoint
+         * just said how big its window is. Recorded as the observed size,
+         * then the next pass compacts against it and asks once more. A
+         * second refusal means the working set does not fit, and the run
+         * says so rather than dying of an HTTP error.
+         */
+        const refused = e instanceof ModelCallError && !controller.signal.aborted ? e : null;
+        const limit = refused?.contextLimit;
+        if (!refused || !limit) throw e;
+        endpoint = refused.endpoint;
+        // The gateway has already recorded it as the observed size.
+        learnedWindow = limit;
+        contextWindow = limit;
+        // A refused call is not a turn: `max_turns` counts calls that
+        // returned, so a one-turn run (ingress) still gets its retry.
+        turns -= 1;
+        // The refusal proves the estimate was low; when it says by how much,
+        // that is the number to measure the rungs from.
+        if (refused.contextPromptTokens) {
+          lastCall = { tokensIn: refused.contextPromptTokens, chars: sentChars };
+          // The server counted this prompt, so it is a measurement too.
+          if (measurable) {
+            charsPerToken = measuredRatio(
+              charsPerToken,
+              sentChars,
+              refused.contextPromptTokens,
+            );
+          }
+        }
+        const retry = contextRetries < CONTEXT_RETRIES;
+        trace.append('error', {
+          message: 'context_overflow',
+          limit,
+          outcome: retry ? 'retried' : 'gave_up',
+        });
+        if (retry) {
+          contextRetries += 1;
+          forceCompaction = true;
+          l.warn({ endpoint, limit }, 'call refused for length; compacting and retrying once');
+          continue;
+        }
+        stopReason = 'context_full';
+        error = `context window full: ${estimateTokens(lastCall, sentChars, charsPerToken)} of ${limit} tokens`;
+        break;
+      }
       // Settled: from here until the next call, nothing the model does is
       // late — tools, forms and confirmations run on their own budgets (§9).
       disarmStall();
+      lastCall = { tokensIn: turn.tokensIn, chars: sentChars };
+      if (measurable) charsPerToken = measuredRatio(charsPerToken, sentChars, turn.tokensIn);
 
       endpoint = turn.endpoint.name;
       tokensIn += turn.tokensIn;
@@ -362,6 +616,46 @@ export async function runAgent(
         billedWithTimings += turn.tokensIn;
       }
       reasoningChars += turn.reasoningChars;
+
+      /**
+       * A `length` finish is never `done` (§20.11). The turn was cut off
+       * mid-output, so its text is unfinished and any tool call it was
+       * writing is incomplete: nothing in it runs, and what it streamed is
+       * taken back. Once per run the loop compacts and asks again with a note
+       * saying what happened and how much fits now; a second cut ends the
+       * run `output_cut`. This holds with the window unknown too — only the
+       * compaction and the room figure need a number. What the cut turn cost
+       * still counts — it was spent.
+       */
+      if (turn.finishReason === 'length' && windowBound) {
+        req.onRetract?.();
+        const retry = lengthRetries < LENGTH_RETRIES;
+        trace.append('error', {
+          message: 'output_cut',
+          tokens_out: turn.tokensOut,
+          outcome: retry ? 'retried' : 'gave_up',
+        });
+        l.warn(
+          {
+            turn: turns,
+            tokens_out: turn.tokensOut,
+            window: W,
+            dropped_calls: turn.toolCalls.length,
+          },
+          retry
+            ? 'output cut off at the window; compacting and asking again'
+            : 'output cut off twice',
+        );
+        if (retry) {
+          lengthRetries += 1;
+          cutTokensOut = turn.tokensOut;
+          forceCompaction = true;
+          continue;
+        }
+        stopReason = 'output_cut';
+        error = 'output cut off at the context window';
+        break;
+      }
 
       /**
        * The fabrication guard (§20.8), on every fresh assistant text before it
@@ -451,15 +745,18 @@ export async function runAgent(
       }
 
       if (valid.length) {
-        const results = [];
+        const results: ToolMessage['content'] = [];
         for (const call of valid) {
           const startedAt = Date.now();
           req.onActivity?.({ kind: 'tool_call', tool: call.toolName, args: call.input });
           // The circling backstop (§20.7): an identical call repeated within a
           // run is a model that lost the thread — usually because the earlier
-          // result was elided. Repeats 2–3 execute but say so; from the 4th,
-          // the cached result is returned without touching the tool, because
-          // by then the upstream answer is not the missing piece.
+          // result was elided. Repeats execute, and say so only when the
+          // answer really is the same as last time: a retry that worked after
+          // a failure must not be told "the answer has not changed"
+          // (2026-10-02). From the 4th, once two results in a row agreed, the
+          // cached result is returned without touching the tool, because by
+          // then the upstream answer is not the missing piece.
           const trivialArgs =
             !call.input ||
             typeof call.input !== 'object' ||
@@ -467,10 +764,11 @@ export async function runAgent(
           const repeatKey = trivialArgs ? null : `${call.toolName} ${stableJson(call.input)}`;
           const seen = repeatKey ? repeats.get(repeatKey) : undefined;
           let outcome: DispatchResult;
-          if (seen && seen.count >= 3) {
+          if (seen && seen.count >= 3 && seen.settled) {
             seen.count += 1;
             outcome = {
-              ok: true,
+              // A cached error is still an error on the trace (§20.7).
+              ok: seen.ok,
               output: {
                 repeated_call: true,
                 note:
@@ -497,17 +795,27 @@ export async function runAgent(
             }
             if (seen) {
               seen.count += 1;
+              const identical = stableJson(outcome.output) === stableJson(seen.output);
+              seen.settled = identical;
               seen.output = outcome.output;
-              outcome = {
-                ...outcome,
-                output: {
-                  repeated_call: true,
-                  note: `identical to your earlier ${call.toolName} call this run — the answer has not changed`,
-                  result: outcome.output,
-                },
-              };
+              seen.ok = outcome.ok;
+              if (identical) {
+                outcome = {
+                  ...outcome,
+                  output: {
+                    repeated_call: true,
+                    note: `identical to your earlier ${call.toolName} call this run — the answer has not changed`,
+                    result: outcome.output,
+                  },
+                };
+              }
             } else if (repeatKey) {
-              repeats.set(repeatKey, { count: 1, output: outcome.output });
+              repeats.set(repeatKey, {
+                count: 1,
+                output: outcome.output,
+                ok: outcome.ok,
+                settled: false,
+              });
             }
           }
           /**
@@ -616,11 +924,24 @@ export async function runAgent(
                 'stored bulk args out of context',
               );
           }
+          /**
+           * A skill body is delivered once per run (§20.11). The tool cannot
+           * see the transcript, so the loop decides: a body already present
+           * and unstubbed — earlier in the run, or earlier in this round —
+           * reaches the model as a pointer to that copy. A body compaction
+           * stubbed is no longer present, so a fetch after that delivers it
+           * in full. The trace above already has the real result.
+           */
+          const delivered = dedupeSkill(
+            call.toolName,
+            outcome.output,
+            loadedSkills([...messages, { role: 'tool', content: results }]),
+          );
           results.push({
             type: 'tool-result' as const,
             toolCallId: call.toolCallId,
             toolName: call.toolName,
-            output: { type: 'json' as const, value: outcome.output as never },
+            output: { type: 'json' as const, value: delivered as never },
           });
         }
         messages.push({ role: 'tool', content: results });
@@ -745,10 +1066,152 @@ export async function runAgent(
     reasoningChars,
     stopReason,
     endpoint,
+    ...(contextWindow ? { contextWindow } : {}),
     messages,
   };
   if (error) result.error = error;
   return result;
+}
+
+type ToolMessage = Extract<ModelMessage, { role: 'tool' }>;
+
+/**
+ * The prompt estimate (§20.11): the previous call's reported `tokens_in` plus
+ * whatever the request has grown (or, after compaction, shrunk) by since, at
+ * the run's chars-per-token ratio. A first call — or one after an endpoint
+ * that reports no usage — has no anchor, so the whole request is estimated.
+ */
+function estimateTokens(
+  last: { tokensIn: number; chars: number } | null,
+  chars: number,
+  ratio: number,
+): number {
+  if (last && last.tokensIn > 0) {
+    const delta = chars - last.chars;
+    // Growth is costed at the (pessimistic) ratio; what compaction removed
+    // is credited at no more than the last request's own average, because
+    // crediting it at the pessimistic ratio would claim more room than it
+    // freed — the one direction where 3 is optimistic.
+    const credit = Math.max(ratio, last.chars / last.tokensIn);
+    return Math.max(0, last.tokensIn + Math.ceil(delta / (delta >= 0 ? ratio : credit)));
+  }
+  return Math.ceil(chars / ratio);
+}
+
+/** Does any message carry an image or file part (§26)? */
+function hasBinaryParts(messages: ModelMessage[]): boolean {
+  return messages.some(
+    (m) =>
+      Array.isArray(m.content) &&
+      (m.content as { type: string }[]).some((p) => p.type === 'image' || p.type === 'file'),
+  );
+}
+
+/**
+ * `min(3, chars ÷ tokens)` (§20.11): the latest measurement, never above the
+ * default. A call that reported no usage measures nothing and leaves it.
+ */
+function measuredRatio(current: number, chars: number, tokens: number): number {
+  if (!(tokens > 0) || !(chars > 0)) return current;
+  return Math.min(CHARS_PER_TOKEN, chars / tokens);
+}
+
+/**
+ * How many characters a request carries: the system prompt, the transcript,
+ * and the tool definitions. Binary parts (§26 image bytes) count as nothing —
+ * serialized they would be an array of every byte, which is not what the
+ * endpoint is sent and would read as a window full of digits.
+ */
+function requestChars(system: string, messages: ModelMessage[], tools: ToolSet): number {
+  let chars = system.length;
+  chars += (
+    JSON.stringify(messages, function (this: Record<string, unknown>, key, value: unknown) {
+      const raw = this[key];
+      return raw instanceof Uint8Array || raw instanceof ArrayBuffer ? '' : value;
+    }) ?? ''
+  ).length;
+  for (const [name, t] of Object.entries(tools)) {
+    const schema = (t as { inputSchema?: { jsonSchema?: unknown } }).inputSchema;
+    let shape = '';
+    try {
+      shape = JSON.stringify(schema?.jsonSchema ?? {}) ?? '';
+    } catch {
+      /* an unserializable schema still costs its name and description */
+    }
+    chars += name.length + (t.description?.length ?? 0) + shape.length;
+  }
+  return chars;
+}
+
+/** The loop's own wrappers (§20.7, §20.9): the real result rides in `result`. */
+function unwrapResult(value: unknown): unknown {
+  let v = value;
+  while (
+    v &&
+    typeof v === 'object' &&
+    !Array.isArray(v) &&
+    'result' in v &&
+    ('repeated_call' in v || 'repeated_write' in v || 'futile_streak' in v)
+  ) {
+    v = (v as { result: unknown }).result;
+  }
+  return v;
+}
+
+function deliveredSkill(
+  tool: string,
+  value: unknown,
+): { name: string; content: string } | null {
+  const v = unwrapResult(value) as Record<string, unknown> | null;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const body = tool === 'skills.fetch' ? v : tool === 'tools.open' ? v.skill : null;
+  if (!body || typeof body !== 'object') return null;
+  const { name, content } = body as { name?: unknown; content?: unknown };
+  return typeof name === 'string' && typeof content === 'string' ? { name, content } : null;
+}
+
+/**
+ * The skills whose full body is in the transcript right now. A stubbed or
+ * elided body is a marker string, so it is not here — which is what lets a
+ * fetch after compaction deliver the body again.
+ */
+function loadedSkills(messages: ModelMessage[]): Set<string> {
+  const names = new Set<string>();
+  for (const m of messages) {
+    if (m.role !== 'tool' || !Array.isArray(m.content)) continue;
+    for (const part of m.content) {
+      if (part.type !== 'tool-result' || part.output?.type !== 'json') continue;
+      const skill = deliveredSkill(part.toolName, part.output.value);
+      if (skill) names.add(skill.name);
+    }
+  }
+  return names;
+}
+
+/**
+ * The transcript form of a result that would deliver a skill body already
+ * loaded (§20.11, F.12): `skills.fetch` becomes a pointer, `tools.open` drops
+ * `skill` and names it instead. Anything else passes through untouched, and
+ * the loop's own wrappers are kept, with the pointer inside.
+ */
+function dedupeSkill(tool: string, output: unknown, loaded: ReadonlySet<string>): unknown {
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return output;
+  const o = output as Record<string, unknown>;
+  if (unwrapResult(o) !== o) {
+    const inner = dedupeSkill(tool, o.result, loaded);
+    return inner === o.result ? output : { ...o, result: inner };
+  }
+  const skill = deliveredSkill(tool, o);
+  if (!skill || !loaded.has(skill.name)) return output;
+  if (tool === 'skills.fetch') {
+    return {
+      name: skill.name,
+      already_loaded: true,
+      note: 'this skill is already in your context above; use that copy',
+    };
+  }
+  const { skill: _dropped, ...rest } = o;
+  return { ...rest, skill_already_loaded: skill.name };
 }
 
 /** Key-order-independent serialization, so "the same call" means the same call. */

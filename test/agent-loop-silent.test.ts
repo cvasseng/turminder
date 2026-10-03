@@ -158,10 +158,12 @@ describe('the silent turn (§20.10)', () => {
   });
 
   it('a turn cut off by length is not a silent turn', async () => {
-    fake.script({ reasoning: 'long', finishReason: 'length' });
+    // A `length` cut is asked again under §20.11's own rule, never nudged as
+    // silent: the second request is the cut-off retry, not the §20.10 note.
+    fake.script({ reasoning: 'long', finishReason: 'length' }, { text: 'done' });
     const trace = new MemoryTraceSink();
     await runAgent(gw, { ...base, trace });
-    expect(fake.requests).toHaveLength(1);
+    expect(fake.requests).toHaveLength(2);
     expect(silentRows(trace)).toEqual([]);
   });
 });

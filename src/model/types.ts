@@ -64,6 +64,8 @@ export interface ResolvedEndpoint {
   classes: ModelClass[];
   caps: ModelCap[];
   contextSize?: number;
+  /** G.2 `max_output_tokens` (§20.11): the most it accepts as `max_tokens`. */
+  maxOutputTokens?: number;
   /** Reasoning levels this endpoint honors (§10.6, G.2); absent = the knob is
    *  never sent to it. */
   efforts?: ModelEffort[];
@@ -161,6 +163,30 @@ export interface Budgets {
    * unattended and keep their single `timeoutS` (§5.4).
    */
   stallS?: number;
+}
+
+/**
+ * Where an endpoint's **observed** context size is kept (§20.11, App. C
+ * `meta` key `observed_context_size:<endpoint>`). A measurement — the server
+ * said so, at startup or in a length refusal — and never a config write
+ * (§10.7): G.2 `context_size` stays the human's decision, and this beats it
+ * only because it is newer evidence about the same server.
+ */
+export interface ObservedContextStore {
+  get(endpoint: string): ObservedContext | null;
+  set(endpoint: string, observed: ObservedContext): void;
+  delete(endpoint: string): void;
+}
+
+/**
+ * One observation, with the G.2 `context_size` it was learned against
+ * (`null` = none configured then). When the configured value changes, the
+ * observation is stale — someone edited the file, perhaps because the server
+ * grew — and is dropped rather than allowed to outvote the edit (§20.11).
+ */
+export interface ObservedContext {
+  size: number;
+  configured: number | null;
 }
 
 /**
